@@ -71,6 +71,12 @@ VIEWS_REL = "front/views/m02_viewcomponents.js"
 REGISTRY_REL = "front/views/components/device-registry.js"
 DEVICES_REL = "front/services/m15_devices.js"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行闭环后**整行移入归档**（本仓规约）⇒ ⇒ 「台账里登记过」= 现台账 + 归档 + 进度归档。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
+
 
 #: ⚠️ **裁决编号空间**（A~N = 14 条）。
 DECISION_LETTERS = [chr(ord("A") + i) for i in range(14)]
@@ -106,6 +112,14 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：视图层已按域拆成多文件 ⇒ ⇒ 整层拼起来再查。"""
+    parts = []
+    for pat in patterns:
+        for f in sorted(REPO_ROOT.glob(pat)):
+            parts.append(f.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +223,7 @@ model = read(MODEL_REL) or ""
 platform = read(PLATFORM_REL) or ""
 types_rs = read(TYPES_REL) or ""
 mirror = read(MIRROR_REL) or ""
-views = read(VIEWS_REL) or ""
+views = read_layer(VIEWS_REL, "front/views/components/*.js", "front/views/app/*.js") or ""
 registry = read(REGISTRY_REL) or ""
 devices_js = read(DEVICES_REL) or ""
 
@@ -224,8 +238,11 @@ for name, want in EXPECT_VERSIONS.items():
     if not m:
         err(f"[版本] 契约层读不到 {name}")
         continue
-    if m.group(1) != want:
-        err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want}")
+        #: ⚠️ 「本批零升版」（值必须等于规格里那个数）是**时点断言**：
+        #:    后续每升一次版就必红。⇒ ⇒ 改成**单调下界**：该批落地的值是地板，
+        #:    升版不红、**回退**才红。
+    if int(m.group(1)) < int(want):
+        err(f"[版本] {name} = {m.group(1)} 低于本批落地的 {want} ⇒ ⇒ 回退了")
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
 
@@ -274,7 +291,9 @@ if facts != list(range(1, 14)):
     err(f"[事实] §1.2 的事实编号 {facts} ≠ F-1 ~ F-13 连续")
 
 # 7f. 台账登记
-ledger = read(LEDGER_REL) or ""
+ledger = (read(LEDGER_REL) or "") + "\n" + "\n".join(
+    read(_r) or "" for _r in LEDGER_ARCHIVE_RELS
+)
 if "D-175" not in ledger:
     err("[台账] 台账里没有 D-175")
 if "STAGE-43" not in ledger:
@@ -335,9 +354,21 @@ else:
 
 # --- 9. 零新场景码（裁决 M）------------------------------------------------
 error_rs = read(ERROR_REL) or ""
-for m in re.finditer(r"E_PLT_(\d+)", error_rs):
-    if int(m.group(1)) >= 17:
-        err(f"[零新码] 契约层出现了 E_PLT_{m.group(1)}（本批**不**新增判据 ⇒ ⇒ 零新场景码）")
+#: ⚠️ 「本批不得出现 >= 17 的 E_PLT 码」是**时点断言**：后续批次真的用了 17 号之后
+#:    ⇒ ⇒ 一出现必红，而且判的不是能力。⇒ ⇒ 改判**编号空间的两条活不变式**：
+#:    ① 每个 `E_PLT_<n>_NAME: u16 = <m>;` 里 **n 必须等于 m**（名字与值不许错位）；
+#:    ② **同一个编号不许被两个不同的常量名占用**（允许显式别名 `: u16 = N` 的
+#:       `*_ALIAS` 后缀，别名必须在名字里写明）。
+_plt_pairs = re.findall(r"E_PLT_(\d+)_([A-Z0-9_]+)\s*:\s*u16\s*=\s*(\d+)", error_rs)
+_by_num = {}
+for _num, _name, _val in _plt_pairs:
+    if int(_num) != int(_val):
+        err(f"[零新码] `E_PLT_{_num}_{_name}` 的值写成 {_val} ⇒ ⇒ 编号与值**错位**")
+    _by_num.setdefault(int(_num), set()).add(_name)
+for _num, _names in sorted(_by_num.items()):
+    _real = {n for n in _names if "ALIAS" not in n}
+    if len(_real) > 1:
+        err(f"[零新码] 编号 {_num} 被 {sorted(_real)} 同时占用 ⇒ ⇒ 场景码**重号**")
 
 # ---------------------------------------------------------------------------
 # 结论

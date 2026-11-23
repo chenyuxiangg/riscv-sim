@@ -69,8 +69,10 @@ M13_ISS_REL = "crates/kernel/src/m13_iss/mod.rs"
 M13_EXEC_REL = "crates/kernel/src/m13_iss/executor.rs"
 M17_REL = "crates/kernel/src/m17_backend/mod.rs"
 HOST_REL = "crates/kernel/src/kernel_host/mod.rs"
-VIEWS_REL = "front/views/m02_viewcomponents.js"
+VIEWS_REL = "front/views/components/terminal-panel.js"
 MESSAGE_REL = "front/lib/message.js"
+#: 契约层的版本常量**唯一来源**（7e 用它做镜像对账）
+CONTRACT_REL = "crates/contract/src/lib.rs"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
 
 #: ⚠️ **裁决编号空间**（A~V = 22 条）。
@@ -86,6 +88,15 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+
+def read_layer(rel, *patterns):
+    """判据认「层」不认文件：落点已按域拆成多文件 ⇒ ⇒ 把整层拼起来再查。"""
+    parts = []
+    for pat in (rel,) + patterns:
+        for f in sorted(REPO_ROOT.glob(pat)):
+            parts.append(f.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +277,18 @@ else:
     m = re.search(r"SCHEMA_VERSION\s*=\s*(\d+)", message_src)
     if not m:
         err(f"[版本号] {MESSAGE_REL} 里找不到 `SCHEMA_VERSION`")
-    elif m.group(1) != "8":
-        err(f"[版本号] {MESSAGE_REL} 的 `SCHEMA_VERSION` 是 {m.group(1)}"
-            " ⇒ ⇒ 本批**契约层零升版** ⇒ ⇒ 前端镜像**不许**动")
+    else:
+        # ⚠️ 「本批不许动」（== 8）是**时点断言**：后续批次一升版必红，且它判的
+        #    并不是能力。⇒ ⇒ 改成**单源对账**：前端镜像必须**等于**契约层常量
+        #    （`crates/contract/src/lib.rs` 的 `pub const SCHEMA_VERSION`）⇒ ⇒ 漂了才红。
+        contract_src = read(CONTRACT_REL) or ""
+        cm = re.search(r"pub\s+const\s+SCHEMA_VERSION\s*:\s*u32\s*=\s*(\d+)", contract_src)
+        if not cm:
+            err(f"[版本号] 契约层 {CONTRACT_REL} 里找不到 `pub const SCHEMA_VERSION: u32`"
+                " ⇒ ⇒ 7e 的检查**静默失效** ⇒ ⇒ 必须红")
+        elif m.group(1) != cm.group(1):
+            err(f"[版本号] {MESSAGE_REL} 的 `SCHEMA_VERSION` 是 {m.group(1)}、"
+                f"契约层是 {cm.group(1)} ⇒ ⇒ 前端镜像与契约层**漂了**")
 
 # 7f：四处修法的源码落点
 need(M16_REL, [
@@ -288,13 +308,29 @@ need(M17_REL, [
     "take_last_trap_return",
     "release_active_line",
 ], "M-17 的**接线**没有落点 ⇒ ⇒ M-13 报的事**没人接**")
-need(HOST_REL, [
-    "p.set_pending(wire.source, false);",
-    "clear(IRQ_UART_RX_READY);",
-], "宿主 `sync_interrupts` 的两处修法（第 ② 步撤销 / 第 ③ 步 `None` 分支）**没有落点**")
+#: ⚠️ 宿主侧那两条**具体语句**（`p.set_pending(wire.source, false);` / `clear(IRQ_UART_RX_READY);`）
+#:    已在后续批次重构成「Some 分支抬线 / None 分支撤线」⇒ ⇒ 钉语句只有假红。
+#:    ⇒ ⇒ 改判**活结构**：`sync_interrupts` 里必须**两向都在**（抬线与撤线各一处）。
+_HOST_LAYER = [
+    f for f in sorted((REPO_ROOT / HOST_REL).parent.glob("*.rs"))
+]
+_host_src = "".join(f.read_text(encoding="utf-8") for f in _HOST_LAYER)
+_i = _host_src.find("pub(crate) fn sync_interrupts(&mut self)")
+if _i < 0:
+    err("[落点] 宿主层里找不到 `sync_interrupts` ⇒ ⇒ 判据**静默失效** ⇒ ⇒ 必须红")
+else:
+    #: ⚠️ `sync_interrupts` 是一段长函数（含 1)/1b)/2)/3) 四步）⇒ ⇒ 窗口取到下一个
+    #:    同级文档注释为止；窗口太短会把「撤线」那半截在函数外 ⇒ ⇒ 假红。
+    _i_end = _host_src.find("\n    /// M-16 的**定时器比较值**", _i)
+    _body = _host_src[_i:_i_end] if _i_end > 0 else _host_src[_i:_i + 40000]
+    if "request(" not in _body:
+        err("[落点] `sync_interrupts` 里没有**抬线**（`request(`）⇒ ⇒ 电平语义的正向那半没了")
+    if "clear(IRQ_UART_RX_READY);" not in _body:
+        err("[落点] `sync_interrupts` 里没有**撤线**（`clear(IRQ_UART_RX_READY);`）"
+            " ⇒ ⇒ 第 ③ 步 `None` 分支的修法**没有落点**")
 
 # 7g：前端**行结束符**的四档常量与默认档
-views_src = read(VIEWS_REL)
+views_src = read_layer(VIEWS_REL, "front/views/components/*.js")
 if views_src is None:
     err(f"[落点] 找不到 {VIEWS_REL}")
 else:

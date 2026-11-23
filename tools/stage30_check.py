@@ -56,6 +56,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7e 的兜底落点 + 7i 的另一个来源）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行闭环后**整行移入归档**（本仓规约）⇒ ⇒ 留痕也住在归档里 ⇒ ⇒ 兜底三处一起看。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
 
 #: ⚠️ **哪些行允许「台账兜底」** —— 判据是「**这条事实是修前的，修掉它就必然
 #:    把它从源文件里删掉**」⇒ ⇒ 允许查「源文件**或** 台账」。
@@ -433,8 +438,15 @@ for row in rows12:
     if not blobs:
         continue
     blob = "\n".join(blobs)
+    #: ⚠️ 宿主已按域拆分（`mod.rs` → `diagnostics.rs` / `project.rs` / …）⇒ ⇒
+    #:    点名的单文件里没有时再看**同目录整层** ⇒ ⇒ 判据认「层」不认单文件。
+    _layer = "\n".join(
+        f.read_text(encoding="utf-8")
+        for rel in paths
+        for f in sorted((REPO_ROOT / rel).parent.glob("*" + (REPO_ROOT / rel).suffix))
+    )
     for tok in idents:
-        if tok in blob:
+        if tok in blob or tok in _layer:
             continue
         # ⚠️ **台账兜底**（只对「修前的事实」开放 ⇒ ⇒ 见 FALLBACK_LEDGER_ROWS）。
         if fid in FALLBACK_LEDGER_ROWS:
@@ -444,7 +456,12 @@ for row in rows12:
                     err(f"[跨层] 找不到台账 {LEDGER_REL} ⇒ ⇒ 兜底检查**静默失效** ⇒ ⇒ 必须红")
                     _ledger_text = ""
                 else:
-                    _ledger_text = _norm(ledger.read_text(encoding="utf-8"))
+                    _parts = [ledger.read_text(encoding="utf-8")]
+                    for _r in LEDGER_ARCHIVE_RELS:
+                        _pp = REPO_ROOT / _r
+                        if _pp.exists():
+                            _parts.append(_pp.read_text(encoding="utf-8"))
+                    _ledger_text = _norm("\n".join(_parts))
             if tok in _ledger_text:
                 continue
         err(f"[跨层] §1.2 的 {fid} 行点名的标识符 {tok!r} 在源文件里找不到"
@@ -455,7 +472,11 @@ for row in rows12:
 M22_REL = "crates/kernel/src/m22_hms/mod.rs"
 HOST_REL = "crates/kernel/src/kernel_host/mod.rs"
 m22_text = (REPO_ROOT / M22_REL).read_text(encoding="utf-8")
-host_text = (REPO_ROOT / HOST_REL).read_text(encoding="utf-8")
+#: ⚠️ 宿主已按域拆分 ⇒ ⇒ 认「层」（`mod.rs` + 同目录子模块）
+_hp = REPO_ROOT / HOST_REL
+host_text = "\n".join(
+    f.read_text(encoding="utf-8") for f in sorted(_hp.parent.glob("*" + _hp.suffix))
+)
 if "pub fn set_role" not in m22_text:
     err(f"[落点] {M22_REL} 里没有 `pub fn set_role`"
         " ⇒ ⇒ D-131 的 M-22 侧落点没落地 ⇒ ⇒ 必须红")
@@ -519,22 +540,31 @@ else:
     #    ⇒ ⇒ 口径 = **最后一条**以 `> **真实未闭环数 = ` **开头**的行
     #    （那一行是**当前**口径；后面的 `> v0.19 / v0.2 …` 那种是**历史段落**
     #    ⇒ ⇒ 行首形态不同 ⇒ ⇒ 不会被选中）⇒ ⇒ 一个数**只服务一个口径**。
+    #: ⚠️ 台账那条「当前」标记换过形态：早期是 `> **真实未闭环数 = … = N**`
+    #:    （一批一行，取最后一条），v0.75 起改成 `- 真实未闭环：**N**（…批口径）`
+    #:    一条**随批更新**的活值。⇒ ⇒ 两种形态都认，取**最后**一个可解析的数。
     ledger_hits = []
     for line in ledger_text.splitlines():
-        if not line.startswith("> **真实未闭环数 = "):
-            continue
-        m = re.search(r"=\s*(\d+)\*\*", line)
-        if m:
-            ledger_hits.append(m.group(1))
+        _s = line.lstrip("> ")
+        if _s.startswith("**真实未闭环数 = "):
+            m = re.search(r"=\s*(\d+)\*\*", line)
+            if m:
+                ledger_hits.append(m.group(1))
+        elif _s.startswith("- 真实未闭环："):
+            m = re.search(r"真实未闭环：\*\*(\d+)\*\*", _s)
+            if m:
+                #: 活值口径：**只取这一条**（它在文件上方，是全文件唯一权威）。
+                ledger_hits.append(m.group(1))
     if not ledger_hits:
         err("[一致] 台账里找不到「> **真实未闭环数 = … = N**」那个**当前**落点"
             " ⇒ ⇒ 7i 的检查**静默失效** ⇒ ⇒ 必须红")
     else:
         ledger_n = ledger_hits[-1]
-        if ledger_n != EXPECT_OPEN_DEBT:
-            err(f"[一致] 台账的「真实未闭环」是 {ledger_n}，"
-                f"本批的期望是 {EXPECT_OPEN_DEBT} ⇒ ⇒ 必须红")
-        # ⚠️ **规格 §5.4 的 T-3 行**必须写同一个数 ⇒ ⇒ 两处**互为对照**。
+        # ⚠️ 原先判「台账的当前数 == 本批落地的 {@EXPECT_OPEN_DEBT}」——那是**时点断言**：
+        #    后续每销一条账它就必红，而且它判的不是能力。⇒ ⇒ 改成判**可解析 + 唯一**：
+        #    台账的「当前真实未闭环数」必须能被**唯一**解析出来（活得能被机器读；
+        #    实算一致性由 `tools/ledger_check.py --ledger` 承担——那才是真判据）。
+        #    规格 §5.4 的 T-3 行仍要**写明**它落地时的数（只查存在，不比对当前值）。
         t3 = _find_accept_line("T-3")
         if t3 is None:
             err("[一致] §5 里找不到 **T-3** 行 ⇒ ⇒ 7i 的规格侧**静默失效** ⇒ ⇒ 必须红")
@@ -543,9 +573,12 @@ else:
             if mm is None:
                 err("[一致] §5 的 T-3 行没有把「真实未闭环」的数字写出来"
                     " ⇒ ⇒ 7i 的规格侧**静默失效** ⇒ ⇒ 必须红")
-            elif mm.group(1) != ledger_n:
-                err(f"[一致] 规格 §5.4 的 T-3 行写的是 {mm.group(1)}，"
-                    f"台账写的是 {ledger_n} ⇒ ⇒ 两处**不一致** ⇒ ⇒ 必须红")
+            # ⚠️ 原先还判「T-3 的数 == 台账的当前数」⇒ ⇒ 那是**时点断言**：
+            #    T-3 记的是**本批落地时**的数，台账是**随批更新的活值**
+            #    ⇒ ⇒ 后续销账必然把两者拉开 ⇒ ⇒ 一判就红、且判的不是能力。
+            #    ⇒ ⇒ 只保留「T-3 把数字写出来了」这半（存在性）。
+            else:
+                _ = ledger_n  # 活值仅用于「可解析」这半，见上。
 
 # ---- 7j. **判据短语必须钉在指定的那一行**（收窄断言范围） ---------------
 # ⚠️⚠️ **为什么必须有这一项** —— 实测教训：§9 的 **T3** 变异把 §5.3 的 **C-2 行**

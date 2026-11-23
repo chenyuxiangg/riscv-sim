@@ -59,6 +59,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7e 的兜底落点）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行闭环后**整行移入归档**（本仓规约）⇒ ⇒ 「留痕」也住在归档里；
+#: 逐版本的批次记录在进度归档里。⇒ ⇒ 兜底必须三处一起看。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
 
 #: ⚠️ **哪些行允许「台账兜底」** —— 判据是「**这条事实是修前的，修掉它就必然
 #:    把它从源文件里删掉**」⇒ ⇒ 允许查「源文件**或** 台账」。
@@ -450,8 +456,20 @@ for row in rows12:
     if not blobs:
         continue
     blob = "\n".join(blobs)
+    #: ⚠️ 点名的源文件里找不到 ⇒ ⇒ 再看**同目录整层**（`kernel_host/mod.rs` 已拆成
+    #:    `mod.rs` + 按域子模块）⇒ ⇒ 判据认「层」不认单文件。
+    layer_blob = None
     for tok in idents:
         if tok in blob:
+            continue
+        if layer_blob is None:
+            chunks = [blob]
+            for rel in paths:
+                _p = REPO_ROOT / rel
+                for sib in sorted(_p.parent.glob("*" + _p.suffix)):
+                    chunks.append(sib.read_text(encoding="utf-8"))
+            layer_blob = "\n".join(chunks)
+        if tok in layer_blob:
             continue
         # ⚠️ **台账兜底**（只对「修前的事实」开放 ⇒ ⇒ 见 FALLBACK_LEDGER_ROWS）。
         if fid in FALLBACK_LEDGER_ROWS:
@@ -461,7 +479,12 @@ for row in rows12:
                     err(f"[跨层] 找不到台账 {LEDGER_REL} ⇒ ⇒ 兜底检查**静默失效** ⇒ ⇒ 必须红")
                     _ledger_text = ""
                 else:
-                    _ledger_text = _norm(ledger.read_text(encoding="utf-8"))
+                    parts = [ledger.read_text(encoding="utf-8")]
+                    for _rel in LEDGER_ARCHIVE_RELS:
+                        _p = REPO_ROOT / _rel
+                        if _p.exists():
+                            parts.append(_p.read_text(encoding="utf-8"))
+                    _ledger_text = _norm("\n".join(parts))
             if tok in _ledger_text:
                 # ⇒ ⇒ 原文在台账的**留痕**里在位 ⇒ ⇒ 这是「修前事实」的**正确落点**。
                 continue
@@ -510,8 +533,19 @@ if _kit.exists():
             err(f"[落地] `DiagnosticKit` 里有**数值型**的时钟字段 {clock_numeric}"
                 " ⇒ ⇒ ⛔ 不许用数值 0 兼职「时钟不可用」")
 
-if _host.exists():
-    host_txt = _host.read_text(encoding="utf-8")
+#: ⚠️ 宿主已按域拆分 ⇒ ⇒ `judge_window` 现在住在 `kernel_host/execute.rs`
+#:    ⇒ ⇒ 判据认「层」不认单文件（否则 7f-② 静默失效）。
+_host_layer = (
+    "\n".join(
+        f.read_text(encoding="utf-8")
+        for f in sorted(_host.parent.glob("*.rs")) + [_host]
+    )
+    if _host.exists()
+    else ""
+)
+
+if _host_layer.strip():
+    host_txt = _host_layer
     # ---- 7f-② `judge_window` 改走 `classify_window_with_clock` ----
     jm = re.search(r"(?s)fn\s+judge_window\b.*?\n\}", host_txt)
     if jm is None:

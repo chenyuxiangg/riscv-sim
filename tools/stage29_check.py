@@ -67,6 +67,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7e 的兜底落点）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行闭环后**整行移入归档**（本仓规约）⇒ ⇒ 留痕也住在归档里；
+#: 逐版批次记录在进度归档里 ⇒ ⇒ 兜底三处一起看。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
 
 #: ⚠️ **哪些行允许「台账兜底」** —— 判据是「**这条事实是修前的，修掉它就必然
 #:    把它从源文件里删掉**」⇒ ⇒ 允许查「源文件**或** 台账」。
@@ -78,7 +84,12 @@ LEDGER_REL = "docs/reviews/REVIEWS.md"
 #:      ⇒ **两者不可兼得** ⇒ ⇒ 落点由**台账留痕**兜底（D-129 的销账条目里
 #:      **逐字**记着那个修前形态）⇒ ⇒ 而**源文件**里**不许**再留一份
 #:      「为了过检查而存在的注释」⇒ ⇒ 否则那个检查**永远绿着**⇒ ⇒ **零判别力**。
-FALLBACK_LEDGER_ROWS = {"F3", "F7"}
+#: ⚠️ **允许台账/归档兜底的行** = 「**修前**的事实」：改完就必然从源里消失。
+#:    · **F2** 的旧常量名 `E_PLT_16_BRIDGE_INVALID` 已被后续批次**改名**
+#:      （16 号现在是 `E_PLT_16_IRQ_SOURCE_INVALID`）⇒ ⇒ 名字只剩**留痕**。
+#:    · **F3 / F7** = 本批修掉/改写的语句 ⇒ ⇒ 同理。
+#:    ⚠️ 兜底的落点 = 台账 + `REVIEWS-archive.md` + `PROGRESS-history.md`（三处合体）。
+FALLBACK_LEDGER_ROWS = {"F2", "F3", "F7"}
 
 
 def err(msg):
@@ -444,9 +455,39 @@ for row in rows12:
     if not blobs:
         continue
     blob = "\n".join(blobs)
+    #: ⚠️ 宿主已按域拆分 ⇒ ⇒ 点名的单文件里没有时再看**同目录整层**。
+    _first = REPO_ROOT / paths[0]
+    _layer = "\n".join(
+        f.read_text(encoding="utf-8") for f in sorted(_first.parent.glob("*" + _first.suffix))
+    )
     for tok in idents:
-        if tok in blob:
+        #: ⚠️ **版本常量**不能钉全文字面量（每升一次版就变）⇒ ⇒ 改成
+        #:    「常量名在位 + 值**不低于**本批落地值」⇒ ⇒ 升版不红、回退才红。
+        _ver = re.match(r"pub\s+const\s+(\w+)\s*:\s*u32\s*=\s*(\d+)\s*;", tok)
+        if _ver:
+            _name, _floor = _ver.group(1), int(_ver.group(2))
+            _m = re.search(rf"pub\s+const\s+{_name}\s*:\s*u32\s*=\s*(\d+)\s*;", blob)
+            if _m is None:
+                err(f"[跨层] {fid}：契约层没有 `pub const {_name}: u32` ⇒ ⇒ 落点不在位")
+            elif int(_m.group(1)) < _floor:
+                err(f"[跨层] {fid}：`{_name}` 是 {_m.group(1)}，低于本批落地的 {_floor} ⇒ ⇒ 回退了")
             continue
+        if tok in blob or tok in _layer:
+            continue
+        #: ⚠️ **语句类**原文（含调用括号 + 引号字面量）钉整句会被「码表间接化」这类
+        #:    重构打红（例：`throw sessionError("E_CTX-11", "会话不存在")` 现在写成
+        #:    `sessionError(FRONT_ERROR_CODES["E_CTX-11"], "会话不存在")`）。
+        #:    ⇒ ⇒ 判据改成「**特征片段在同一行共现**」：函数名 + 码 + 文案，
+        #:    三个都还得在，只是不再要求**逐字这一句**。
+        if "(" in tok and '"' in tok:
+            _frags = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", tok) + re.findall(r'"(\\[^"]*|[^"]+)"', tok)
+            _hit = any(
+                all(f.strip('"') in line for f in _frags)
+                for line in (_layer or blob).splitlines()
+                if _frags
+            )
+            if _hit:
+                continue
         # ⚠️ **台账兜底**（只对「修前的事实」开放 ⇒ ⇒ 见 FALLBACK_LEDGER_ROWS）。
         if fid in FALLBACK_LEDGER_ROWS:
             if _ledger_text is None:
@@ -455,8 +496,16 @@ for row in rows12:
                     err(f"[跨层] 找不到台账 {LEDGER_REL} ⇒ ⇒ 兜底检查**静默失效** ⇒ ⇒ 必须红")
                     _ledger_text = ""
                 else:
-                    _ledger_text = _norm(ledger.read_text(encoding="utf-8"))
-            if tok in _ledger_text:
+                    _parts = [ledger.read_text(encoding="utf-8")]
+                    for _r in LEDGER_ARCHIVE_RELS:
+                        _pp = REPO_ROOT / _r
+                        if _pp.exists():
+                            _parts.append(_pp.read_text(encoding="utf-8"))
+                    _ledger_text = _norm("\n".join(_parts))
+            #: ⚠️ 规格里引用的原文常带前缀（`pub const X` / `pub fn X`），
+            #:    而台账/归档只记**名字** ⇒ ⇒ 两种写法都认。
+            _bare = re.sub(r"^pub\s+(?:const|fn|struct|enum|use)\s+", "", tok)
+            if tok in _ledger_text or _bare in _ledger_text:
                 continue
         err(f"[跨层] {fid} 引用的标识符 {tok} 在它点名的源文件里**逐字找不到**"
             f"（台账兜底也不在位）⇒ ⇒ 规格与实现漂移了")
@@ -528,15 +577,20 @@ else:
     sm = re.search(r"pub const SCHEMA_VERSION:\s*u32\s*=\s*(\d+)\s*;", ltxt)
     if sm is None:
         err("[落地] 契约层的 `SCHEMA_VERSION` 定义没找到 ⇒ ⇒ 7f 检查**静默失效**⇒ ⇒ 必须红")
-    elif sm.group(1) != "8":
-        err(f"[落地] 契约层的 `SCHEMA_VERSION` 是 {sm.group(1)}，本批必须是 8")
+    elif int(sm.group(1)) < 8:
+        # ⚠️ 「本批必须是 8」是**时点断言**（后续批次一升版必红，判的也不是能力）
+        #    ⇒ ⇒ 改成**单调下界**：该批落地的 8 是地板，**回退**才红、升版不红。
+        #    （「再加一条」的语义已被后续批次的历史取代 ⇒ ⇒ 这里只守不回退。）
+        err(f"[落地] 契约层的 `SCHEMA_VERSION` 是 {sm.group(1)}，低于本批落地的 8 ⇒ ⇒ 回退了")
 
 # ---- 7f-② 内核：宿主有 `admin_enabled` 开关 ------------------------------
 _host = REPO_ROOT / _HOST_REL
 if not _host.exists():
     err(f"[落地] 找不到 {_HOST_REL} ⇒ ⇒ 7f 检查**静默失效** ⇒ ⇒ 必须红")
 else:
-    htxt = _host.read_text(encoding="utf-8")
+    htxt = "\n".join(
+        f.read_text(encoding="utf-8") for f in sorted(_host.parent.glob("*.rs"))
+    )
     if not re.search(r"\badmin_enabled\b", htxt):
         err("[落地] 宿主没有 `admin_enabled` 开关 ⇒ ⇒ 裁决 G 的落点不在位")
 
@@ -555,8 +609,14 @@ else:
     fsm = re.search(r"export const SCHEMA_VERSION\s*=\s*(\d+)\s*;", ftxt)
     if fsm is None:
         err("[落地] 前端镜像的 `SCHEMA_VERSION` 定义没找到 ⇒ ⇒ 7f 检查**静默失效**⇒ ⇒ 必须红")
-    elif fsm.group(1) != "8":
-        err(f"[落地] 前端镜像的 `SCHEMA_VERSION` 是 {fsm.group(1)}，本批必须是 8")
+    else:
+        # ⚠️ 时点断言（== 8）⇒ ⇒ 改成**单源对账**：镜像必须**等于**契约层。
+        _cm = re.search(r"pub const SCHEMA_VERSION:\s*u32\s*=\s*(\d+)\s*;", ltxt)
+        if _cm is None:
+            err("[落地] 契约层的 `SCHEMA_VERSION` 副本没找到 ⇒ ⇒ 7f-③ 的镜像对账**静默失效**")
+        elif fsm.group(1) != _cm.group(1):
+            err(f"[落地] 前端镜像的 `SCHEMA_VERSION` 是 {fsm.group(1)}、契约层是 {_cm.group(1)}"
+                " ⇒ ⇒ 镜像与契约层**漂了**")
 
 # ---- 7g. 场景码落位的落点必须在位 ----------------------------------------
 # ---- 7g-① `error_families!` 的族数必须仍是 15（**加码不加族**）------------
