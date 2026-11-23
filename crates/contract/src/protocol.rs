@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, LocalVarInfo, Project, SimState,
-    StackFrame, Symbol, TraceFilter, TraceFormat, TraceSource, WatchExpr, WatchValue, Watchpoint,
-    WaveformHistory, WriteSize,
+    StackFrame, Symbol, TraceFilter, TraceFormat, TraceSource, Watchpoint, WaveformHistory,
+    WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
 use crate::SCHEMA_VERSION;
@@ -184,17 +184,6 @@ pub enum CommandPayload {
     ClearWatchpoint {
         id: u32,
     },
-    /// **新增 / 覆盖**一个观察表达式（契约 v14 · M-08）。
-    ///
-    /// 表达式在**设置时**校验；非法 ⇒ `E_DBG-02`，观察表不变。
-    /// 回执是 [`EventPayload::WatchValues`]（当前全部观察项的值）。
-    SetWatchExpr(WatchExpr),
-    /// 删除一个观察表达式（幂等）。
-    ClearWatchExpr {
-        id: u32,
-    },
-    /// 列出当前观察表达式并立即求值。
-    ListWatchExprs,
     /// Read `size` bytes at `addr` from the simulated memory map.
     ReadMemory {
         addr: u32,
@@ -646,14 +635,6 @@ pub enum EventPayload {
         #[serde(default)]
         truncated: bool,
     },
-    /// **观察表达式的轮询结果**（契约 v14 · M-08）。
-    ///
-    /// 宿主在每次运行 / 单步 / 步过停下后求值一次；`changed` 表示与上一次
-    /// 轮询相比是否变了。表达式的语法错误在**设置时**就拒；这里出现的
-    /// `error` 是**求值期**失败（如观察地址当前未映射）。
-    WatchValues {
-        values: Vec<WatchValue>,
-    },
     /// The simulation hit a breakpoint or watchpoint and paused.
     ///
     /// `trigger_addr`（STAGE-55 批 C）只在**store 边界命中**时出现：
@@ -1062,9 +1043,15 @@ mod tests {
     ///
     /// **v15** adds `HaltReason::StepOver` —— stepOver 的返回地址停点
     /// **不再伪装成用户断点**（`Halted` 的线上标签多一个取值）。
+    ///
+    /// **v18** removes the **观察表达式** half of v14（v0.138 · 用户拍板「删掉，
+    /// 没必要了」）：3 条命令（`SetWatchExpr` / `ClearWatchExpr` /
+    /// `ListWatchExprs`）+ `WatchValues` 事件 + `WatchExpr` / `WatchValue`
+    /// 两个 DTO 全删 ⇒ ⇒ 线上**少 4 个变体 + 2 个 DTO**；
+    /// `StepOver` 与 `HaltReason::StepOver` **一字不动**（v14 的另一半还在用）。
     #[test]
-    fn the_schema_version_is_fifteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 17);
+    fn the_schema_version_is_eighteen() {
+        assert_eq!(crate::SCHEMA_VERSION, 18);
     }
 
     /// **批 C**（STAGE-55）：`Halted` 多一个**可选**的 `trigger_addr`
@@ -1408,8 +1395,9 @@ mod tests {
         let msg = Message::command(8, CommandPayload::Nop);
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
-        // ⚠️ **v17（v0.77 · STAGE-53）**：`SetBudget` 变体退役。
-        assert_eq!(json["schema_version"], 17);
+        // ⚠️ **v17（v0.77 · STAGE-53）**：`SetBudget` 变体退役；
+        //    **v18（v0.138）**：观察表达式整块下线（3 条命令 + 1 条事件）。
+        assert_eq!(json["schema_version"], 18);
     }
 
     // -----------------------------------------------------------------

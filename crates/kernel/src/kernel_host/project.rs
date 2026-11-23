@@ -208,8 +208,6 @@ impl KernelHost {
         //   ⇒ ⇒ **界面在骗人**。
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
-        self.watch_items.clear();
-        self.watch_last.clear();
 
         // ---- 第四步：重建平台 ----
         if let Err(err) = self.rebuild_platform() {
@@ -547,8 +545,6 @@ impl KernelHost {
         // ---- ① 清**运行态**（寄存器 / 事件队列 / 断点 / 观察点）----
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
-        self.watch_items.clear();
-        self.watch_last.clear();
 
         // ---- ② 新会话 ⇒ 订阅全部失效（前端**必须重订**）----
         self.topics.clear();

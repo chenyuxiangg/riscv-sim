@@ -28,8 +28,8 @@ from pathlib import Path
 OUT_DEFAULT = Path("docs/detailed-design/STAGE-55_Breakpoint_Window_Rework.html")
 
 TITLE = "STAGE-55 · 断点窗口重构（三类输入合一 + 观察式条件断点）"
-SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.7"
-VERSION = ("版本 v0.7 · 2026-11-23 · 基线 main 1b62c53（v0.137 地址文法归属订正）"
+SUBTITLE = "RISC-V 仿真平台 · 调试服务层 · 详细设计定稿 v0.8"
+VERSION = ("版本 v0.8 · 2026-11-23 · 基线 main 36fcdc7（v0.138 观察表达式整块下线）"
            "（A→E + CFI + 栈回溯 + 真相候选列表 + 断点恢复放过 + 符号联想 已合入）"
            "· 输入方式按 kind 三值落库 · CFI / 栈回溯口径见 §12 · "
            "局部变量候选列表见 §13 · 恢复放过与符号联想见 §14 · 偏离见 §11")
@@ -82,13 +82,15 @@ SECTIONS.append({
         }),
         ("callout", "另外修正一处表述",
          "v0.1 把 <code>[x1+8]</code> / <code>@x1+8</code> 写成「新造文法」。"
-         "这套写法早就在用：<code>WatchTarget::parse</code> 接受 <code>[…]</code>、"
-         "<code>@…</code>、<code>AddressBase</code> + <code>i32</code> 偏移 ⇒ ⇒ "
+         "这套写法早就在用（当时的 <code>WatchTarget::parse</code> 就接受 <code>[…]</code>、"
+         "<code>@…</code>、<code>AddressBase</code> + <code>i32</code> 偏移）⇒ ⇒ "
          "v0.2 的扩展是<b>复用</b>它，不是另造一套。"
-         "<br>v0.137 起这份地址文法的<b>归属变了</b>：原先住在 <code>watch_expr.rs</code>，"
-         "但它只有条件文法在用 ⇒ ⇒ 已并回 <code>cond.rs</code> 的 <code>mod addr</code>，"
-         "条件断点与地址表达式共用同一份，地址解析<b>只有一个落点</b>。",
-         "本文所有「既有实现」指针都指向那里。"),
+         "<br>这份地址文法的<b>归属变过两次</b>：v0.137 从 <code>watch_expr.rs</code> 并回 "
+         "<code>cond.rs</code> 的 <code>mod addr</code>（地址解析只剩一个落点）；"
+         "v0.138 观察表达式<b>整块下线</b>（<code>watch_expr.rs</code> 与 "
+         "<code>WatchTarget</code> 已删，契约 v18 撤掉 3 条命令 + 1 条事件 + 2 个 DTO）"
+         "⇒ ⇒ 现在这份文法<b>只服务条件断点</b>。",
+         "本文所有「既有实现」指针都指向 <code>cond.rs</code> 的 <code>mod addr</code>。"),
     ],
 })
 
@@ -295,7 +297,7 @@ SECTIONS.append({
                 ["寻址 <code>基址 ± 偏移</code>", "<code>AddressBase</code>（寄存器 / pc / 数字）+ "
                  "<code>AddressSpec.offset: i32</code>"
                  "（<code>cond.rs</code> 的 <code>mod addr</code> ⇒ ⇒ v0.137 从 "
-                 "<code>watch_expr.rs</code> 并回，两处文法合一）",
+                 "<code>watch_expr.rs</code> 并回；v0.138 后它是这份文法的唯一落点）",
                  "<b>直接复用</b>；仅给 <code>AddressBase</code> 添一个 <code>Symbol</code> 变体"],
                 ["<code>[…]</code> / <code>@…</code> 双写法", "同上（<code>strip_prefix('[')</code> / <code>'@'</code>）",
                  "<b>直接复用</b>，不新增第三种壳"],
@@ -306,8 +308,9 @@ SECTIONS.append({
             ],
         }),
         ("callout", "一处刻意的分歧",
-         "<code>watch_expr</code> 里<b>裸数字就是内存地址</b>"
-         "（<code>cond.rs</code> 的 <code>mod addr</code> · <code>parse_base_with</code> 的裸数字分支）。"
+         "地址文法里<b>裸数字就是内存地址</b>"
+         "（<code>cond.rs</code> 的 <code>mod addr</code> · <code>parse_base_syntax</code> 的裸数字分支；"
+         "该分支原先也在 <code>watch_expr</code> 里存在过，已随 v0.138 一并删除）。"
          "条件文法里<b>不能</b>这样——<code>0x1000</code> 必须是比较对象，不能变成「读 0x1000」。"
          "所以条件文法中裸数字恒为字面常量，读内存必须显式写 <code>[…]</code> 或 <code>@…</code>。"
          "这是两套文法各自的语义，需在文档里钉住，避免实现时误抄。"),
@@ -1239,10 +1242,12 @@ def build(nav: str, body: str) -> str:
 {body}
 <p class="foot">本文件由 <b>tools/build_bp_rework_doc.py</b> 数据驱动生成；改内容请改脚本后重跑，
 不要手改 HTML。本文为设计定稿（v0.7）：A→E + CFI + 栈回溯 + 真相候选列表 + 断点恢复放过 + 符号联想
-均已落地并合入 main（基线 1b62c53），文中「测试设计」列的用例、§12 / §13 / §14 的用例已在内核 / 前端用例中实现。
-v0.7 只订正一处<b>归属</b>：地址文法（<code>AddressBase</code> / <code>AddressSpec</code> /
-<code>parse_address_syntax</code>）已于 v0.137 从 <code>watch_expr.rs</code> 并回
-<code>cond.rs</code> 的 <code>mod addr</code> —— 文中所有「既有实现」指针随之改指，语义与文法口径不变。</p>
+均已落地并合入 main（基线 36fcdc7），文中「测试设计」列的用例、§12 / §13 / §14 的用例已在内核 / 前端用例中实现。
+v0.7 订正地址文法的<b>归属</b>（v0.137 从 <code>watch_expr.rs</code> 并回 <code>cond.rs</code> 的 <code>mod addr</code>）；
+v0.8 记录<b>观察表达式整块下线</b>（v0.138：<code>watch_expr.rs</code> / <code>WatchTarget</code> 删除，
+契约 v18 撤掉 <code>SetWatchExpr</code> / <code>ClearWatchExpr</code> / <code>ListWatchExprs</code> +
+<code>WatchValues</code> + <code>WatchExpr</code> / <code>WatchValue</code>）—— 本文描述的是断点窗口，
+从未依赖那套命令，因此正文断言不变，只有「既有实现」的指针与归属叙述随之收口。</p>
 </div>
 </body>
 </html>

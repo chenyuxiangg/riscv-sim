@@ -75,7 +75,7 @@ describe("契约 v8 · 前端镜像（C-1）", () => {
     test("契约信封版本是 **9**（与契约层同批升版）", () => {
         // ⚠️ **版本字面量随契约升版**（v8 → v9 · STAGE-42 规格 §2.8）⇒ ⇒
         //   这条判据**钉住的是那个确切的数** ⇒ ⇒ 意外的升版 / 漏改都会红。
-        assert.equal(SCHEMA_VERSION, 17, "契约信封版本必须是 17（v16 访问值 · v17 `SetBudget` 退役）");
+        assert.equal(SCHEMA_VERSION, 18, "契约信封版本必须是 18（v16 访问值 · v17 `SetBudget` 退役 · v18 观察表达式下线）");
     });
 
     test("两个 admin topic 在表里，且拼写逐字一致", () => {

@@ -148,8 +148,9 @@
 
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
 // ⚠️ **v16**：`TraceEvent` 带访问值；**v17**：`SetBudget` 变体退役
-//   （v0.77 · STAGE-53）⇒ ⇒ 前端镜像跟契约层**同批**。
-export const SCHEMA_VERSION = 17;
+//   （v0.77 · STAGE-53）；**v18**：观察表达式整块下线（v0.138 · 删 3 条命令 +
+//   1 条事件 + 2 个 DTO）⇒ ⇒ 前端镜像跟契约层**同批**。
+export const SCHEMA_VERSION = 18;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -436,8 +437,6 @@ export const EVENT_TOPIC = Object.freeze({
     PlatformTemplate: "platform.template",
     // 契约 v13 新增：内核断点表的查询 / 使能回执。
     Breakpoints: "debug.breakpoints",
-    // 契约 v14 新增：观察表达式轮询回执。
-    WatchValues: "debug.watch",
     // STAGE-55 栈回溯批：栈回溯回执（只读）。
     Backtrace: "debug.backtrace",
     // STAGE-55 真相候选列表批：当前帧局部变量回执（只读）。
@@ -605,12 +604,6 @@ export const Command = Object.freeze({
     setWatchpoint: (watchpoint) => ({ SetWatchpoint: watchpoint }),
     /** `CommandPayload::ClearWatchpoint { id }`. */
     clearWatchpoint: (id) => ({ ClearWatchpoint: { id: Number(id) } }),
-    /** `CommandPayload::SetWatchExpr(WatchExpr)`（契约 v14）. */
-    setWatchExpr: (watchExpr) => ({ SetWatchExpr: watchExpr }),
-    /** `CommandPayload::ClearWatchExpr { id }`（契约 v14）. */
-    clearWatchExpr: (id) => ({ ClearWatchExpr: { id: Number(id) } }),
-    /** `CommandPayload::ListWatchExprs`（契约 v14）. */
-    listWatchExprs: () => "ListWatchExprs",
     /** `CommandPayload::ReadMemory { addr, size }`. */
     readMemory: (addr, size) => ({ ReadMemory: { addr: Number(addr), size } }),
     /** `CommandPayload::WriteMemory { addr, size, value }`. */
@@ -1249,16 +1242,6 @@ export const Event = Object.freeze({
      */
     breakpoints: (breakpoints) => ({
         Breakpoints: { breakpoints: breakpoints ?? [] },
-    }),
-    /**
-     * `EventPayload::WatchValues { values }` — 观察表达式的轮询回执
-     * （契约 v14）。
-     *
-     * @param {Array<object>} values — `WatchValue` 列表
-     * @returns {{WatchValues: {values: Array<object>}}}
-     */
-    watchValues: (values) => ({
-        WatchValues: { values: values ?? [] },
     }),
     /**
      * `EventPayload::Backtrace { frames, truncated }` —— 栈回溯回执

@@ -388,9 +388,6 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.clearBreakpoint(1)),
             variantOf(Command.setWatchpoint({})),
             variantOf(Command.clearWatchpoint(1)),
-            variantOf(Command.setWatchExpr({})),
-            variantOf(Command.clearWatchExpr(1)),
-            variantOf(Command.listWatchExprs()),
             variantOf(Command.readMemory(0, "Word")),
             variantOf(Command.writeMemory(0, "Word", 0)),
             variantOf(Command.readRegisters(0, 1)),
@@ -471,8 +468,6 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.platformTemplate({})),
             // 契约 v13 新增：内核断点表的只读回执。
             variantOf(Event.breakpoints([])),
-            // 契约 v14 新增：观察表达式轮询回执。
-            variantOf(Event.watchValues([])),
             // STAGE-55 栈回溯批：栈回溯回执。
             variantOf(Event.backtrace([], false)),
             // STAGE-55 真相候选列表批：当前帧局部变量回执。
@@ -569,9 +564,6 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 ClearBreakpoint: Command.clearBreakpoint(1),
                 SetWatchpoint: Command.setWatchpoint({}),
                 ClearWatchpoint: Command.clearWatchpoint(1),
-                SetWatchExpr: Command.setWatchExpr({ id: 1, expr: "pc" }),
-                ClearWatchExpr: Command.clearWatchExpr(1),
-                ListWatchExprs: Command.listWatchExprs(),
                 ReadMemory: Command.readMemory(0, "Word"),
                 WriteMemory: Command.writeMemory(0, "Word", 0),
                 ReadRegisters: Command.readRegisters(0, 1),
@@ -659,9 +651,6 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // ⚠️ **契约 v13**（M-08 断点表查询 / 使能批）⇒ ⇒ 字段名
                 //   逐字比对的登记处（`breakpoints`）。
                 Breakpoints: Event.breakpoints([]),
-                // ⚠️ **契约 v14**（stepOver / 观察表达式批）⇒ ⇒ 字段名
-                //   逐字比对的登记处（`values`）。
-                WatchValues: Event.watchValues([]),
                 // ⚠️ **STAGE-55 栈回溯批** ⇒ ⇒ 字段名逐字比对的登记处
                 //   （`frames` / `truncated`）。
                 Backtrace: Event.backtrace([], false),
