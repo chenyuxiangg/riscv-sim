@@ -148,15 +148,31 @@ def contract_value(needle):
     return None
 
 
-for rust_needle, js_needle, expect in [
-    ("PLATFORM_SCHEMA_VERSION: u32 =", "PLATFORM_SCHEMA_VERSION =", "4"),
-    ("SUPPORTED_PLATFORM_SCHEMA_VERSIONS:", "SUPPORTED_PLATFORM_SCHEMA_VERSIONS =", "[1, 2, 3, 4]"),
-    ("PLATFORM_RULES_VERSION: u32 =", "PLATFORM_RULES_VERSION =", "6"),
+# ⚠️ **本批落地值是下界，不是等值**（升版不红、回退才红）：
+#   描述格式 ≥4 · 规则集 ≥6 · 可读版本列表必须**包含** 1..4（存量板档案零风险）。
+def num_of(needle):
+    v = contract_value(needle)
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return None
+
+
+for rust_needle, js_needle, floor in [
+    ("PLATFORM_SCHEMA_VERSION: u32 =", "PLATFORM_SCHEMA_VERSION =", 4),
+    ("PLATFORM_RULES_VERSION: u32 =", "PLATFORM_RULES_VERSION =", 6),
 ]:
     cv = contract_value(rust_needle)
+    n = num_of(rust_needle)
     check(cv is not None, f"契约层找不到 {rust_needle}")
-    if cv:
-        check(expect in cv, f"契约层 {rust_needle} 必须含 {expect}（{cv}）")
+    if n is not None:
+        check(
+            n >= floor,
+            f"契约层 {rust_needle} = {n} **低于**本批落地值 {floor}"
+            f" ⇒ ⇒ 版本被**回退**了（{cv}）",
+        )
     fv = front_value(js_needle)
     check(
         fv is not None,
@@ -167,16 +183,35 @@ for rust_needle, js_needle, expect in [
             cv == fv,
             f"前端镜像 {js_needle} 与契约层不一致：契约 {cv} · 前端 {fv}",
         )
+# ⚠️ 可读版本列表：本批之后**合法扩过**（现在到 6）⇒ ⇒ 判「**包含** 1..4」
+#   （存量板档案零风险），**不判**逐字相等。
+sup = contract_value("SUPPORTED_PLATFORM_SCHEMA_VERSIONS:")
+check(sup is not None, "契约层找不到 SUPPORTED_PLATFORM_SCHEMA_VERSIONS")
+if sup:
+    listed = [int(x) for x in re.findall(r"\d+", sup)]
+    check(
+        all(v in listed for v in (1, 2, 3, 4)),
+        f"可读版本列表 {listed} 里缺 1..4 中的某个 ⇒ ⇒ 存量板档案会被拒",
+    )
+
 # 信封 / 快照不动（声明处：契约 lib.rs / model.rs）。
-for file, needle, expect in [
-    ("crates/contract/src/lib.rs", "SCHEMA_VERSION: u32 =", "11"),
-    ("crates/contract/src/model.rs", "SIM_STATE_SCHEMA_VERSION: u32 =", "2"),
+# ⚠️ 信封 / 快照：**单调下界**（本批之后**别的批合法升版**过 ⇒ ⇒ 不许钉子值）。
+for file, needle, floor in [
+    ("crates/contract/src/lib.rs", "SCHEMA_VERSION: u32 =", 11),
+    ("crates/contract/src/model.rs", "SIM_STATE_SCHEMA_VERSION: u32 =", 2),
 ]:
     txt = (REPO_ROOT / file).read_text(encoding="utf-8")
     vals = [ln.strip() for ln in txt.splitlines() if needle in ln and "=" in ln]
+    nums = []
+    for v in vals:
+        try:
+            nums.append(int(v.split("=")[-1].strip().rstrip(";")))
+        except ValueError:
+            continue
     check(
-        any(expect in v for v in vals),
-        f"{file} 的 {needle} 必须仍是 {expect}（信封/快照不动）",
+        bool(nums) and min(nums) >= floor,
+        f"{file} 的 {needle} = {nums or '?'} **低于**本批落地值 {floor}"
+        " ⇒ ⇒ 版本被**回退**了",
     )
 
 # ---- 5. 新码：E_PLT_20 / E_PLT_21 唯一定义 + 旧码 E_PLT_19 未回退 ----------

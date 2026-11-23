@@ -64,10 +64,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #:    格式版本 / 规则集版本」现在由 **STAGE-49 那一批**的
 #:    `tools/stage49_check.py` 守着（⇒ ⇒ **一个约束一个落点**：每个版本号
 #:    由**最新**那一批的门禁守）。
+#: ⚠️ **单调下界**（**不是**等值）：升版不红、**回退**才红。
 EXPECT_VERSIONS = {
-    "SCHEMA_VERSION": "11",
-    "SIM_STATE_SCHEMA_VERSION": "2",
+    "SCHEMA_VERSION": 11,
+    "SIM_STATE_SCHEMA_VERSION": 2,
 }
+
+#: ⚠️ **本批的能力已整体退役**（v0.77 批：器件连线 → 外设中断号映射）。
+#:    证据：`eccc15c`（契约 `wiring` / `pins` 整块删除）· `16c01a7`（删
+#:    `wiring_report` 与三个 DTO）· `980d9af`（清旧术语与旧字段痕迹）·
+#:    `c0f375b`（前端连线编辑器换成 `irq-editor.js`）。
+#:    ⇒ ⇒ 本批的**跨层锚点 / 理由词表 / 内核门禁 / 前端报告库**随能力一并
+#:    移除（继续判它们只会**永远红**）；**规格文档结构**与**版本不变式**照旧守。
+RETIRED_BY = "v0.77 批（2026-11-10 · eccc15c / 16c01a7 / 980d9af / c0f375b）"
+
+#: ⚠️ **台账三处合体**：闭环即整行移入归档（本仓规约）。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
 
 #: ⚠️ **v0.73 批升过版的那两个**（⇒ ⇒ **不在**上面的期望值里 ⇒ ⇒ ⇒
 #:    7d / 8 / 10 那些检查**只**作用于上面那两个）。
@@ -236,6 +251,8 @@ platform_rs = read(PLATFORM_REL) or ""
 error_rs = read(ERROR_REL) or ""
 host_platform = read(HOST_PLATFORM_REL) or ""
 host_rs = read(HOST_REL) or ""
+host_layer = "\n".join(read(f"crates/kernel/src/kernel_host/{_f.name}") or ""
+                        for _f in (REPO_ROOT / "crates/kernel/src/kernel_host").glob("*.rs"))
 ktest = read(KTEST_REL) or ""
 mirror_js = read(MIRROR_REL) or ""
 wr_lib = read(WRLIB_REL) or ""
@@ -243,9 +260,11 @@ mmap_js = read(MMAP_REL) or ""
 test_js = read(TEST_REL) or ""
 browser = read(BROWSER_REL) or ""
 ledger = read(LEDGER_REL) or ""
+ledger += "\n" + "\n".join(read(_r) or "" for _r in LEDGER_ARCHIVE_RELS)
 prev_test = read(PREV_TEST_REL) or ""
 
-# 7d. 四个版本号（契约层 + 前端镜像）
+# 7d. 版本号：**单调下界**（契约层）+ **单源对账**（前端镜像 vs 契约层实际值）
+actual_versions = {}
 for name, want in EXPECT_VERSIONS.items():
     m = None
     for src_ in (lib, model_rs, protocol_rs, platform_rs):
@@ -255,61 +274,31 @@ for name, want in EXPECT_VERSIONS.items():
     if not m:
         err(f"[版本] 契约层读不到 {name}")
         continue
-    if m.group(1) != want:
-        err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want}")
+    actual_versions[name] = int(m.group(1))
+    if int(m.group(1)) < want:
+        err(f"[版本] {name} = {m.group(1)} **低于**本批落地值 {want}"
+            " ⇒ ⇒ 版本被**回退**了（升版不红、回退才红）")
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
 m2 = re.search(r"SCHEMA_VERSION\s*=\s*['\"]?(\d+)", mirror_js)
 if not m2:
     err("[版本] 前端镜像读不到 `SCHEMA_VERSION`")
-elif m2.group(1) != EXPECT_VERSIONS["SCHEMA_VERSION"]:
+elif "SCHEMA_VERSION" in actual_versions and int(m2.group(1)) != actual_versions["SCHEMA_VERSION"]:
     err(f"[版本] 前端镜像的 SCHEMA_VERSION = {m2.group(1)} ≠ 契约层的 "
-        f"{EXPECT_VERSIONS['SCHEMA_VERSION']} ⇒ ⇒ 两边**不一致**")
+        f"{actual_versions['SCHEMA_VERSION']} ⇒ ⇒ 两边**漂了**")
 
 # 7e. 跨层源码锚点
+#: ⚠️ **本批的连线报告能力已退役**（RETIRED_BY 那里）⇒ ⇒ 那些锚点（`compile_bridge` /
+#:    `BridgeReportDto` / `WireDropReason` / `tests_v072_bridge.rs` /
+#:    `front/lib/bridge-report.js` / `bridgeReport` 真机段）**随之移除**：
+#:    继续判它们只会**永远红**，而它们判的**已经不是**产品行为。
+#: ⚠️ **保留下来的只有「还能用、且确实是本批引入」的那一件**：
+#:    宿主**按 id 索引的器件实例表**（后几批都靠它 ⇒ ⇒ 它一没，接线就断）。
 ANCHORS = [
-    # ⚠️ **实例表**（裁决 A / B）
     (host_platform, "pub struct DeviceInstanceTable"),
     (host_platform, "pub enum DeviceHandle"),
     (host_platform, "pub fn uart(&self, id: &str)"),
     (host_platform, "pub fn plic(&self, id: &str)"),
-    # ⚠️ **连线编译**（裁决 C / D）
-    (host_platform, "pub fn compile_bridge("),
-    (host_platform, "pub struct BridgeCompile"),
-    (host_platform, "fn check_wire("),
-    # ⚠️ **宿主消费实例表**（裁决 E / F）
-    (host_rs, "self.devices.uart(&wire.from_device)"),
-    (host_rs, "self.devices.plic(&wire.to_device)"),
-    (host_rs, "pub fn uart_receive_on("),
-    (host_rs, "bridge_report: self.bridge_report.clone()"),
-    # ⚠️ **契约层的新 DTO**（裁决 G / H）
-    (model_rs, "pub struct BridgeReportDto"),
-    (model_rs, "pub struct DroppedWireDto"),
-    (model_rs, "pub enum WireDropReason"),
-    (protocol_rs, "bridge_report: crate::model::BridgeReportDto"),
-    # ⚠️ **内核的门禁**（K-1 ~ K-13）
-    (ktest, "fn k1_the_second_uarts_wire_really_carries_the_interrupt"),
-    (ktest, "fn k2_the_control_a_gpio_source_cannot_be_raised"),
-    (ktest, "fn k3_the_default_bridge_still_claims_source_10"),
-    (ktest, "fn k4_a_shadowed_wire_is_replaced_not_appended"),
-    (ktest, "fn k5_a_wire_to_a_missing_device_is_rejected"),
-    (ktest, "fn k6_on_a_valid_description_only_two_reasons_are_reachable"),
-    (ktest, "fn k7_a_shadowed_wire_is_reported_as_overridden"),
-    (ktest, "fn k9_the_report_is_recomputed_when_the_board_changes"),
-    (ktest, "fn k11_the_four_fallback_reasons_are_still_reachable"),
-    (ktest, "fn k12_every_real_report_keeps_the_identity"),
-    (ktest, "fn k13_the_host_really_holds_a_handle_for_the_second_uart"),
-    # ⚠️ **前端那几条**（N-1 ~ N-4）
-    (wr_lib, "export function normalizeBridgeReport"),
-    (wr_lib, "export function wireDropReasonLabel"),
-    (wr_lib, "export function describeBridgeReport"),
-    (mmap_js, "export function renderBridgeReport"),
-    (test_js, "N-1"),
-    (test_js, "N-2"),
-    (test_js, "N-3"),
-    (test_js, "N-4"),
-    # ⚠️ **真机段**（B-146 ~ B-150）
-    (browser, "bridgeReport"),
 ]
 for src_, needle in ANCHORS:
     if src_ is None:
@@ -359,49 +348,22 @@ else:
                 err(f"[订正] T-{tid} 的实测红集是空的 ⇒ ⇒ 那条变异零判别力"
                     f"（⇒ ⇒ 若它**确实不成立**，必须在规格里**明写**「零红 / 不成立」）")
 
-# --- 9. 理由词表：恰好 6 个 + 线上形态 + **不是场景码** ---------------------
-if "pub enum WireDropReason" not in model_rs:
-    err("[词表] 契约层没有 `WireDropReason`")
-else:
-    variants = re.findall(r"^\s{4}([A-Z][A-Za-z]+),$", model_rs, re.M)
-    # ⚠️ **只数 WireDropReason 那段**（枚举体到下一个 `}`）。
-    seg = model_rs.split("pub enum WireDropReason", 1)[1]
-    seg = seg.split("\n}", 1)[0]
-    names = re.findall(r"^\s{4}([A-Z][A-Za-z]+),$", seg, re.M)
-    if len(names) != len(EXPECT_REASONS):
-        err(f"[词表] 理由词表有 {len(names)} 个值（{names}）⇒ ≠ 规格的 "
-            f"{len(EXPECT_REASONS)} 个")
-for reason in EXPECT_REASONS:
-    if reason not in text:
-        err(f"[词表] 规格里没有写理由词 `{reason}`")
-    if reason not in wr_lib:
-        err(f"[词表] 前端镜像里没有 `{reason}` ⇒ ⇒ 界面**显示不出来**")
-    if reason not in ktest:
-        err(f"[词表] 内核门禁里没有 `{reason}` ⇒ ⇒ 那条理由**没人测**")
-if "WireDropReason" in error_rs:
-    err("[词表] `error.rs` 里出现了 `WireDropReason` ⇒ ⇒ 理由词被当成了"
-        "**场景码** ⇒ ⇒ 本批**零新场景码**这条被破坏了")
-# ⚠️ ⚠️ **不要**断言「`E_PLT_18` 不存在」—— 那是一条**批次局部**的性质
-#   （「**本批**零新场景码」）⇒ ⇒ **后续批次**（v0.73 · STAGE-49）**合法地**
-#   新增了 `E_PLT_18`（角色声明）/ `E_PLT_19`（引脚表）⇒ ⇒ ⇒ 那条断言会**误红**
-#   ⇒ ⇒ ⇒ **判据必须是「不随批次失效的那条性质」** ⇒ ⇒ 这里查的是：
-#   **理由词表的值没有变成场景码**（`source-unknown` 那种词**不许**出现在
-#   `error.rs` 里）⇒ ⇒ ⇒ 这条**永远成立**。
+# --- 9. 理由词表 —— **已随能力退役**（见 7e 的 RETIRED_BY）-----------------
+# ⚠️ `WireDropReason` 的 6 个理由、三个 DTO、前端报告库都在 v0.77 批删掉了
+#   ⇒ ⇒ 这一节**不再断言**「词表有几个值 / 界面显示得出来 / 内核门禁测过」
+#   ⇒ ⇒ 那几条判据的对象**已经不存在**。
+# ⚠️ **仍然成立的那条**（与能力无关、只关于编号空间）：理由词是**词表**、
+#   不是**场景码** ⇒ ⇒ 任何一条理由词都不许出现在 `error.rs` 里。
 for reason in EXPECT_REASONS:
     if reason in error_rs:
         err(f"[词表] `error.rs` 里出现了理由词 `{reason}` ⇒ ⇒ 理由词被当成了"
             "**场景码** ⇒ ⇒ 一码两义 ⇒ 禁止")
-# ⚠️ **下一批（v0.73）的两个新码**是**合法**的（各有唯一定义处）⇒ ⇒ 这里只查
-#   它们**没有被定义成 `E_PLT_16` 的别名**（那才是「一码两义」）。
-for new_code in ("E_PLT_18_ROLES_INVALID", "E_PLT_19_PINS_INVALID"):
-    if re.search(rf"pub const {new_code}[^=]*=\s*E_PLT_16", error_rs):
-        err(f"[新码] `{new_code}` 被定义成 `E_PLT_16` 的别名 ⇒ ⇒ 一码两义")
 
 # --- 10. 上一批的破坏性改动没有被回退（STAGE-47）------------------------------
 if "E_PLT_17_BOARD_MISMATCH" not in error_rs:
     err("[回退] 契约层没有 `E_PLT_17_BOARD_MISMATCH` ⇒ ⇒ 上一批（STAGE-47）"
         "那个场景码**被回退了**")
-if "E_PLT_17_BOARD_MISMATCH" not in host_rs:
+if "E_PLT_17_BOARD_MISMATCH" not in host_layer:
     err("[回退] 内核侧没有引用 `E_PLT_17_BOARD_MISMATCH` ⇒ ⇒ 上一批那个判定"
         "**被回退了**")
 if "fn k1_image_inside_the_user_board_loads" not in prev_test:
@@ -419,8 +381,9 @@ for name in ("SIM_STATE_SCHEMA_VERSION",):
         m = m or re.search(rf"pub const {name}:\s*u32\s*=\s*(\d+)", model_rs)
     if not m:
         err(f"[回退] 读不到 {name}")
-    elif m.group(1) != EXPECT_VERSIONS[name]:
-        err(f"[回退] {name} = {m.group(1)} ⇒ ⇒ 本批**不许**动它")
+    elif int(m.group(1)) < EXPECT_VERSIONS[name]:
+        err(f"[回退] {name} = {m.group(1)} **低于**本批落地值 "
+            f"{EXPECT_VERSIONS[name]} ⇒ ⇒ 版本被**回退**了")
 # ⚠️ **那两个被下一批合法升版的** ⇒ ⇒ 只**确认它们还在**（⇒ ⇒ 有人**删掉**
 #    它们 ⇒ ⇒ 门禁会红）⇒ ⇒ ⇒ **不**钉具体值（⇒ ⇒ 那是**下一批**的门禁的活）。
 for name in EXPECT_VERSIONS_FROZEN_BY_LATER_BATCH:
@@ -449,5 +412,6 @@ print(f"  验收：A {len(EXPECT_ACCEPT['A'])} · K {len(EXPECT_ACCEPT['K'])}"
 print(f"  版本号：SCHEMA_VERSION={EXPECT_VERSIONS['SCHEMA_VERSION']}"
       f" / SIM_STATE={EXPECT_VERSIONS['SIM_STATE_SCHEMA_VERSION']}"
       f" / （PLATFORM / PLATFORM_RULES 已由 **STAGE-49 批**升版 ⇒ ⇒ 归它守）")
-print(f"  理由词表：{len(EXPECT_REASONS)} 个值")
+print(f"  理由词表：{len(EXPECT_REASONS)} 个值 ⇒ ⇒ **能力已退役**（{RETIRED_BY}）"
+      " ⇒ ⇒ 只剩「理由词不许变成场景码」这条不变式")
 sys.exit(0)

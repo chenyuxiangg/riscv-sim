@@ -47,8 +47,29 @@
 - ⛔ **不靠放宽断言换绿**：任何一条口径替换都要在脚本注释里写「改前判什么 / 改后判什么 / 为什么改」。
 - ⛔ **不为历史批次补做产品**：本文件的改动**只碰 `tools/stage*_check.py`**，产品侧零改动。
 
-## 5 当前状态（v0.141 批）
+## 5 已退役的能力（v0.77 批 · 2026-11-10）
 
-- 33 绿 / **6 红**：`stage47` / `stage48` / `stage49` / `stage50` / `stage51` / `stage52`。
-- 这 6 个的共同点：锚的是**被后续批次重新设计过的能力**（引脚/连线/模板/信封），
-  需要**逐条**按 §4 判断「能力在哪」，不能批量换名 ⇒ ⇒ 单独一批做。
+**六件事被合法退役，代码里已经没有**（这一批是破坏性的，但 `PROGRESS.md` / `REVIEWS.md`
+当时**没有留痕** —— 本文件与 PROGRESS 的追溯行补记）：
+
+| 退役的东西 | 提交 | 替代它的是什么 |
+| --- | --- | --- |
+| 描述里的 `wiring` / `bridge` 段 + 连线报告三个 DTO（`BridgeReportDto` / `DroppedWireDto` / `WireDropReason`） | `16c01a7` · `eccc15c` | **每个外设自己的 `irq_line`**（中断源表就是描述本身） |
+| `pins` 段（`PinBinding` / `normalizePins`），`E_PLT_19` 变保留号 | `eccc15c` | 同上（引脚不再单独声明） |
+| pinmux 器件 + `PinSpec` / `PinFunction` / `PinDirection` / `parse_gpio_pin_name` / `pinmux_routes` / `E_PLT_23` | `83aafb9` | GPIO **整块一个中断源**（提交 9671021） |
+| 前端连线编辑器（`bridge-editor.js` / `bridge-report.js` / `bridgeReport` 真机段） | `c0f375b` | `front/views/components/irq-editor.js`（`renderIrqEditor` · `data-irq-editor` · `data-irq-rows`） |
+| 旧术语痕迹（`wiring_report` 等） | `980d9af` | — |
+
+⇒ ⇒ **判据口径**：这些能力**不再需要** ⇒ ⇒ 对应断言**移除**（不是换名、也不是新造反向判据），
+只保留「**同一编号不许被另一个含义占用**」这类与能力无关的不变式。
+
+## 6 当前状态
+
+- 历史规格自检：**39 个脚本全绿**（`for f in tools/stage*_check.py; do python3 "$f"; done`）。
+- v0.141 批：22 绿 → 33 绿（27~46）。
+- v0.142 批：33 绿 → **39 绿**（47~52）——
+  - `stage47` / `stage51`：纯漂移（认层 + 版本下界 + 镜像对账 + 台账三处合体）。
+  - `stage48` / `stage50`：能力整条退役（锚点移除，只留「实例表 / 引脚数落点」与编号不变式）。
+  - `stage49`：`base` / `roles` / `assign_bases` 活着（重钉）；`pins` 退役（`E_PLT_19` 留保留号不变式）。
+  - `stage52`：模板导入那一半活着（认层到 `topics.rs` / `events.rs` / `project.rs`、
+    前端搬到 `product-panel.js` 的 `open-templates` / `use-template`）；pinmux 那一半退役。

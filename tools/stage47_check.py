@@ -51,12 +51,19 @@ fail = []
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **四个版本号的期望值**（7d 用）—— 本批**契约层零升版** ⇒ ⇒ 全不动。
+#: ⚠️ **单调下界**（**不是**等值）：升版不红、**回退**才红。
 EXPECT_VERSIONS = {
-    "SCHEMA_VERSION": "10",
-    "SIM_STATE_SCHEMA_VERSION": "2",
-    "PLATFORM_SCHEMA_VERSION": "1",
-    "PLATFORM_RULES_VERSION": "3",
+    "SCHEMA_VERSION": 10,
+    "SIM_STATE_SCHEMA_VERSION": 2,
+    "PLATFORM_SCHEMA_VERSION": 1,
+    "PLATFORM_RULES_VERSION": 3,
 }
+
+#: ⚠️ **台账三处合体**（闭环即整行移入归档 · 本仓规约）。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
 
 LIB_REL = "crates/contract/src/lib.rs"
 MODEL_REL = "crates/contract/src/model.rs"
@@ -210,13 +217,21 @@ error_rs = read(ERROR_REL) or ""
 host_platform = read(HOST_PLATFORM_REL) or ""
 host_rs = read(HOST_REL) or ""
 ktest = read(KTEST_REL) or ""
-views = read(VIEWS_REL) or ""
+views = "\n".join(
+    f.read_text(encoding="utf-8")
+    for f in sorted((REPO_ROOT / "front/views").rglob("*.js"))
+)
+host_layer = "\n".join(
+    f.read_text(encoding="utf-8")
+    for f in sorted((REPO_ROOT / "crates/kernel/src/kernel_host").glob("*.rs"))
+)
 mirror_js = read(MIRROR_REL) or ""
 test_js = read(TEST_REL) or ""
 stage35 = read(STAGE35_REL) or ""
 browser = read(BROWSER_REL) or ""
 
 # 7d. 四个版本号（契约层 + 前端镜像）
+actual_schema = None
 for name, want in EXPECT_VERSIONS.items():
     m = None
     for src_ in (lib, model_rs, platform_rs):
@@ -226,16 +241,19 @@ for name, want in EXPECT_VERSIONS.items():
     if not m:
         err(f"[版本] 契约层读不到 {name}")
         continue
-    if m.group(1) != want:
-        err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want} ⇒ ⇒ 本批**零升版**")
+    if int(m.group(1)) < want:
+        err(f"[版本] {name} = {m.group(1)} **低于**本批落地值 {want}"
+            " ⇒ ⇒ 版本被**回退**了（升版不红、回退才红）")
+    elif name == "SCHEMA_VERSION":
+        actual_schema = int(m.group(1))
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
 m2 = re.search(r"SCHEMA_VERSION\s*=\s*['\"]?(\d+)", mirror_js)
 if not m2:
     err("[版本] 前端镜像读不到 `SCHEMA_VERSION`")
-elif m2.group(1) != EXPECT_VERSIONS["SCHEMA_VERSION"]:
+elif actual_schema is not None and int(m2.group(1)) != actual_schema:
     err(f"[版本] 前端镜像的 SCHEMA_VERSION = {m2.group(1)} ≠ 契约层的 "
-        f"{EXPECT_VERSIONS['SCHEMA_VERSION']} ⇒ ⇒ 两边**不一致**")
+        f"{actual_schema} ⇒ ⇒ 两边**漂了**")
 
 # 7e. 跨层源码锚点
 JS_ANCHORS = [
@@ -243,9 +261,11 @@ JS_ANCHORS = [
     (host_platform, "pub fn compatibility"),
     (host_platform, "pub fn board_intervals"),
     (host_platform, "pub struct BoardCompatibility"),
-    (host_rs, "platform::compatibility"),
-    (host_rs, "platform::board_intervals"),
-    (host_rs, "E_PLT_17_BOARD_MISMATCH"),
+    # ⚠️ 认层：`mod.rs` 已拆成按域子模块 ⇒ ⇒ `compatibility()` 的**调用点**
+    #   在 `project.rs`（`E_PLT_17` 就在那里抛）⇒ ⇒ 判整层，不判 `mod.rs`。
+    (host_layer, "platform::compatibility"),
+    (host_layer, "platform::board_intervals"),
+    (host_layer, "E_PLT_17_BOARD_MISMATCH"),
     # ⚠️ **契约层的新码**（裁决 B）
     (error_rs, "pub const E_PLT_17_BOARD_MISMATCH: u16 = 17;"),
     # ⚠️ **内核的门禁**（K-1 ~ K-6）
@@ -276,6 +296,7 @@ if facts != list(range(1, len(facts) + 1)) or not facts:
 
 # 7f. 台账登记
 ledger = read(LEDGER_REL) or ""
+ledger += "\n" + "\n".join(read(_r) or "" for _r in LEDGER_ARCHIVE_RELS)
 for needle in ("D-175", "STAGE-47", "v0.71"):
     if needle not in ledger:
         err(f"[台账] 台账里没有 {needle}")
@@ -315,7 +336,7 @@ else:
 # --- 9. 新场景码：有定义处 + 值 == 17 + 内核引用 + 规格写明线上形态 --------
 if "pub const E_PLT_17_BOARD_MISMATCH: u16 = 17;" not in error_rs:
     err("[新码] 契约层没有 `E_PLT_17_BOARD_MISMATCH`（或值不是 17）")
-if "E_PLT_17_BOARD_MISMATCH" not in host_rs:
+if "E_PLT_17_BOARD_MISMATCH" not in host_layer:
     err("[新码] 内核侧没有引用新码 ⇒ ⇒ 那条判定**根本不存在**")
 if "E_PLT-17" not in text:
     err("[新码] 规格里没有写**线上形态** `E_PLT-17` ⇒ ⇒ 断言会用错字符串")
@@ -347,7 +368,7 @@ print(f"  裁决 {len(defined)} 条 · 事实 {len(facts)} 条 · 变异 {len(MU
 print(f"  验收：A {len(EXPECT_ACCEPT['A'])} · K {len(EXPECT_ACCEPT['K'])}"
       f" · N {len(EXPECT_ACCEPT['N'])} · B {len(EXPECT_ACCEPT['B'])}"
       f" · X {len(EXPECT_ACCEPT['X'])}")
-print(f"  版本号：SCHEMA_VERSION={EXPECT_VERSIONS['SCHEMA_VERSION']}"
+print(f"  版本号（下界）：SCHEMA_VERSION≥{EXPECT_VERSIONS['SCHEMA_VERSION']}"
       f" / SIM_STATE={EXPECT_VERSIONS['SIM_STATE_SCHEMA_VERSION']}"
       f" / PLATFORM={EXPECT_VERSIONS['PLATFORM_SCHEMA_VERSION']}"
       f" / PLATFORM_RULES={EXPECT_VERSIONS['PLATFORM_RULES_VERSION']}")
