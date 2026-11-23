@@ -47,6 +47,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7g 用）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行会归档到 history ⇒ 「台账里登记过」= 现台账 + 归档合起来算
+LEDGER_ARCHIVE_REL = "docs/progress/PROGRESS-history.md"
 
 VIEWS_REL = "front/views/m02_viewcomponents.js"
 APP_REL = "front/app.js"
@@ -69,6 +71,20 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：落点已按域拆成多文件 ⇒ ⇒ 把整层拼起来再查。
+
+    拆分史见台账：`front/views/m02_viewcomponents.js` 已拆成
+    `front/views/components/*.js`；`front/app.js` 的接线已拆到
+    `front/views/app/*.js`。⇒ ⇒ 钉单文件会让判据随重构**假红**。
+    """
+    parts = []
+    for pat in patterns:
+        for p in sorted(REPO_ROOT.glob(pat)):
+            parts.append(p.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +243,7 @@ for name, value in EXPECT_VERSIONS.items():
         err(f"[版本号] {name} 期望 {value} ⇒ 实测 {found}")
 
 # --- 7e. 前端必须有加载入口 ------------------------------------------------
-views_src = read(VIEWS_REL)
+views_src = read_layer(VIEWS_REL, "front/views/components/*.js")
 if views_src is None:
     err(f"[落点] 找不到 {VIEWS_REL}")
 else:
@@ -237,7 +253,7 @@ else:
         err(f"[落点] {VIEWS_REL} 里没有 `type=\"file\"`（加载入口缺文件选择器）")
 
 # --- 7f. app 层必须有分支 --------------------------------------------------
-app_src = read(APP_REL)
+app_src = read_layer(APP_REL, "front/views/app/*.js")
 if app_src is None:
     err(f"[落点] 找不到 {APP_REL}")
 else:
@@ -248,9 +264,11 @@ else:
 
 # --- 7g. 台账必须登记「契约层 / 内核零变更」这条边界 -----------------------
 ledger_src = read(LEDGER_REL)
-if ledger_src is None:
-    err(f"[台账] 找不到 {LEDGER_REL}")
+archive_src = read(LEDGER_ARCHIVE_REL)
+if ledger_src is None and archive_src is None:
+    err(f"[台账] 找不到 {LEDGER_REL} / {LEDGER_ARCHIVE_REL}")
 else:
+    ledger_src = (ledger_src or "") + "\n" + (archive_src or "")
     if "v0.47" not in ledger_src:
         err("[台账] 台账里没有 v0.47 的批次记录")
     if "STAGE-32" not in ledger_src:

@@ -51,6 +51,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7h 用）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行会归档到 history ⇒ 「台账里登记过」= 现台账 + 归档合起来算
+LEDGER_ARCHIVE_REL = "docs/progress/PROGRESS-history.md"
 
 APP_REL = "front/app.js"
 VIEW_REL = "front/views/m02_viewcomponents.js"
@@ -88,7 +90,7 @@ EXPECT_HOOKS = (
     "data-terminal-out",
     "data-trace-notice",
     "data-trace-overflow",
-    "data-trace-download-button",
+    "data-trace-download",
 )
 
 
@@ -101,6 +103,20 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：落点已按域拆成多文件 ⇒ ⇒ 把整层拼起来再查。
+
+    拆分史见台账：`front/views/m02_viewcomponents.js` 已拆成
+    `front/views/components/*.js`；`front/app.js` 的接线已拆到
+    `front/views/app/*.js`。⇒ ⇒ 钉单文件会让判据随重构**假红**。
+    """
+    parts = []
+    for pat in patterns:
+        for p in sorted(REPO_ROOT.glob(pat)):
+            parts.append(p.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +281,10 @@ for name, value in EXPECT_VERSIONS.items():
 
 # --- 7e. 稳定钩子逐条落地（裁决 A） -----------------------------------------
 #: ⚠️ **钩子落在哪个文件**是**判据的取法** ⇒ ⇒ 换形态**不许**把它换掉。
-HOOK_FILES = (
-    VIEW_REL, MEMORY_MAP_REL, SOURCE_REL,
-    "front/views/components/image-loader.js",
+#: ⚠️ 判据认「仓内源码」不认文件清单：视图层已拆成 `front/views/components/*.js`
+#: ⇒ ⇒ 钉死文件清单会让钩子判据随重构**假红**（钉的是落点形态，不是能力）。
+HOOK_FILES = (VIEW_REL,) + tuple(
+    str(p.relative_to(REPO_ROOT)) for p in sorted(REPO_ROOT.glob("front/**/*.js"))
 )
 hook_sources = {rel: (read(rel) or "") for rel in HOOK_FILES}
 all_hooks = "\n".join(hook_sources.values())
@@ -277,17 +294,17 @@ for hook in EXPECT_HOOKS:
             "（换形态把判据的取法换掉了 ⇒ ⇒ 判据会悄悄变）")
 
 # --- 7f. 断点接线必须落地 ---------------------------------------------------
-app_src = read(APP_REL)
+app_src = read_layer(APP_REL, "front/views/app/*.js")
 if app_src is None:
     err(f"[落点] 找不到 {APP_REL}")
 else:
-    for literal in ("SetBreakpoint", "ClearBreakpoint", "debug.halt", "debug.breakpoints"):
+    for literal in ("setBreakpoint", "clearBreakpoint", "debug.halt", "debug.breakpoints"):
         if literal not in app_src:
             err(f"[落点] {APP_REL} 里没有 `{literal}`"
                 "（断点接线 / 状态落点没落地）")
 
 # --- 7g. 断点列必须落地 -----------------------------------------------------
-view_src = read(VIEW_REL)
+view_src = read_layer(VIEW_REL, "front/views/components/*.js", "front/views/app/*.js")
 if view_src is None:
     err(f"[落点] 找不到 {VIEW_REL}")
 else:
@@ -298,9 +315,11 @@ else:
 
 # --- 7h. 台账必须登记本批 --------------------------------------------------
 ledger_src = read(LEDGER_REL)
-if ledger_src is None:
-    err(f"[台账] 找不到 {LEDGER_REL}")
+archive_src = read(LEDGER_ARCHIVE_REL)
+if ledger_src is None and archive_src is None:
+    err(f"[台账] 找不到 {LEDGER_REL} / {LEDGER_ARCHIVE_REL}")
 else:
+    ledger_src = (ledger_src or "") + "\n" + (archive_src or "")
     if "v0.50" not in ledger_src:
         err("[台账] 台账里没有 v0.50 的批次记录")
     if "STAGE-35" not in ledger_src:

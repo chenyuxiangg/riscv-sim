@@ -60,9 +60,11 @@ EXPECT_VERSIONS = {
 }
 
 SCREEN_REL = "front/views/components/terminal-screen.js"
-VIEWS_REL = "front/views/m02_viewcomponents.js"
-APP_REL = "front/app.js"
+VIEWS_REL = "front/views/components/terminal-panel.js"
+APP_REL = "front/views/app/probes-wiring.js"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行会归档到 history ⇒ 「台账里登记过」= 现台账 + 归档合起来算
+LEDGER_ARCHIVE_REL = "docs/progress/PROGRESS-history.md"
 
 #: ⚠️ **裁决编号空间**（A~J = 10 条）。
 DECISION_LETTERS = [chr(ord("A") + i) for i in range(10)]
@@ -77,6 +79,15 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：落点已按域拆成多文件 ⇒ ⇒ 把整层拼起来再查。"""
+    parts = []
+    for pat in patterns:
+        for p in sorted(REPO_ROOT.glob(pat)):
+            parts.append(p.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +242,7 @@ else:
     for token in ("createTerminalScreen", "renderTerminalScreen", "TAB_WIDTH"):
         if token not in screen_src:
             err(f"[源码] {SCREEN_REL} 里没有 {token}")
-views_src = read(VIEWS_REL)
+views_src = read_layer(VIEWS_REL, "front/views/components/*.js")
 if views_src is None:
     err(f"[源码] 找不到 {VIEWS_REL}")
 else:
@@ -246,9 +257,11 @@ elif "resetTerminalScreen" not in app_src:
 
 # --- 7f. 台账必须登记本批 --------------------------------------------------
 ledger = read(LEDGER_REL)
-if ledger is None:
-    err(f"[台账] 找不到 {LEDGER_REL}")
+archive = read(LEDGER_ARCHIVE_REL)
+if ledger is None and archive is None:
+    err(f"[台账] 找不到 {LEDGER_REL} / {LEDGER_ARCHIVE_REL}")
 else:
+    ledger = (ledger or "") + "\n" + (archive or "")
     for token in ("v0.56", "STAGE-41", "D-161"):
         if token not in ledger:
             err(f"[台账] 台账里没有 {token}")

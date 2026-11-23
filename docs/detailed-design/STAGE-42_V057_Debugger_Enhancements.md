@@ -279,6 +279,11 @@ reg      = "pc" | "x" , ( "0".."9" | "1".."2" , "0".."9" | "3" , "0".."1" ) ;
 </div>
 ```
 
+> ⚠️ **上块是 v0.57 当时的 DOM 契约**（历史记录，不改写）。**v0.135 三类输入合一**后：
+> 一个 `data-bp-add` 行里放 `data-bp-kind-input`（地址 / 符号 / 条件）+ 共用
+> `data-bp-input` + 单一错误位 `data-bp-error`，符号候选区仍是
+> `data-bp-symbol-candidates` ⇒ ⇒ 缘起见 §8「订正 11」。
+
 - **候选按钮**（裁决 N，**形状钉死**）：
   `<button type="button" class="symbol-candidate" data-action="set-symbol-breakpoint" data-addr="0x80001234" data-symbol="main">main @ 0x80001234</button>`
   ⇒ ⇒ **点一下直接下断点**（带上条件框里的条件，若非空）。
@@ -504,6 +509,23 @@ reg      = "pc" | "x" , ( "0".."9" | "1".."2" , "0".."9" | "3" , "0".."1" ) ;
 
 - **条件 AST 是**推导量**：契约 DTO 里**只留文本**（`Option<String>`）⇒ ⇒ **已解析的 AST 只住内核**（`BreakpointTable` 的条目里）⇒ ⇒ 「文本与 AST 不会漂移」⇒ ⇒ **AST 不进契约**（契约层不该管「怎么序列化一棵 AST」）。
 - **`SymbolService` 端口加了 `lookup_prefix`** ⇒ ⇒ 仓内**只有** `SymbolIndex` 一个实现者（已跟上）⇒ ⇒ 但对**仓外**的实现者是**源码级破坏** ⇒ ⇒ 如实登记为已知边界。
+
+### 订正 11 · 符号 / 条件两个专属输入框在 v0.135 合成了一个
+
+**实测**
+
+v0.57 当时的形态是「地址 + 符号 + 条件三个入口，符号带候选下拉」。**v0.135 批**按用户口径
+把三者合成**一个框**（`data-bp-kind-input` 选类型 + 共用 `data-bp-input`，联想改为
+「≥4 字符自动查」、Tab 退役）⇒ ⇒ `data-bp-symbol-input` / `data-bp-cond-input`
+与 `data-bp-symbol-error` / `data-bp-cond-error` 一并删除，错误位合成 `data-bp-error`
+⇒ ⇒ 自检 7e 的源码锚点指向了**已经不存在的属性**，脚本只红不修。
+
+**已改成**
+
+7e 的 `VIEWS_REL` 改到 `front/views/components/debug-panel.js`，锚点改成
+`data-bp-input` + `data-bp-kind-input` + 仍在的 `data-bp-symbol-candidates` /
+`data-dump-addr-input` / `data-mem-dump` ⇒ ⇒ 判据仍要求「符号候选、整段转储两条路的挂点
+都在视图层」，只是名字跟上现状。
 
 ---
 

@@ -163,6 +163,10 @@
 | 寄存器/内存视图 · 工具栏 | `data-mem-size` | 宽度选择（`Byte` / `Half` / `Word`） |
 | 寄存器/内存视图 · 工具栏 | `data-mem-addr-error` | 解析失败时的**就地提示** |
 
+> ⚠️ **上表是 v0.54 当时的落点形态**（历史记录，不改写）；现落点见
+> `front/views/components/debug-panel.js`：`data-bp-input` + `data-bp-kind-input`
+> + `data-bp-error`（地址 / 符号 / 条件三类合一）⇒ ⇒ 缘起见 §8「订正 12」。
+
 ### §5.2 两条命令的 `params`（**沿用既有机制**，零新命令）
 
 | 命令 | `params` | 消费点 |
@@ -454,6 +458,27 @@ B-17 窄屏那条）⇒ ⇒ **复测两趟基线都零红** ⇒ ⇒ 那三条**�
 **已改成**
 
 B-52 的等待从 **5 600 ms** 改成 **7 000 ms** ⇒ ⇒ 余量 **1.6 s** ⇒ ⇒ 判稳。
+
+### 订正 12 · 落点漂了两次：视图层早拆成组件、三类输入合成一个框
+
+**实测**
+
+① 视图层在后续批里按域拆成 `front/views/components/*.js` ⇒ ⇒ 本规格 §5.1 表里那个
+`front/views/m02_viewcomponents.js` **已不存在** ⇒ ⇒ 自检 7g 只红不修。
+② **v0.135「三类输入合一」**：地址 / 符号 / 条件**共用一个输入框** ⇒ ⇒
+`data-bp-addr-input`、`data-symbol-input`、`data-cond-input`、`data-bp-addr-error`
+全部删除，换成 `data-bp-input` + `data-bp-kind-input` + `data-bp-error`
+⇒ ⇒ 7g 钉的旧名字**一个都不在了**。
+③ **契约 v18（v0.138）** 之后前端镜像 `SCHEMA_VERSION` 已是 18 ⇒ ⇒ 7h 原来的
+「**仍**是 8」是**时点断言**（v0.54 当时的「本批零升版」）⇒ ⇒ 再也不可能成立。
+
+**已改成**
+
+7g 的落点改到 `front/views/components/debug-panel.js`，钉 `data-bp-input` /
+`data-bp-error` / `data-mem-addr-input`；7h 从「等于 8」改成「**等于契约层
+`crates/contract/src/lib.rs` 的 `pub const SCHEMA_VERSION`**」⇒ ⇒ 判据从「某一刻的值」
+变成「**镜像不许与契约漂**」，判别力不降（漂了照样红）。§5.1 那张表按历史记录原样保留，
+只在表下加一行指向本订正。
 
 ---
 

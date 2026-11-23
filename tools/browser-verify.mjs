@@ -1073,7 +1073,14 @@ const PROBE_EXPRESSION = `(() => {
       : "",
     waveItemText0: waveItems[0] ? String(waveItems[0].textContent || "").trim() : "",
     // -- 终端视图 --
-    termText: termOut ? String(termOut.textContent || "") : "",
+    // ⚠️ **v0.140**：同一口径 —— 屏幕档读 xterm 渲染行，原始字节档读 pre。
+    //   （osz 段那两条启动行断言读的就是这里：pre 里只有旧文本 ⇒ 恒空。）
+    termText: (() => {
+        const host = document.querySelector("[data-xterm-host]");
+        const rows = host ? host.querySelector(".xterm-rows") : null;
+        if (termOut && !termOut.hidden) return String(termOut.textContent || "");
+        return rows ? String(rows.textContent || "") : "";
+    })(),
     // -- 源码视图 --
     sourceBtnCount: resolveButtons.length,
     sourceAddr: resolveBtn ? String(resolveBtn.getAttribute("data-addr") ?? "").trim() : "",
@@ -1578,7 +1585,8 @@ function oszConsoleChecks(probe) {
 /**
  * **终端屏幕**的探针表达式（STAGE-41 · v0.56 批）。
  *
- * ⚠️ **读的是 `textContent`** ⇒ ⇒ 屏幕上的**行**就是 `\n` 分开的那些 ⇒ ⇒
+ * ⚠️ **读的是「当前显示的那一份」**：原始字节档读降级 pre 的 `textContent`；
+ *   屏幕档读 xterm 的**渲染行**（一行一个子节点 ⇒ 按 `\n` 拼回来）⇒ ⇒
  *   「敲三个键 ⇒ 屏幕上到底几行」这条判据才有意义。
  *
  * ⚠️ **按位置限定**（`[data-view-body="terminal"]` 在前）：同一个 DOM 里
@@ -1586,9 +1594,19 @@ function oszConsoleChecks(probe) {
  *   ⇒ ⇒ 断言还在跑、断的却不是它以为的那个东西。
  */
 const TERMINAL_SCREEN_EXPRESSION = `(() => {
-  const out = document.querySelector('[data-view-body="terminal"] [data-terminal-out]')
+  // ⚠️ **v0.140**：屏幕档的显示权在 **xterm** ⇒ ⇒ 降级「pre」被 hidden，且增量
+  //   路径只写 xterm ⇒ ⇒ 读那个 pre 拿到的是**最后一次整页渲染**的旧文本
+  //   （本段实测：只有「==== Enter Main ====」与「OSZ$」，敲进去的 cyx 不在）
+  //   ⇒ ⇒ B-69 / B-72 假红，而 B-70 / B-71 / B-73 **恒绿**（零判别力）。
+  //   ⇒ ⇒ 与 UI_IMAGE_TERM_WAVE_PROBE 同一口径：读**当前真正显示的那一份**。
+  const pre = document.querySelector('[data-view-body="terminal"] [data-terminal-out]')
     || document.querySelector("[data-terminal-out]");
-  const text = out ? String(out.textContent || "") : "";
+  const host = document.querySelector("[data-xterm-host]");
+  const rows = host ? host.querySelector(".xterm-rows") : null;
+  const rowEls = rows ? Array.from(rows.children) : [];
+  const text = pre && !pre.hidden
+    ? String(pre.textContent || "")
+    : rowEls.map((r) => String(r.textContent || "")).join("\\n");
   const lines = text.split("\\n");
   const toggle = document.querySelector('[data-view-body="terminal"] [data-action="console-raw-toggle"]')
     || document.querySelector('[data-action="console-raw-toggle"]');
@@ -1665,6 +1683,29 @@ async function runTerminalScreenProbe(cdp, opts) {
         return { checks };
     }
 
+    // ⚠️ **v0.140 · 先等画面稳住再采样**：终端是**流**，xterm 逐块渲染；
+    //   取样太早会拿到「只画了头两行」的中间态（本批实测到过：B-69 读到
+    //   一行提示符、紧接着 B-76 读到五行）。判据本身没问题，**采样窗口**短了
+    //   ⇒ ⇒ 这里等到「连续两次读到同一屏」再判，别把中间态当结论。
+    const settledScreen = async (maxMs = 4000) => {
+        let lastText = null;
+        let stable = 0;
+        const deadline = Date.now() + maxMs;
+        while (Date.now() < deadline) {
+            const snap = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+            const text = String(snap?.text ?? "");
+            if (lastText !== null && text === lastText) {
+                stable += 1;
+                if (stable >= 1) return snap;
+            } else {
+                stable = 0;
+            }
+            lastText = text;
+            await sleep(250);
+        }
+        return await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    };
+
     // -- B-69 · 整行**被执行了** --------------------------------------
     //
     // ⚠️ **为什么不是「console 里出现命令结果」**：用户那份 osz 固件**注册了
@@ -1673,19 +1714,21 @@ async function runTerminalScreenProbe(cdp, opts) {
     //   `cyx: No such command.` ⇒ ⇒ 那条断言是**假红**。
     // ⚠️ **真正可观察的「执行了」是什么**：执行完 ⇒ ⇒ **行缓冲被清空** ⇒ ⇒
     //   屏幕上回显行的**下一行**是一个**空的提示符**（`OSZ$`）。
-    const execScreen = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    const execScreen = await settledScreen();
     const execLines = Array.isArray(execScreen?.lines) ? execScreen.lines : [];
     const echoIdx = execLines.findIndex((l) => String(l).trim() === "OSZ$ cyx");
     const afterEcho = echoIdx >= 0 ? String(execLines[echoIdx + 1] ?? "").trim() : "";
     checks.push({
         name: "B-69 · 整行**被执行了**（回显行的下一行是**空的新提示符** ⇒ 行缓冲被清空）",
         ok: echoIdx >= 0 && afterEcho === "OSZ$",
-        detail: JSON.stringify({ echoIdx, afterEcho, lines: execLines }),
+        detail: JSON.stringify({ echoIdx, afterEcho, lines: execLines.slice(0, 24) }),
     });
 
     // -- B-69 ~ B-72 · **屏幕上**必须是一行 ----------------------------
-    const screen = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    const screen = await settledScreen();
     const lines = Array.isArray(screen?.lines) ? screen.lines : [];
+    // ⚠️ **v0.140**：见 B-69 —— 执行后命令行被擦掉 ⇒ ⇒ 「一行都不该留下」；
+    //   旧渲染器会把四次重画堆成多行（其中就有 `OSZ$ cyx`）⇒ ⇒ 判据仍**咬得住**那个缺陷。
     const cmdLines = lines.filter((l) => String(l).includes("OSZ$ cyx"));
     const partialLines = lines.filter((l) => /OSZ\$ c(y)?$/.test(String(l).trim()));
 
@@ -1702,7 +1745,7 @@ async function runTerminalScreenProbe(cdp, opts) {
     checks.push({
         name: "B-72 · 屏幕上「OSZ$ cyx」**只有一行**（重画是覆盖，不是堆行）",
         ok: cmdLines.length === 1,
-        detail: JSON.stringify({ cmdLineCount: cmdLines.length, lines }),
+        detail: JSON.stringify({ cmdLineCount: cmdLines.length, lines: lines.slice(0, 24) }),
     });
     checks.push({
         name: "B-73 · 屏幕上**没有**中间态的行（「OSZ$ c」/「OSZ$ cy」不许独占一行）",
@@ -1721,10 +1764,13 @@ async function runTerminalScreenProbe(cdp, opts) {
     checks.push({
         name: "B-75 · 「原始字节」档里能看到**未经解释**的字节流（`[2K` 在）",
         ok: rawView?.hasEscapeLiteral === true,
-        detail: JSON.stringify({ hasEscapeLiteral: rawView?.hasEscapeLiteral }),
+        // ⚠️ **v0.140**：把字节尾部一起留证 ⇒ ⇒ 「屏幕上为什么没有那一行」这种争议
+        //   要能**直接看字节**判（是 guest 擦了，还是前端没画）。
+        detail: JSON.stringify({ hasEscapeLiteral: rawView?.hasEscapeLiteral,
+            rawText: rawView?.text ?? "" }),
     });
     await awaitEval(cdp, clickRawToggleExpression());
-    const backToScreen = await awaitEval(cdp, TERMINAL_SCREEN_EXPRESSION);
+    const backToScreen = await settledScreen();
     checks.push({
         name: "B-76 · 切回「终端屏幕」⇒ 又是一行（不是两行）",
         ok: backToScreen?.hasEscapeLiteral === false
@@ -9178,19 +9224,27 @@ async function runSymbolBreakpointSection(cdp, opts) {
     await sleep(700);
 
     // -- 输入**名字的前缀** ⇒ ⇒ 候选下拉 ------------------------------------
-    const prefix = target.name.slice(0, Math.min(4, target.name.length));
+    const prefix = target.name.slice(0, 4);
+    // ⚠️ **v0.140**：v0.135 起三类输入合一 + 联想改「打字触发」⇒ ⇒ 先切「符号」档
+    //   （`data-bp-kind-input`），再打字；**不再有**查询按钮。
     await runEffect(cdp, `(() => {
-        const box = document.querySelector('[data-view-body="debug"] [data-symbol-input="breakpoint"]');
-        const input = box ? box.querySelector("[data-bp-symbol-input]") : null;
+        const box = document.querySelector('[data-view-body="debug"] [data-bp-add]');
+        const sel = box ? box.querySelector("[data-bp-kind-input]") : null;
+        if (!sel) return "no-kind";
+        sel.value = "Symbol";
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        return "changed";
+    })()`);
+    await sleep(700);
+    await runEffect(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="debug"] [data-bp-add]');
+        const input = box ? box.querySelector("[data-bp-input]") : null;
         if (!input) return "no-input";
         input.value = ${JSON.stringify(prefix)};
         input.dispatchEvent(new Event("input", { bubbles: true }));
-        const btn = box.querySelector('[data-action="lookup-symbol"]');
-        if (!btn) return "no-button";
-        btn.click();
-        return "clicked";
+        return "typed";
     })()`);
-    await sleep(900);
+    await sleep(1200);
     let p = await probe();
     const candidates = Array.isArray(p?.candidates) ? p.candidates : [];
     add(
@@ -9208,22 +9262,12 @@ async function runSymbolBreakpointSection(cdp, opts) {
     );
 
     // -- 点候选 ⇒ ⇒ **真的下了断点** ⇒ ⇒ 列表里出现符号名与那个地址 --------
-    // ⚠️ **v0.87 · 先清掉条件框**：`symbolUi` 段（B-79）故意留了一条**非法
-    //   条件** `x1 ==` 在同一个条件框里 ⇒ ⇒ 本段点候选时 `resolveAddrParams`
-    //   会把那条条件带上 ⇒ ⇒ 内核**拒**（合法行为）⇒ ⇒ 断点列表当然是空的
-    //   ⇒ ⇒ 假红。候选按钮只该带「地址 + 符号」，条件必须由本段自己给。
-    await runEffect(cdp, `(() => {
-        const dbg = document.querySelector('[data-view-body="debug"]');
-        const condBox = dbg ? dbg.querySelector('[data-cond-input="breakpoint"]') : null;
-        const input = condBox ? condBox.querySelector("[data-bp-cond-input]") : null;
-        if (!input) return "no-cond";
-        input.value = "";
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        return "cleared";
-    })()`);
-    await sleep(300);
+    // ⚠️ **v0.140**：v0.135 之后符号 / 条件**共用一个框** ⇒ ⇒ 上面打字时已经把
+    //   `symbolUi` 段（B-79）留下的非法条件换掉了；而候选按钮走
+    //   `set-symbol-breakpoint` ⇒ ⇒ `resolveAddrParams` 只认按钮自带的
+    //   「地址 + 符号」，**不看输入框** ⇒ ⇒ 不再需要「清条件框」那一步。
     const clicked = await awaitEval(cdp, `(() => {
-        const boxes = Array.from(document.querySelectorAll('[data-symbol-input="breakpoint"]'));
+        const boxes = Array.from(document.querySelectorAll('[data-view-body="debug"] [data-bp-add]'));
         const want = ${JSON.stringify(target.name)};
         let buttons = 0;
         for (const box of boxes) {

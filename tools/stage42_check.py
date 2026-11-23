@@ -73,7 +73,7 @@ ERROR_REL = "crates/contract/src/error.rs"
 LIB_REL = "crates/contract/src/lib.rs"
 FIXTURE_REL = "crates/contract/fixtures/debug-limits.json"
 MIRROR_REL = "front/lib/message.js"
-VIEWS_REL = "front/views/m02_viewcomponents.js"
+VIEWS_REL = "front/views/components/debug-panel.js"
 APP_REL = "front/app.js"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
 
@@ -262,7 +262,10 @@ ANCHORS = [
     (MIRROR_REL, ("resolveSymbol", "dumpMemory", "symbolResolved", "memoryDump",
                   "debug.symbol", "debug.dump",
                   "DUMP_MAX_BYTES", "SYMBOL_CANDIDATE_LIMIT")),
-    (VIEWS_REL, ("data-bp-symbol-input", "data-bp-cond-input",
+    # ⚠️ **v0.140**：v0.135 三类输入合一 ⇒ 符号 / 条件不再各有专属输入框
+    #   （`data-bp-symbol-input` / `data-bp-cond-input` 已删）⇒ ⇒ 改钉**现**落点；
+    #   规格 §8「订正 11」记这次漂移。
+    (VIEWS_REL, ("data-bp-input", "data-bp-kind-input",
                  "data-bp-symbol-candidates", "data-dump-addr-input", "data-mem-dump")),
     (APP_REL, ("lookup-symbol", "set-symbol-breakpoint", "dump-memory")),
 ]
