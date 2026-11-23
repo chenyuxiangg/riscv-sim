@@ -51,6 +51,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7i 用）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行闭环后**整行移入归档**（本仓规约）⇒ ⇒ 登记可能住在归档 / 进度归档里。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
+
 
 APP_REL = "front/app.js"
 INDEX_REL = "front/index.html"
@@ -76,6 +82,15 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：落点已按域拆成多文件 ⇒ ⇒ 整层拼起来再查。"""
+    parts = []
+    for pat in patterns:
+        for f in sorted(REPO_ROOT.glob(pat)):
+            parts.append(f.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +306,7 @@ else:
             err(f"[落点] {INDEX_REL} 里告警弹窗的骨架**在 `<main>` 里面**"
                 " ⇒ ⇒ 视图重渲染会把它销毁（裁决 J / F12）")
 
-app_src = read(APP_REL)
+app_src = read_layer(APP_REL, "front/views/app/*.js")
 if app_src is None:
     err(f"[落点] 找不到 {APP_REL}")
 else:
@@ -319,9 +334,11 @@ if app_src is not None:
 
 # --- 7i. 台账必须登记本批 --------------------------------------------------
 ledger_src = read(LEDGER_REL)
-if ledger_src is None:
+_archive_src = "\n".join(read(_r) or "" for _r in LEDGER_ARCHIVE_RELS)
+if ledger_src is None and not _archive_src:
     err(f"[台账] 找不到 {LEDGER_REL}")
 else:
+    ledger_src = (ledger_src or "") + "\n" + _archive_src
     if "v0.53" not in ledger_src:
         err("[台账] 台账里没有 v0.53 的批次记录")
     if "STAGE-38" not in ledger_src:

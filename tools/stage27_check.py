@@ -411,6 +411,7 @@ def _norm(s: str) -> str:
     return s.replace("*", "").replace("\\|", "|").strip()
 
 
+_seen_cross = set()
 for row in rows12:
     if not row or row[0] not in ("F1", "F2"):
         continue
@@ -423,6 +424,42 @@ for row in rows12:
     qm = QUOTE_RE.search(raw)
     if not qm:
         err(f"[跨层] §1.2 的 {row[0]} 行里抽不出**引号里的原文**")
+        continue
+    if (row[0], rel, qm.group(1)) in _seen_cross:
+        continue
+    _seen_cross.add((row[0], rel, qm.group(1)))
+    if row[0] == "F1":
+        # ⚠️ **F1 是「修前事实」**：D-127 的修复**必然**把那一行从源里删掉
+        #    ⇒ ⇒ 再要求「原文还在」与「已修复」互斥（口径本末倒置）。
+        #    ⇒ ⇒ 改成判**修后的活状态**：three-spaces 表的 internal line 行
+        #    **不许**再把 `irq_clear` 归在「who uses it」栏。
+        #    （表格块 = 从 `| space | values | who uses it |` 表头起到空行为止；
+        #      `tests_*` 里的字面量不在块内 ⇒ ⇒ 不会被误抓。）
+        target1 = _repo_root / rel
+        if not target1.exists():
+            err(f"[跨层] 找不到 F1 指名的源文件 {rel} ⇒ ⇒ 跨层一致性检查**静默失效** ⇒ ⇒ 必须红")
+            continue
+        _lines = target1.read_text(encoding="utf-8").splitlines()
+        _blk = None
+        for _ln in _lines:
+            if _blk is None:
+                if "| space | values | who uses it |" in _ln:
+                    _blk = []
+                continue
+            if not _ln.strip():
+                break
+            _blk.append(_ln)
+        if _blk is None:
+            err("[跨层] F1：契约里 three-spaces 表**找不到** ⇒ ⇒ 判据**静默失效** ⇒ ⇒ 必须红")
+            continue
+        _bad = [
+            _ln
+            for _ln in _blk
+            if "internal" in _ln and "line" in _ln and "irq_clear" in _ln
+        ]
+        if _bad:
+            err("[跨层] F1：three-spaces 表的 internal line 行**仍把** `irq_clear` "
+                "归在「who uses it」栏 ⇒ ⇒ D-127 的修复被回退了")
         continue
     target = _repo_root / rel
     if not target.exists():

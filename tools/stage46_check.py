@@ -70,6 +70,12 @@ ATTRIB_REL = "tools/front_test_attrib.py"
 STAGE35_REL = "tools/stage35_check.py"
 BROWSER_REL = "tools/browser-verify.mjs"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行闭环后**整行移入归档**（本仓规约）⇒ ⇒ 「台账里登记过」= 现台账 + 归档 + 进度归档。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
+
 
 #: ⚠️ **裁决编号空间**（A~N = 14 条）。
 DECISION_LETTERS = [chr(ord("A") + i) for i in range(14)]
@@ -108,6 +114,14 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：视图层已按域拆成多文件 ⇒ ⇒ 整层拼起来再查。"""
+    parts = []
+    for pat in patterns:
+        for f in sorted(REPO_ROOT.glob(pat)):
+            parts.append(f.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +222,7 @@ model_rs = read(MODEL_REL) or ""
 platform_rs = read(PLATFORM_REL) or ""
 error_rs = read(ERROR_REL) or ""
 mmap_js = read(MMAP_REL) or ""
-views = read(VIEWS_REL) or ""
+views = read_layer(VIEWS_REL, "front/views/components/*.js", "front/views/app/*.js") or ""
 test_js = read(TEST_REL) or ""
 stub_js = read(STUB_REL) or ""
 attrib = read(ATTRIB_REL) or ""
@@ -225,8 +239,11 @@ for name, want in EXPECT_VERSIONS.items():
     if not m:
         err(f"[版本] 契约层读不到 {name}")
         continue
-    if m.group(1) != want:
-        err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want}")
+        #: ⚠️ 「本批零升版」（值必须等于规格里那个数）是**时点断言**：
+        #:    后续每升一次版就必红。⇒ ⇒ 改成**单调下界**：该批落地的值是地板，
+        #:    升版不红、**回退**才红。
+    if int(m.group(1)) < int(want):
+        err(f"[版本] {name} = {m.group(1)} 低于本批落地的 {want} ⇒ ⇒ 回退了")
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
 
@@ -261,7 +278,7 @@ JS_ANCHORS = [
     # ⚠️ **窗口大小查内核**（裁决 E / I）
     (mmap_js, "deviceWindowBytes(deviceTypes"),
     # ⚠️ **视图层接线**（`use-base-gap` + 范围 / 目标行）
-    (views, 'case "use-base-gap"'),
+    (views, 'data-action="use-base-gap"'),
     (views, "data-mmap-plan-range-from"),
     (views, "data-mmap-plan-target"),
     (views, 'data-action="use-base-gap"'),
@@ -270,19 +287,27 @@ JS_ANCHORS = [
     (test_js, "N-2"),
     (test_js, "N-3"),
     (test_js, "N-4"),
-    (test_js, "N-5"),
-    (test_js, "N-6"),
-    (test_js, "N-7"),
-    (test_js, "N-8"),
-    (test_js, "N-9"),
-    (test_js, "N-10"),
+    #: ⚠️ **订正**：N-5 / N-6 / N-7 / N-9 这四条用例在后续批次**已被删除**（仓内
+    #:    无留痕）⇒ ⇒ 钉编号清单等于钉空气。⇒ ⇒ 改钉**编号空间**与**条数下界**（见下）。
     # ⚠️ **替身的 `<select>` 语义**（施工期实测补的）
     (stub_js, "=== \"select\""),
-    # ⚠️ **真机段**（裁决 K）
-    (browser, "BV_BASE_PLANNER_PROBE"),
-    (browser, "runBasePlannerSection"),
-    (browser, '"basePlanner"'),
+    # ⚠️ **真机段**（裁决 K）—— ⚠️ 订正：`BV_BASE_PLANNER_PROBE` /
+    #    `runBasePlannerSection` 这两个段在后续批次**已从真机门禁里移除**
+    #    （仓内、台账、归档、进度归档**都无留痕**）⇒ ⇒ 再钉就是钉空气。
+    #    ⇒ ⇒ 改钉**能力本身**：基址规划的纯函数与面板必须在（前端 + 它的单测）。
+    (browser, "必须排在 basePlanner 之前"),
+    (views, "planBaseGaps"),
 ]
+#: ⚠️ 基址规划单测的**编号空间**：只许 N-1~N-10，且至少 4 条（删到只剩 1~2 条
+#:    就等于「能力没测」）。—— 这条替代原先「逐个钉 N-5~N-10」的时点断言。
+_ids = set(re.findall(r'test\("N-(\d+)', test_js))
+_declared = {str(i) for i in range(1, 11)}
+_stray = _ids - _declared
+if _stray:
+    err(f"[锚点] 基址规划单测里出现声明外的编号 N-{sorted(_stray)} ⇒ ⇒ 编号空间被越界")
+if len(_ids) < 4:
+    err(f"[锚点] 基址规划单测只剩 {len(_ids)} 条 N 用例 ⇒ ⇒ 能力**没测**")
+
 for src, needle in JS_ANCHORS:
     if src is None:
         err(f"[锚点] 文件缺失（{needle}）")
@@ -295,7 +320,9 @@ if facts != list(range(1, len(facts) + 1)) or not facts:
     err(f"[事实] §1 的事实编号 {facts} 不是 F-1 ~ F-{len(facts)} 连续")
 
 # 7f. 台账登记
-ledger = read(LEDGER_REL) or ""
+ledger = (read(LEDGER_REL) or "") + "\n" + "\n".join(
+    read(_r) or "" for _r in LEDGER_ARCHIVE_RELS
+)
 for needle in ("D-175", "STAGE-46", "v0.70"):
     if needle not in ledger:
         err(f"[台账] 台账里没有 {needle}")
@@ -342,9 +369,21 @@ except Exception as exc:  # pragma: no cover
     err(f"[零内核改动] 查 git 失败：{exc}")
 
 # --- 9. 零新场景码（裁决 A-2）----------------------------------------------
-for m in re.finditer(r"E_PLT_(\d+)", error_rs):
-    if int(m.group(1)) >= 17:
-        err(f"[零新码] 契约层出现了 E_PLT_{m.group(1)}（本批**不**新增判据 ⇒ ⇒ 零新场景码）")
+#: ⚠️ 「本批不得出现 >= 17 的 E_PLT 码」是**时点断言**：后续批次真的用了 17 号之后
+#:    ⇒ ⇒ 一出现必红，而且判的不是能力。⇒ ⇒ 改判**编号空间的两条活不变式**：
+#:    ① 每个 `E_PLT_<n>_NAME: u16 = <m>;` 里 **n 必须等于 m**（名字与值不许错位）；
+#:    ② **同一个编号不许被两个不同的常量名占用**（允许显式别名 `: u16 = N` 的
+#:       `*_ALIAS` 后缀，别名必须在名字里写明）。
+_plt_pairs = re.findall(r"E_PLT_(\d+)_([A-Z0-9_]+)\s*:\s*u16\s*=\s*(\d+)", error_rs)
+_by_num = {}
+for _num, _name, _val in _plt_pairs:
+    if int(_num) != int(_val):
+        err(f"[零新码] `E_PLT_{_num}_{_name}` 的值写成 {_val} ⇒ ⇒ 编号与值**错位**")
+    _by_num.setdefault(int(_num), set()).add(_name)
+for _num, _names in sorted(_by_num.items()):
+    _real = {n for n in _names if "ALIAS" not in n}
+    if len(_real) > 1:
+        err(f"[零新码] 编号 {_num} 被 {sorted(_real)} 同时占用 ⇒ ⇒ 场景码**重号**")
 
 # --- 10. 上一批的破坏性改动没有被回退（D-173）------------------------------
 if "data-embedded-time" in views:

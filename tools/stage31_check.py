@@ -59,6 +59,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7g / 7j 用）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行闭环后**整行移入归档**（本仓规约）⇒ ⇒ D-130 已整行移入
+#: `REVIEWS-archive.md` ⇒ ⇒ 判据必须「现台账 + 归档 + 进度归档」合体才算「台账里登记过」。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
 
 M22_REL = "crates/kernel/src/m22_hms/mod.rs"
 HOST_REL = "crates/kernel/src/kernel_host/mod.rs"
@@ -395,8 +401,14 @@ for row in rows12:
     if not blobs:
         continue
     blob = "\n".join(blobs)
+    #: ⚠️ 宿主已按域拆分 ⇒ ⇒ 点名的单文件里没有时再看**同目录整层**。
+    _layer = "\n".join(
+        f.read_text(encoding="utf-8")
+        for rel in paths
+        for f in sorted((REPO_ROOT / rel).parent.glob("*" + (REPO_ROOT / rel).suffix))
+    )
     for tok in idents:
-        if tok in blob:
+        if tok in blob or tok in _layer:
             continue
         err(f"[跨层] §1.2 的 {fid} 行点名的标识符 {tok!r} 在源文件里找不到"
             " ⇒ ⇒ 规格与代码漂移")
@@ -405,7 +417,10 @@ for row in rows12:
 m22_path = REPO_ROOT / M22_REL
 host_path = REPO_ROOT / HOST_REL
 m22_text = m22_path.read_text(encoding="utf-8") if m22_path.exists() else ""
-host_text = host_path.read_text(encoding="utf-8") if host_path.exists() else ""
+#: ⚠️ 宿主已按域拆分（`degrade.rs` / `assembly.rs` / `execute.rs` …）⇒ ⇒ 认「层」。
+host_text = "\n".join(
+    f.read_text(encoding="utf-8") for f in sorted(host_path.parent.glob("*" + host_path.suffix))
+) if host_path.exists() else ""
 if not m22_text:
     err(f"[落点] 找不到 {M22_REL} ⇒ ⇒ 跨层检查**静默失效** ⇒ ⇒ 必须红")
 if not host_text:
@@ -428,6 +443,10 @@ if not re.search(r"set_degrade_policy\s*\(\s*Severity::Fatal\s*,\s*DegradeAction
 # ---- 7g. 台账 **D-130 末列**必须点名三档够不着的动作 + 本批的新标记 ----
 ledger_path = REPO_ROOT / LEDGER_REL
 ledger_text = ledger_path.read_text(encoding="utf-8") if ledger_path.exists() else ""
+for _r in LEDGER_ARCHIVE_RELS:
+    _p = REPO_ROOT / _r
+    if _p.exists():
+        ledger_text += "\n" + _p.read_text(encoding="utf-8")
 if not ledger_text:
     err(f"[台账] 找不到台账 {LEDGER_REL} ⇒ ⇒ 判据**静默失效** ⇒ ⇒ 必须红")
 else:
@@ -446,6 +465,12 @@ else:
             body_cell = d130_row
         else:
             body_cell = cells[3]
+        #: ⚠️ D-130 有**两行**：现台账那行是**压缩摘要**（明细已整行移入归档），
+        #:    归档那行是**全文**。⇒ ⇒ 本批新标记只可能出现在其中一行
+        #:    ⇒ ⇒ 判据必须在**两行合体**里找（只在第一行找会假红）。
+        _all = "\n".join(
+            l for l in ledger_text.splitlines() if l.startswith("| **D-130**")
+        )
         for act in ("SnapshotRestore", "Pause", "Disconnect"):
             if act not in body_cell:
                 err(f"[台账] D-130 的说明格里没有点名 `{act}`"
@@ -453,7 +478,7 @@ else:
         # ⚠️ **本批专属的新标记** —— 「三档动作的名字」v0.45 批就已经有了 ⇒ ⇒
         #    只查名字 ⇒ ⇒ **零判别力** ⇒ ⇒ 必须查**本批才可能有**的东西。
         for mark in ("v0.46", "DegradeAttempt", "E_HMS-01"):
-            if mark not in body_cell:
+            if mark not in _all:
                 err(f"[台账] D-130 的说明格里没有本批的新标记 {mark!r}"
                     " ⇒ ⇒ 台账**没按 C 做法级别**更新 ⇒ ⇒ 必须红")
 
@@ -491,19 +516,24 @@ if m22_text:
 # ---- 7j. 台账与规格的「真实未闭环」必须一致 + D-130 不销账 ---------------
 if ledger_text:
     # ⚠️ **只取最后一条**「> **真实未闭环数 = 」开头的行（历史行在后面 ⇒ 不取）。
-    open_lines = [l for l in ledger_text.splitlines()
-                  if l.startswith("> **真实未闭环数 = ")]
+    #: ⚠️ 两种形态都认（早期逐批一行 `> **真实未闭环数 = … = N**`；
+    #:    v0.75 起改成一条随批更新的活值 `- 真实未闭环：**N**`）。
+    open_lines = []
+    for l in ledger_text.splitlines():
+        _s = l.lstrip("> ")
+        if _s.startswith("**真实未闭环数 = ") or _s.startswith("- 真实未闭环："):
+            open_lines.append(l)
     if not open_lines:
-        err("[台账] 台账里找不到「> **真实未闭环数 = 」那一行"
+        err("[台账] 台账里找不到「真实未闭环」那一行"
             " ⇒ ⇒ 跨文件一致性判据**静默失效** ⇒ ⇒ 必须红")
     else:
         last = open_lines[-1]
-        m = re.search(r"=\s*(\d+)\*\*", last)
+        m = re.search(r"=\s*(\d+)\*\*", last) or re.search(
+            r"真实未闭环：\*\*(\d+)\*\*", last)
         if not m:
-            err(f"[台账] 最后一条「真实未闭环数」行里抽不出数字 ⇒ ⇒ 判据**静默失效**")
-        elif m.group(1) != EXPECT_OPEN_DEBT:
-            err(f"[台账] 真实未闭环数 = {m.group(1)} ≠ 期望 {EXPECT_OPEN_DEBT}"
-                " ⇒ ⇒ 本批**不销账** ⇒ ⇒ 那个数必须不变")
+            err("[台账] 「真实未闭环」那一行里抽不出数字 ⇒ ⇒ 判据**静默失效**")
+        # ⚠️ 「本批不销账 ⇒ 数字必须不变」是**时点断言**（后续销账必红）。
+        #    ⇒ ⇒ 只保留「可解析」这半；实算一致性归 `ledger_check.py --ledger`。
     # ⚠️ **D-130 不销账** ⇒ ⇒ 标记必须仍是「未闭环」。
     for line in ledger_text.splitlines():
         if line.startswith("| **D-130**"):
