@@ -50,6 +50,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7h 用）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行会归档到 history ⇒ 「台账里登记过」= 现台账 + 归档合起来算
+LEDGER_ARCHIVE_REL = "docs/progress/PROGRESS-history.md"
 
 #: ⚠️ **页头挂载点**（7e / 7f 用）⇒ ⇒ **只此一处**定义。
 SLOT_LITERAL = "data-image-load-slot"
@@ -76,6 +78,20 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：落点已按域拆成多文件 ⇒ ⇒ 把整层拼起来再查。
+
+    拆分史见台账：`front/views/m02_viewcomponents.js` 已拆成
+    `front/views/components/*.js`；`front/app.js` 的接线已拆到
+    `front/views/app/*.js`。⇒ ⇒ 钉单文件会让判据随重构**假红**。
+    """
+    parts = []
+    for pat in patterns:
+        for p in sorted(REPO_ROOT.glob(pat)):
+            parts.append(p.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +268,7 @@ else:
         err(f"[落点] {INDEX_REL} 里没有 `{SLOT_LITERAL}`（页头没有入口的挂载点）")
 
 # --- 7f. app 层必须有页头接线 ----------------------------------------------
-app_src = read(APP_REL)
+app_src = read_layer(APP_REL, "front/views/app/*.js")
 if app_src is None:
     err(f"[落点] 找不到 {APP_REL}")
 else:
@@ -278,9 +294,11 @@ else:
 
 # --- 7h. 台账必须登记本批 --------------------------------------------------
 ledger_src = read(LEDGER_REL)
-if ledger_src is None:
-    err(f"[台账] 找不到 {LEDGER_REL}")
+archive_src = read(LEDGER_ARCHIVE_REL)
+if ledger_src is None and archive_src is None:
+    err(f"[台账] 找不到 {LEDGER_REL} / {LEDGER_ARCHIVE_REL}")
 else:
+    ledger_src = (ledger_src or "") + "\n" + (archive_src or "")
     if "v0.48" not in ledger_src:
         err("[台账] 台账里没有 v0.48 的批次记录")
     if "STAGE-33" not in ledger_src:

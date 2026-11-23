@@ -51,6 +51,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠️ **台账路径**（7i 用）⇒ ⇒ **只此一处**定义。
 LEDGER_REL = "docs/reviews/REVIEWS.md"
+#: 台账行会归档到 history ⇒ 「台账里登记过」= 现台账 + 归档合起来算
+LEDGER_ARCHIVE_REL = "docs/progress/PROGRESS-history.md"
 
 INDEX_REL = "front/index.html"
 APP_REL = "front/app.js"
@@ -68,27 +70,27 @@ EXPECT_VERSIONS = {
 #: ⚠️ **设计令牌**（7h 用）—— §5.1 的表是唯一权威处 ⇒ ⇒ 这里只钉**值**。
 #: ⚠️ **旧令牌零残留**：换名不换值 ⇒ ⇒ 留两套命名会是「第二个真相」。
 EXPECT_TOKENS = {
-    "--bg": "#0b1020",
-    "--bg2": "#0e1628",
-    "--panel": "#111a30",
-    "--panel2": "#0d1526",
-    "--line": "#232f4d",
-    "--line2": "#1a2340",
-    "--tx": "#e6edf7",
-    "--tx2": "#a8b4cc",
-    "--tx3": "#6b7a99",
-    "--accent": "#22d3ee",
-    "--amber": "#f5a524",
-    "--red": "#f87171",
-    "--green": "#34d399",
-    "--r": "10px",
+    "--bg": "#f4f5f7",
+    "--bg2": "#ffffff",
+    "--panel": "#ffffff",
+    "--panel2": "#f5f5f5",
+    "--line": "#e5e5e5",
+    "--line2": "#eeeeee",
+    "--tx": "#171717",
+    "--tx2": "#525252",
+    "--tx3": "#737373",
+    "--accent": "#171717",
+    "--amber": "#d97706",
+    "--red": "#dc2626",
+    "--green": "#16a34a",
+    "--r": "12px",
     # ⚠️ **派生色**（§8 订正 5）—— 原先散落在组件里逐字写死 ⇒ ⇒ 收进 `:root`。
-    "--on-accent": "#04121a",
-    "--on-green": "#04120a",
-    "--red-soft": "#ff9a95",
-    "--amber-soft": "#ffcf9a",
-    "--term-bg": "#050a14",
-    "--term-fg": "#b6f0c4",
+    "--on-accent": "#ffffff",
+    "--on-green": "#ffffff",
+    "--red-soft": "#dc2626",
+    "--amber-soft": "#b45309",
+    "--term-bg": "#18181b",
+    "--term-fg": "#e4e4e7",
 }
 
 #: ⚠️ **旧令牌名**（7h 用）—— 本批**一次性换掉** ⇒ ⇒ 这些名字**必须零残留**。
@@ -104,6 +106,20 @@ def read(rel):
     if not p.exists():
         return None
     return p.read_text(encoding="utf-8")
+
+
+def read_layer(*patterns):
+    """判据认「层」不认文件：落点已按域拆成多文件 ⇒ ⇒ 把整层拼起来再查。
+
+    拆分史见台账：`front/views/m02_viewcomponents.js` 已拆成
+    `front/views/components/*.js`；`front/app.js` 的接线已拆到
+    `front/views/app/*.js`。⇒ ⇒ 钉单文件会让判据随重构**假红**。
+    """
+    parts = []
+    for pat in patterns:
+        for p in sorted(REPO_ROOT.glob(pat)):
+            parts.append(p.read_text(encoding="utf-8"))
+    return "\n".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +308,7 @@ else:
             err(f"[落点] {WORKBENCH_REL} 里没有分组取值 `{grp}`")
 
 # --- 7g. 顶栏运行条接线必须落地 --------------------------------------------
-app_src = read(APP_REL)
+app_src = read_layer(APP_REL, "front/views/app/*.js")
 if app_src is None:
     err(f"[落点] 找不到 {APP_REL}")
 else:
@@ -324,9 +340,11 @@ else:
 
 # --- 7i. 台账必须登记本批 --------------------------------------------------
 ledger_src = read(LEDGER_REL)
-if ledger_src is None:
-    err(f"[台账] 找不到 {LEDGER_REL}")
+archive_src = read(LEDGER_ARCHIVE_REL)
+if ledger_src is None and archive_src is None:
+    err(f"[台账] 找不到 {LEDGER_REL} / {LEDGER_ARCHIVE_REL}")
 else:
+    ledger_src = (ledger_src or "") + "\n" + (archive_src or "")
     if "v0.49" not in ledger_src:
         err("[台账] 台账里没有 v0.49 的批次记录")
     if "STAGE-34" not in ledger_src:

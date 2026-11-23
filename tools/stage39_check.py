@@ -17,8 +17,11 @@
        ＋ 7d. **四个版本号的值**（§5.4 的表是唯一权威处）
        ＋ 7e. `front/app.js` 的 `case "read-mem"` 分支**不得**出现字面量 `0x100`
        ＋ 7f. `front/app.js` 的 `case "set-breakpoint"` 分支**有** `params.addr`
-       ＋ 7g. `front/views/m02_viewcomponents.js` 里有 `data-bp-addr-input` 与 `data-mem-addr-input`
-       ＋ 7h. `front/lib/message.js` 的 `SCHEMA_VERSION` **仍**是 8（**前端镜像零改动**）
+       ＋ 7g. `front/views/components/debug-panel.js` 里有 `data-bp-input` / `data-bp-error`
+             与 `data-mem-addr-input`（⚠️ v0.135 三类输入合一后的**现**落点，见规格 §8「订正 12」）
+       ＋ 7h. `front/lib/message.js` 的 `SCHEMA_VERSION` **等于**契约层的当前值
+             （⚠️ 原口径是「仍为 8」——那是 v0.54 当时的**时点**断言，契约 v18 之后不可能再成立
+             ⇒ ⇒ 改成**相等关系**：镜像与契约**不许漂**）
        ＋ 7i. 台账必须登记本批（`v0.54` + `STAGE-39`）
        ＋ 7j. 脚本必须自指存在
        ＋ 7k. §9 的**变异编号** `T1 ~ T6` + `T-C1` **齐全**
@@ -58,7 +61,8 @@ EXPECT_VERSIONS = {
 }
 
 APP_REL = "front/app.js"
-VIEWS_REL = "front/views/m02_viewcomponents.js"
+VIEWS_REL = "front/views/components/debug-panel.js"
+CONTRACT_LIB_REL = "crates/contract/src/lib.rs"
 MESSAGE_REL = "front/lib/message.js"
 LEDGER_REL = "docs/reviews/REVIEWS.md"
 
@@ -269,8 +273,8 @@ views_src = read(VIEWS_REL)
 if views_src is None:
     err(f"[落点] 找不到 {VIEWS_REL}")
 else:
-    # 7g：两个输入框必须在视图层
-    for hook in ("data-bp-addr-input", "data-mem-addr-input"):
+    # 7g：输入框必须在视图层（⚠️ v0.135 起地址 / 符号 / 条件**共用一个框**）
+    for hook in ("data-bp-input", "data-bp-error", "data-mem-addr-input"):
         if hook not in views_src:
             err(f"[落点] {VIEWS_REL} 里没有 `{hook}`"
                 " ⇒ ⇒ 界面**给不出**那个地址")
@@ -279,13 +283,19 @@ message_src = read(MESSAGE_REL)
 if message_src is None:
     err(f"[落点] 找不到 {MESSAGE_REL}")
 else:
-    # 7h：前端镜像**零改动** ⇒ 版本号仍是 8
+    # 7h：前端镜像**必须与契约层同版**（本批当时是 8 ⇒ ⇒ 现在比的是**相等关系**）
     m = re.search(r"SCHEMA_VERSION\s*=\s*(\d+)", message_src)
+    contract_src = read(CONTRACT_LIB_REL)
+    cm = re.search(r"pub const SCHEMA_VERSION:\s*u32\s*=\s*(\d+)", contract_src or "")
     if not m:
         err(f"[版本号] {MESSAGE_REL} 里找不到 `SCHEMA_VERSION`")
-    elif m.group(1) != "8":
-        err(f"[版本号] {MESSAGE_REL} 的 `SCHEMA_VERSION` 是 {m.group(1)}"
-            " ⇒ ⇒ 本批**契约层零升版** ⇒ ⇒ 前端镜像**不许**动")
+    elif contract_src is None:
+        err(f"[版本号] 找不到 {CONTRACT_LIB_REL}")
+    elif not cm:
+        err(f"[版本号] {CONTRACT_LIB_REL} 里找不到 `SCHEMA_VERSION` 的常量")
+    elif m.group(1) != cm.group(1):
+        err(f"[版本号] {MESSAGE_REL} 的 `SCHEMA_VERSION` 是 {m.group(1)}，"
+            f"契约层是 {cm.group(1)} ⇒ ⇒ 前端镜像与契约**漂了**")
 
 # --- 7i. 台账必须登记本批 --------------------------------------------------
 ledger_src = read(LEDGER_REL)
