@@ -1,30 +1,36 @@
-//! HTTP 面（M-24 · §3.1）。P0-1 只提供两条端点：`GET /api/version` 与
-//! `GET /healthz`，以及一条把「没人接的路径」变成**标准错误体**的兜底。
+//! HTTP 面（M-24 · §3.1）。P0-1 有 `GET /api/version` 与 `GET /healthz`；
+//! P0-2 加上会话四条（建 / 列 / 查 / 删）。
 //!
 //! ⚠️ 兜底**不用** axum 的默认 404（那是空 body 的纯文本）—— R-09 要的是
-//! `{code, detail, status}`，客户端拿到默认 404 只能再猜一次。
+//! `{code, detail, status}`；同理，「会话不存在」是 `E_SESS-01`，「路径不存在」
+//! 是 `E_PROTO-08` ⇒ ⇒ 两种 404 必须能被客户端区分开。
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::State;
-use axum::http::Method;
-use axum::routing::get;
+use axum::extract::{Path, State};
+use axum::http::{Method, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::{Config, DEFAULT_MAX_CONSOLE};
 use crate::error::ApiError;
+use crate::session::{BoardSource, SessionInfo, SessionRegistry};
 
-/// 全局只读状态。**没有**会话表 —— 那是 P0-2 的事；这里只放「进程身份」，
-/// 让 `/api/version` 与 `/healthz` 能自证「我是谁、绑在哪、等多久回收」。
-#[derive(Debug, Clone)]
+/// 远程模式的令牌头名（R-15）。
+const TOKEN_HEADER: &str = "x-auth-token";
+
+/// 全局状态 + 会话表把手。
+#[derive(Clone)]
 pub struct AppState {
     /// 进程启动时刻（算 uptime 用）。
     pub started: Instant,
-    /// **实际**绑定的地址。要是 `--port` 被系统改写（P0-1 不允许 0，但仍以
-    /// `local_addr` 为准）⇒ ⇒ 回给客户端的是真地址，不是请求的那个。
+    /// **实际**绑定的地址。
     pub bind: SocketAddr,
     /// 启动默认板（可能为 `None`）。
     pub board: Option<String>,
@@ -32,10 +38,14 @@ pub struct AppState {
     pub session_ttl: Duration,
     /// 每会话 console 缓冲上限。
     pub max_console: usize,
+    /// 远程模式令牌；`None` ⇒ 不校验。
+    pub token: Option<String>,
+    /// 会话表。
+    pub registry: Arc<SessionRegistry>,
 }
 
 impl AppState {
-    /// 由配置与实际绑定地址构造。
+    /// 由配置与实际绑定地址构造（会话表在这里一起建起来）。
     pub fn new(cfg: &Config, bind: SocketAddr) -> Self {
         Self {
             started: Instant::now(),
@@ -43,6 +53,8 @@ impl AppState {
             board: cfg.board.clone(),
             session_ttl: cfg.session_ttl,
             max_console: cfg.max_console,
+            token: cfg.token.clone(),
+            registry: Arc::new(SessionRegistry::new(cfg.max_sessions, cfg.session_ttl)),
         }
     }
 }
@@ -58,15 +70,11 @@ pub struct VersionPayload {
     pub contract_version: &'static str,
     /// 宿主进程自己的版本。
     pub server: &'static str,
-    /// 实际监听地址，方便 Agent 发现「我连的是不是我以为的那个」。
+    /// 实际监听地址。
     pub bind: String,
 }
 
-/// 组装 `/api/version` 的回体。
-///
-/// ⚠️ 三个版本字段**各自取自己的真相源**，不在这里抄字面量：
-/// `kernel` ← 内核 crate、`schema_version` ← 契约信封、`contract_version` ←
-/// 契约 crate 版本。抄字面量就会在下次升版时静默过期。
+/// 组装 `/api/version` 的回体。三个版本字段各取自己的真相源。
 pub fn version_payload(state: &AppState) -> VersionPayload {
     VersionPayload {
         kernel: riscv_sim_kernel::VERSION,
@@ -77,11 +85,62 @@ pub fn version_payload(state: &AppState) -> VersionPayload {
     }
 }
 
-/// 装配路由。P0-2 之后会话端点挂在这里，**不动**这两条。
+/// `POST /api/sessions` 的请求体。**整份可选**：不带 body 等于「用启动默认板」。
+#[derive(Debug, Default, Deserialize)]
+pub struct CreateSessionRequest {
+    /// 想要的板模板 id；缺省 ⇒ 用 `--board` 的启动默认值。
+    #[serde(default)]
+    pub board: Option<String>,
+}
+
+/// 会话描述（列表与详情共用形状）。
+#[derive(Debug, Serialize)]
+pub struct SessionPayload {
+    /// 会话 id。
+    pub session_id: String,
+    /// 生效的板模板 id。
+    pub board: Option<String>,
+    /// 板从哪来：`request` / `startup-default` / `none`。
+    pub board_source: &'static str,
+    /// 会话内核宿主理解的 schema 版本。
+    pub schema_version: u32,
+    /// 已存活毫秒。
+    pub age_ms: u64,
+    /// 距上次活动毫秒。
+    pub idle_ms: u64,
+    /// 是否正在执行一条命令。
+    pub busy: bool,
+}
+
+impl SessionPayload {
+    fn from_info(info: &SessionInfo) -> Self {
+        Self {
+            session_id: info.id.clone(),
+            board: info.board.clone(),
+            board_source: info.board_source.as_str(),
+            schema_version: info.schema_version,
+            age_ms: info.age_ms,
+            idle_ms: info.idle_ms,
+            busy: info.busy,
+        }
+    }
+}
+
+/// 装配路由。P0-3 的板与装载、P0-4 的 run 都挂在这张表上，**不动**已有路径。
 pub fn router(state: AppState) -> Router {
+    let guarded = Router::new()
+        .route("/api/sessions", post(create_session).get(list_sessions))
+        .route(
+            "/api/sessions/{id}",
+            get(get_session).delete(delete_session),
+        )
+        .route("/api/sessions/{id}/pause", post(pause_session))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+
     Router::new()
         .route("/api/version", get(version))
         .route("/healthz", get(healthz))
+        .merge(guarded)
         .fallback(unknown_route)
         .with_state(state)
 }
@@ -92,17 +151,126 @@ async fn version(State(state): State<AppState>) -> Json<VersionPayload> {
 
 async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     let uptime_ms = state.started.elapsed().as_millis() as u64;
-    // 会话数目前恒为 0（会话表在 P0-2）；`sessions` 先占位，避免客户端按
-    // 「字段不存在」写分支。
     Json(json!({
         "status": "ok",
         "uptime_ms": uptime_ms,
-        "sessions": 0,
+        "sessions": state.registry.used(),
+        "session_quota": state.registry.quota(),
         "board": state.board,
         "session_ttl_s": state.session_ttl.as_secs(),
         "max_console": if state.max_console == 0 { DEFAULT_MAX_CONSOLE } else { state.max_console },
         "bind": state.bind.to_string(),
     }))
+}
+
+/// 板的解析规则（**纯函数** ⇒ ⇒ 三种来源可单测，不必起进程）。
+///
+/// 优先级：**请求体 > `--board` 启动默认 > 无板**。
+pub fn resolve_board(
+    requested: Option<String>,
+    startup: Option<String>,
+) -> (Option<String>, BoardSource) {
+    match (requested, startup) {
+        (Some(board), _) => (Some(board), BoardSource::Request),
+        (None, Some(board)) => (Some(board), BoardSource::StartupDefault),
+        (None, None) => (None, BoardSource::None),
+    }
+}
+
+/// 建会话。`board` 的优先级：**请求体 > `--board` 启动默认 > 无板**。
+///
+/// ⚠️ 三种来源都要记进 `board_source` ⇒ ⇒ 事后追「这块板从哪来」不靠猜；
+/// 「无板」也是**一种合法状态**（装载时才回 `E_PLT-22`），不是建会话失败。
+async fn create_session(
+    State(state): State<AppState>,
+    body: Option<Json<CreateSessionRequest>>,
+) -> Result<(StatusCode, Json<SessionPayload>), ApiError> {
+    let requested = body.and_then(|Json(req)| req.board);
+    let (board, source) = resolve_board(requested, state.board.clone());
+    let info = state.registry.create(board, source)?;
+    Ok((StatusCode::CREATED, Json(SessionPayload::from_info(&info))))
+}
+
+async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (infos, max, used) = state.registry.list();
+    let sessions: Vec<SessionPayload> = infos.iter().map(SessionPayload::from_info).collect();
+    Json(json!({
+        "sessions": sessions,
+        "quota": { "max": max, "used": used },
+    }))
+}
+
+/// 取一条会话。**顺带探活**：表里有、线程已死 ⇒ 500 + `E_SESS-03`
+/// （不是假装还在，然后让下一个请求撞墙）。
+async fn get_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (info, pc, executed) = state.registry.probe(&id)?;
+    let payload = SessionPayload::from_info(&info);
+    Ok(Json(json!({
+        "session": payload,
+        "pc": pc,
+        "executed": executed,
+    })))
+}
+
+/// 暂停会话（控制面）：置位即返回，推进者在下一个窗口边界停。
+async fn pause_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let info = state.registry.pause(&id)?;
+    Ok(Json(json!({
+        "session": SessionPayload::from_info(&info),
+        "pause_requested": true,
+    })))
+}
+
+/// 删会话。**两次删的口径是有意的**：第二次回 404 + `E_SESS-01`（R-02），
+/// 而不是 204 —— 客户端据此知道「它已经不在了」。
+async fn delete_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let info = state.registry.delete(&id)?;
+    Ok(Json(json!({
+        "deleted": SessionPayload::from_info(&info),
+    })))
+}
+
+/// 远程模式令牌闸门（R-15）。**只在给了令牌时校验**：回环开发不必带 header。
+async fn require_token(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(expected) = state.token.as_deref() else {
+        return next.run(req).await;
+    };
+    let presented = req
+        .headers()
+        .get(TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    match presented {
+        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {
+            next.run(req).await
+        }
+        _ => ApiError::unauthorized().into_response(),
+    }
+}
+
+/// 定长比较：**不**在第一个不同字节就返回 —— 否则令牌的前缀/长度会从耗时
+/// 上漏出去。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// 兜底 404：保留方法与路径，便于客户端发现是「打错路径」而不是「会话没了」。
@@ -144,5 +312,41 @@ mod tests {
         ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_bytes() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn resolve_board_prefers_request_then_startup_default() {
+        let (board, source) =
+            resolve_board(Some("qemu-virt".into()), Some("minimal".into()));
+        assert_eq!(board.as_deref(), Some("qemu-virt"));
+        assert_eq!(source, BoardSource::Request);
+
+        let (board, source) = resolve_board(None, Some("minimal".into()));
+        assert_eq!(board.as_deref(), Some("minimal"));
+        assert_eq!(source, BoardSource::StartupDefault);
+
+        let (board, source) = resolve_board(None, None);
+        assert!(board.is_none());
+        assert_eq!(source, BoardSource::None, "无板是合法状态，不是失败");
+    }
+
+    #[test]
+    fn startup_default_board_reaches_the_session() {
+        let mut cfg = Config::default();
+        cfg.board = Some("minimal".to_string());
+        let state = AppState::new(&cfg, "127.0.0.1:9876".parse().unwrap());
+        assert_eq!(state.board.as_deref(), Some("minimal"));
+
+        let (board, source) = resolve_board(None, state.board.clone());
+        let info = state.registry.create(board, source).unwrap();
+        assert_eq!(info.board.as_deref(), Some("minimal"));
+        assert_eq!(info.board_source.as_str(), "startup-default");
     }
 }

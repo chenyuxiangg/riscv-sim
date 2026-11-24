@@ -215,6 +215,21 @@ error_families! {
     /// carry two different codes (one code, two meanings is the disease
     /// this file keeps fighting).
     Platform => "PLT",
+    /// Server-mode host: session lifecycle around the kernel (M-24).
+    ///
+    /// ⚠️ **This is the host's family, not the kernel's**：内核里没有「会话」
+    /// 这个概念（一 wasm 实例一会话是 `wasm_api` 的打包方式，不是状态机）。
+    /// 所以「会话不存在 / 忙 / 中毒 / console 窗口丢失 / 超额 / 超时 / 未授权」
+    /// 这七件事在契约层**没有旧家** ⇒ ⇒ 新开一族，而不是借 `CTX` 或 `TRX`
+    /// 的码去表达（借码 = 一码两义，正是本文件反复在治的病）。
+    ///
+    /// 落点判据（D-132 · 判据 C · **「或」**）：前端 server-mode 要**按码
+    /// 分派**（`E_SESS-01` 重建会话、`E_SESS-02` 等待、`E_SESS-04` 重新对齐
+    /// offset）⇒ ⇒ 「前端要按码分派」一条就成立 ⇒ ⇒ 住契约层。
+    ///
+    /// ⚠️ 新增一族**不动** [`crate::SCHEMA_VERSION`]：消息形状没变，只是码表
+    /// 多了一个前缀 ⇒ ⇒ 18 不动。
+    Session => "SESS",
 }
 
 /// Error family used by the protocol-level codes below.
@@ -228,6 +243,68 @@ pub const ENGINE_FAMILY: ErrorFamily = ErrorFamily::Engine;
 
 /// Error family used by the platform-description codes below.
 pub const PLATFORM_FAMILY: ErrorFamily = ErrorFamily::Platform;
+
+/// Error family used by the server-mode host's session codes below.
+pub const SESSION_FAMILY: ErrorFamily = ErrorFamily::Session;
+
+// ---------------------------------------------------------------------------
+// Session family — `E_SESS-01`..`E_SESS-07`（M-24 · 服务器形态）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 七条码**各有各的处置**，不是「HTTP 状态码换个说法」：
+//   01 ⇒ 客户端重建会话；02 ⇒ 等 / `pause`；03 ⇒ 只能丢弃重建；
+//   04 ⇒ 重新对齐 console offset；05 ⇒ 回收别的会话再试；
+//   06 ⇒ 隔离或放宽预算；07 ⇒ 补令牌。
+//   把这七件合成两三个码，客户端就只能靠猜 state code 做分支。
+
+/// Scenario code: the session id is unknown — never existed, already
+/// deleted, or reaped by the idle TTL.
+///
+/// 落到 HTTP 404。**与「忙」严格分开**：`E_SESS-02` 是「它还在，但正被
+/// 别人推进」，客户端该等；本码是「它不在了」，客户端只能重建。
+pub const E_SESS_01_NOT_FOUND: u16 = 1;
+
+/// Scenario code: the session is **busy** — a command is already being
+/// executed on its worker thread.
+///
+/// 落到 HTTP 409。命令面是「一会话一串行」，第二个推进者必须被拒，而不是
+/// 排队（排队会让延迟不可预测，也让「暂停」抢不到前面）。
+pub const E_SESS_02_BUSY: u16 = 2;
+
+/// Scenario code: the session worker is **poisoned** — it panicked or its
+/// thread is gone, so the state behind it can no longer be trusted.
+///
+/// 落到 HTTP 500。**必须**带 detail；这一条不允许空错误体。
+pub const E_SESS_03_POISONED: u16 = 3;
+
+/// Scenario code: the requested console offset is **older than the
+/// buffer's window** — those bytes were dropped after the buffer capped.
+///
+/// 落到 HTTP 409，并在 detail 里给出当前 `base` 与丢弃区间：客户端据此
+/// 重新对齐，而不是从 0 重新拉一遍。
+pub const E_SESS_04_CONSOLE_WINDOW_LOST: u16 = 4;
+
+/// Scenario code: the session quota is exhausted (concurrent sessions or
+/// the per-process ceiling).
+///
+/// 落到 HTTP 429。detail 要给出剩余额度 —— 「不能建」与「不知道还能建
+/// 几个」是两回事。
+pub const E_SESS_05_QUOTA_EXCEEDED: u16 = 5;
+
+/// Scenario code: the wall-clock deadline fired; the guest **has stopped**
+/// at a window boundary.
+///
+/// 落到 HTTP 504，且体内同时给 `stop_reason=timeout` —— 超时不是「服务
+/// 挂了」，会话随后仍可用（R-11）。
+pub const E_SESS_06_TIMEOUT: u16 = 6;
+
+/// Scenario code: remote mode requires a bearer token and the request did
+/// not carry a matching one.
+///
+/// 落到 HTTP 401。detail **只**说「需要 X-Auth-Token」，不回显期望值 ——
+/// 把期望值写进 detail 等于把令牌印在日志里。
+pub const E_SESS_07_UNAUTHORIZED: u16 = 7;
+
 
 // ---------------------------------------------------------------------------
 // Context family — `E_CTX-05`
@@ -705,7 +782,19 @@ mod tests {
 
     /// The `CTX` family existed but had **no** scenario code ⇒ ⇒ v0.44
     /// added exactly **one** (`E_CTX-05`, the admin channel) ⇒ ⇒ the
-    /// family count stays **15** ⇒ ⇒ "add a code, not a family".
+    /// family count stayed **15** at that time ⇒ ⇒ "add a code, not a
+    /// family".
+    ///
+    /// ⚠️ **M-24 moved the count to 16**: the server-mode host needs a
+    /// family the kernel never had (the kernel has no notion of a
+    /// *session*; "one wasm instance = one session" is how `wasm_api`
+    /// packages state, not a state machine). Borrowing `CTX` or `TRX`
+    /// codes would have made one code mean two things ⇒ ⇒ new family
+    /// `SESS`, and this assertion **moves with it** instead of being
+    /// bypassed. The rule this test guards is unchanged: a new **code**
+    /// goes in an existing family; only a genuinely new **concept**
+    /// earns a new family, and then the count is updated here on
+    /// purpose.
     #[test]
     fn the_admin_channel_code_is_the_only_context_scenario_code() {
         assert_eq!(E_CTX_05_ADMIN_CHANNEL_DISABLED, 5);
@@ -731,8 +820,12 @@ mod tests {
             .filter_map(|l| l.split_once("=> "))
             .map(|(_, rest)| rest.split('"').nth(1).unwrap_or_default())
             .collect();
-        assert_eq!(tags.len(), 15, "the family count must not move");
+        // 16 = 15 + `SESS`（M-24 的服务器形态；见本测试的 doc 注释）。
+        // ⚠️ 这个数字**要改就得改在这里**：它是「族数没被随手扩大」的唯一
+        // 断言 ⇒ ⇒ 谁想加族，必须同时把理由写进上方的注释。
+        assert_eq!(tags.len(), 16, "the family count must move on purpose");
         assert!(tags.contains(&"CTX"));
+        assert!(tags.contains(&"SESS"));
     }
 
     /// The LLD's protocol-error codes are spelled `E_PROTO-0x` — the
@@ -894,10 +987,13 @@ mod tests {
     /// ([`every_family_tag_is_pinned`]) keeps the wire tags honest.
     #[test]
     fn the_family_list_is_still_the_fifteen_families() {
+        // ⚠️ 15 → 16：M-24 的服务器形态需要 `SESS`（内核没有「会话」这个
+        // 概念，借 CTX/TRX 的码会变成一码两义）⇒ ⇒ 本测试的**名字**保留
+        // 历史，**数字**跟着新族走，理由写在 `error_families!` 的 SESS 块。
         assert_eq!(
             ALL_FAMILIES.len(),
-            15,
-            "错误族数量变了 —— 本批只补场景码，不新增族（STAGE-13 §1.4 记的是 15 个族）"
+            16,
+            "错误族数量变了 —— 只有「新概念」才配新族，且必须在这里同时写理由"
         );
         assert!(
             ALL_FAMILIES.contains(&ErrorFamily::Health),
@@ -1019,6 +1115,7 @@ mod tests {
             (ErrorFamily::Transport, "TRX"),
             (ErrorFamily::Protocol, "PROTO"),
             (ErrorFamily::Platform, "PLT"),
+            (ErrorFamily::Session, "SESS"),
         ];
 
         // No family may be forgotten: the list must cover *every* variant.

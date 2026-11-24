@@ -26,9 +26,12 @@
 mod api;
 mod config;
 mod error;
+mod session;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::api::AppState;
 use crate::config::Config;
@@ -42,13 +45,18 @@ usage: riscv_sim_server [options]
   --board <id>             startup default board template
   --session-ttl <secs>     idle session reaping window (default 900)
   --max-console <bytes>    per-session console buffer cap (default 1048576)
+  --max-sessions <n>       concurrent session quota (default 8)
   --allow-image-root <dir> whitelist root for image paths (default: uploads only)
   --allow-remote           allow a non-loopback bind (needs --token too)
   --token <secret>         bearer token checked in remote mode
   -h, --help               print this message
 
-  GET /api/version   kernel / schema_version / contract_version / server / bind
-  GET /healthz       liveness + uptime + effective limits
+  GET    /api/version          kernel / schema_version / contract_version / server / bind
+  GET    /healthz              liveness + uptime + effective limits
+  POST   /api/sessions         {board?} -> 201 {session_id, board, board_source, ...}
+  GET    /api/sessions         list + quota
+  GET    /api/sessions/<id>    detail + a live probe (pc / executed)
+  DELETE /api/sessions/<id>    cancel, join, unregister; a second delete is 404
 ";
 
 fn main() -> ExitCode {
@@ -122,7 +130,34 @@ async fn serve(cfg: Config) -> Result<(), String> {
         cfg.max_console,
     );
 
-    axum::serve(listener, api::router(state))
-        .await
-        .map_err(|e| format!("serve {local}: {e}"))
+    // TTL 回收器：每 min(ttl/2, 30 s) 扫一次。放在单独任务里 ⇒ ⇒ 回收不会
+    // 卡在任何一次请求后面。
+    let registry = Arc::clone(&state.registry);
+    let tick = std::cmp::min(cfg.session_ttl / 2, Duration::from_secs(30));
+    let tick = if tick.is_zero() { Duration::from_secs(1) } else { tick };
+    let sweeper = tokio::spawn(async move {
+        let mut timer = tokio::time::interval(tick);
+        loop {
+            timer.tick().await;
+            let reaped = registry.sweep();
+            if reaped > 0 {
+                eprintln!("riscv_sim_server: TTL reaped {reaped} idle session(s)");
+            }
+        }
+    });
+
+    let serve_result = tokio::select! {
+        result = axum::serve(listener, api::router(state.clone())) => {
+            result.map_err(|e| format!("serve {local}: {e}"))
+        }
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("riscv_sim_server: ctrl-c, shutting sessions down");
+            Ok(())
+        }
+    };
+
+    // 退出前把会话线程收干净 ⇒ ⇒ 不留孤儿线程（R-11）。
+    sweeper.abort();
+    state.registry.shutdown();
+    serve_result
 }

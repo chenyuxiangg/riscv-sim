@@ -12,6 +12,10 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use riscv_sim_contract::error::{
+    ErrorFamily, E_SESS_01_NOT_FOUND, E_SESS_02_BUSY, E_SESS_03_POISONED,
+    E_SESS_05_QUOTA_EXCEEDED, E_SESS_07_UNAUTHORIZED,
+};
 use serde::Serialize;
 
 /// 线上错误体。字段顺序固定，便于 `jq` 与逐字节对拍。
@@ -44,7 +48,7 @@ impl ApiError {
     }
 
     /// 404 · 路由不存在。**不是**「会话不存在」—— 那个是 `E_SESS-01`，
-    /// 留给 P0-2 的会话表；这里只是没人接这条路径。
+    /// 见 [`ApiError::session_not_found`]；这里只是没人接这条路径。
     pub fn unknown_route(method: &str, path: &str) -> Self {
         Self::new(
             StatusCode::NOT_FOUND,
@@ -52,6 +56,74 @@ impl ApiError {
             format!("no endpoint for {method} {path} (see GET /api/version)"),
         )
     }
+
+    /// 404 · 会话不存在（R-02：从未存在、已删除、或 TTL 回收）。
+    pub fn session_not_found(id: &str) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            session_code(E_SESS_01_NOT_FOUND),
+            format!("session {id} does not exist; POST /api/sessions to create one"),
+        )
+    }
+
+    /// 409 · 会话忙（已有推进者）。
+    pub fn session_busy(id: &str) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            session_code(E_SESS_02_BUSY),
+            format!("session {id} is already running a command; wait or POST .../pause first"),
+        )
+    }
+
+    /// 500 · 会话中毒（线程 panic / 已退出）。**detail 非空**是硬要求。
+    pub fn session_poisoned(id: &str) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            session_code(E_SESS_03_POISONED),
+            format!("session {id}'s worker is gone (panicked or terminated); recreate the session"),
+        )
+    }
+
+    /// 429 · 并发会话配额用尽。
+    pub fn session_quota(max: usize) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            session_code(E_SESS_05_QUOTA_EXCEEDED),
+            format!("session quota {max} is in use; DELETE an idle session, then retry"),
+        )
+    }
+
+    /// 401 · 远程模式缺令牌（detail 不回显期望值）。
+    pub fn unauthorized() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            session_code(E_SESS_07_UNAUTHORIZED),
+            "this endpoint requires an X-Auth-Token header".to_string(),
+        )
+    }
+
+    /// 本文档用的 HTTP 状态码（**仅测试用**：生产路径只写不读，
+    /// 免得同一份判据出现第二个消费方）。
+    #[cfg(test)]
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// 本文档用的场景码（**仅测试用**）。
+    #[cfg(test)]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+/// 会话族的码**从契约常量拼出来**，不在这里抄字面量 —— 抄一份就是第二个
+/// 真相，改名时必漂。
+fn session_code(scenario: u16) -> String {
+    format!(
+        "E_{}-{:02}",
+        ErrorFamily::Session.as_str(),
+        scenario
+    )
 }
 
 impl IntoResponse for ApiError {

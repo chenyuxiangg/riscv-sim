@@ -16,6 +16,10 @@ pub const DEFAULT_PORT: u16 = 9876;
 /// 忘关的会话把额度占满。
 pub const DEFAULT_SESSION_TTL_SECS: u64 = 900;
 
+/// 默认并发会话上限（配额）。取 8：一个人调 Agent 用不满，失控的重试风暴
+/// 又会被它挡住。
+pub const DEFAULT_MAX_SESSIONS: usize = 8;
+
 /// 默认 console 缓冲上限（字节）。与 `osz-boot` 的 `--max-console` 同量级
 /// ⇒ ⇒ 两条入口在「溢出」这件事上不会给出不同的字节数。
 pub const DEFAULT_MAX_CONSOLE: usize = 1 << 20;
@@ -33,6 +37,8 @@ pub struct Config {
     pub session_ttl: Duration,
     /// 每会话 console 缓冲上限。
     pub max_console: usize,
+    /// 并发会话上限。
+    pub max_sessions: usize,
     /// 镜像路径白名单的根（`--allow-image-root`）。`None` ⇒ 只接受上传的字节。
     pub allow_image_root: Option<PathBuf>,
     /// 是否允许绑定非回环地址。默认 `false`。
@@ -49,6 +55,7 @@ impl Default for Config {
             board: None,
             session_ttl: Duration::from_secs(DEFAULT_SESSION_TTL_SECS),
             max_console: DEFAULT_MAX_CONSOLE,
+            max_sessions: DEFAULT_MAX_SESSIONS,
             allow_image_root: None,
             allow_remote: false,
             token: None,
@@ -77,6 +84,7 @@ impl Config {
                 "--board" => "--board",
                 "--session-ttl" => "--session-ttl",
                 "--max-console" => "--max-console",
+                "--max-sessions" => "--max-sessions",
                 "--allow-image-root" => "--allow-image-root",
                 "--allow-remote" => "--allow-remote",
                 "--token" => "--token",
@@ -131,6 +139,16 @@ impl Config {
                         return Err("bad --max-console value 0: buffer must be positive".to_string());
                     }
                     cfg.max_console = bytes;
+                }
+                "--max-sessions" => {
+                    let raw = value(&mut it, flag)?;
+                    let sessions = raw
+                        .parse::<usize>()
+                        .map_err(|_| format!("bad --max-sessions value {raw:?}: not a count"))?;
+                    if sessions == 0 {
+                        return Err("bad --max-sessions value 0: quota must be positive".to_string());
+                    }
+                    cfg.max_sessions = sessions;
                 }
                 "--allow-image-root" => {
                     cfg.allow_image_root = Some(PathBuf::from(value(&mut it, flag)?));
@@ -217,6 +235,7 @@ mod tests {
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert_eq!(cfg.session_ttl, Duration::from_secs(DEFAULT_SESSION_TTL_SECS));
         assert_eq!(cfg.max_console, DEFAULT_MAX_CONSOLE);
+        assert_eq!(cfg.max_sessions, DEFAULT_MAX_SESSIONS);
         assert!(cfg.board.is_none());
         assert!(cfg.allow_image_root.is_none());
         assert!(!cfg.allow_remote);
@@ -235,6 +254,8 @@ mod tests {
             "60",
             "--max-console",
             "4096",
+            "--max-sessions",
+            "3",
             "--allow-image-root",
             "/tmp",
             "--allow-remote",
@@ -247,6 +268,7 @@ mod tests {
         assert_eq!(cfg.board.as_deref(), Some("qemu-virt"));
         assert_eq!(cfg.session_ttl, Duration::from_secs(60));
         assert_eq!(cfg.max_console, 4096);
+        assert_eq!(cfg.max_sessions, 3);
         assert_eq!(
             cfg.allow_image_root.as_deref(),
             Some(std::path::Path::new("/tmp"))
@@ -264,6 +286,7 @@ mod tests {
             args(&["--port", "x"]),                  // 不是数
             args(&["--session-ttl", "0"]),           // TTL 为 0
             args(&["--max-console", "0"]),           // 缓冲为 0
+            args(&["--max-sessions", "0"]),          // 配额为 0
             args(&["--token", "   "]),               // 空令牌
             args(&["--port", "1", "--port", "1"]),   // 重复旗标
             args(&["--nope"]),                       // 未知旗标
