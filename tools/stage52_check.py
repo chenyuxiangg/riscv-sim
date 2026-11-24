@@ -66,8 +66,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: 钉死是安全的；`PLATFORM_SCHEMA_VERSION` / `PLATFORM_RULES_VERSION` 走
 #: **跨批性质断言**（∈ SUPPORTED / 只许升 ⇒ ⇒ 下一批合法升版不误红）。
 EXPECT_VERSIONS = {
-    "SCHEMA_VERSION": "12",
-    "SIM_STATE_SCHEMA_VERSION": "2",
+    "SCHEMA_VERSION": 12,   # 单调下界（升版不红、回退才红）
+    "SIM_STATE_SCHEMA_VERSION": 2,
     "PLATFORM_SCHEMA_VERSION": None,
     "PLATFORM_RULES_VERSION": None,
 }
@@ -232,6 +232,9 @@ ntest_js = read(NTEST_REL) or ""
 browser = read(BROWSER_REL) or ""
 smoke_js = read(SMOKE_REL) or ""
 ledger = read(LEDGER_REL) or ""
+ledger += "\n" + "\n".join(
+    read(_r) or "" for _r in ("docs/reviews/REVIEWS-archive.md",
+                              "docs/progress/PROGRESS-history.md"))
 
 # 7d. 版本号（契约层 + 前端镜像）
 for name, want in EXPECT_VERSIONS.items():
@@ -255,16 +258,17 @@ for name, want in EXPECT_VERSIONS.items():
         else:
             if int(m.group(1)) < 7:
                 err(f"[版本] {name} = {m.group(1)} < 7 ⇒ ⇒ 只许升不许降")
-    elif m.group(1) != want:
-        err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want}")
+    elif int(m.group(1)) < want:
+        err(f"[版本] {name} = {m.group(1)} **低于**本批落地值 {want}"
+            " ⇒ ⇒ 版本被**回退**了（升版不红、回退才红）")
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
 m2 = re.search(r"SCHEMA_VERSION\s*=\s*['\"]?(\d+)", mirror_js)
 if not m2:
     err("[版本] 前端镜像读不到 `SCHEMA_VERSION`")
-elif m2.group(1) != EXPECT_VERSIONS["SCHEMA_VERSION"]:
-    err(f"[版本] 前端镜像的 SCHEMA_VERSION = {m2.group(1)} ≠ 契约层的 "
-        f"{EXPECT_VERSIONS['SCHEMA_VERSION']} ⇒ ⇒ 两边**不一致**")
+elif int(m2.group(1)) < EXPECT_VERSIONS["SCHEMA_VERSION"]:
+    err(f"[版本] 前端镜像的 SCHEMA_VERSION = {m2.group(1)} **低于**契约层落地值 "
+        f"{EXPECT_VERSIONS['SCHEMA_VERSION']} ⇒ ⇒ 版本被**回退**了")
 for name in ("PLATFORM_SCHEMA_VERSION", "PLATFORM_RULES_VERSION"):
     m3 = re.search(rf"export const {name}\s*=\s*(\d+)", mirror_js)
     m4 = re.search(rf"pub const {name}:\s*u32\s*=\s*(\d+)", lib or "")
@@ -279,45 +283,52 @@ for name in ("PLATFORM_SCHEMA_VERSION", "PLATFORM_RULES_VERSION"):
             f"{m4.group(1)} ⇒ ⇒ 两边**不一致**")
 
 # 7e. 跨层源码锚点
+#: ⚠️ **本批的「引脚复用 / pinmux」那一半已退役**（v0.77 批：`83aafb9`
+#:    彻底删除 pinmux 器件句柄、类型条目与运行时错误码 ⇒ ⇒ `PinSpec` /
+#:    `PinFunction` / `PinDirection` / `parse_gpio_pin_name` / `pinmux.rs` /
+#:    `pinmux_routes` / `E_PLT_23` / `renderPinsCard` / `data-pins-display`
+#:    随之移除 ⇒ ⇒ 继续判只会永远红）。
+#: ⚠️ **保留下的是「模板导入 / 不兜底生效板」那一半 —— 它活着**：
+#:    契约四条协议、`E_PLT_22_NO_BOARD`、内核模板主题与引导文案、
+#:    前端模板库服务与渲染、冒烟 `ListPlatformTemplates`。
+#: ⚠️ **落点跟着拆分走**：内核那几个（`TOPIC_PLATFORM_TEMPLATES` /
+#:    `platform_templates_event` / 引导文案）现在在 `topics.rs` / `events.rs` /
+#:    `project.rs` ⇒ ⇒ 改认 `kernel_host/*.rs` 整层；前端「从模板导入」按钮
+#:    现在是 `product-panel.js` 的 `cmd-load-template`（`case "load-template"`
+#:    随视图拆分改名为命令 id）。
+KERNEL_LAYER = "\n".join(
+    f.read_text(encoding="utf-8")
+    for f in sorted((REPO_ROOT / "crates/kernel/src/kernel_host").glob("*.rs"))
+)
+FRONT_VIEWS = "\n".join(
+    f.read_text(encoding="utf-8")
+    for f in sorted((REPO_ROOT / "front/views").rglob("*.js"))
+)
 ANCHORS = [
-    # ⚠️ 契约：PinSpec 系列（裁决 E / F / G / L）
-    (platform_rs, "pub struct PinSpec"),
-    (platform_rs, "pub struct PinFunction"),
-    (platform_rs, "pub struct PinIrq"),
-    (platform_rs, "pub enum PinDirection"),
-    (platform_rs, "pub fn parse_gpio_pin_name("),
-    (platform_rs, "pub const KINDS"),
+    # ⚠️ 契约：模板四件套 + 器件类型清单（活着）
     (model_rs, "pub struct PlatformTemplateInfo"),
-    # ⚠️ 契约：模板协议四条（裁决 M）
+    (platform_rs, "pub const KINDS"),
     (protocol_rs, "ListPlatformTemplates"),
     (protocol_rs, "GetPlatformTemplate"),
     (protocol_rs, "PlatformTemplates"),
     (protocol_rs, "PlatformTemplate"),
-    # ⚠️ 新码唯一落点
     (error_rs, "E_PLT_22_NO_BOARD"),
-    (error_rs, "E_PLT_23_PINMUX_INVALID"),
-    # ⚠️ 内核：模板主题 + 清单 helper + 无板引导
-    (host_rs, 'TOPIC_PLATFORM_TEMPLATES'),
-    (host_rs, "platform_templates_event("),
-    (host_rs, "请先从模板导入"),
-    # ⚠️ 内核：pinmux 路由（2.5 分支）+ GPIO 锁存解耦 + pinmux 器件
-    (host_rs, "pinmux_routes"),
-    (gpio_rs, "self.pending_irqs |= changed & PIN_COUNT_MASK"),
-    (pinmux_rs, "fn current_function("),
-    (pinmux_rs, "fn set_function_count("),
-    # ⚠️ 前端：模板库服务 / 渲染 / 只读卡 / load-template 接线
+    # ⚠️ 内核：模板主题 + 清单 helper + 无板引导（认层）
+    (KERNEL_LAYER, 'TOPIC_PLATFORM_TEMPLATES'),
+    (KERNEL_LAYER, "platform_templates_event("),
+    (KERNEL_LAYER, "请先从模板导入"),
+    # ⚠️ 前端：模板库服务 / 渲染 / 从模板导入（认层）
     (tsvc_js, "export function wireTemplates("),
     (tsvc_js, "async loadTemplate(id)"),
-    (mmap_js, "function renderTemplateLibrary("),
-    (mmap_js, "function renderPinsCard("),
-    (mmap_js, 'data-pins-display'),
-    (mmap_js, "已废弃（v0.76 · B3）"),
-    (m02_js, 'case "load-template"'),
+    # ⚠️ 模板库面板随视图拆分搬到 `product-panel.js`：`open-templates` /
+    #   `use-template` 两个 action + `data-template-id`（旧
+    #   `renderTemplateLibrary` / `data-tpl-library` 已随拆分下线）。
+    (FRONT_VIEWS, 'case "open-templates"'),
+    (FRONT_VIEWS, "findTemplateEntry(state, el.dataset.templateId"),
+    (FRONT_VIEWS, "cmd-load-template"),
     (app_js, "templatesBridge"),
     (mirror_js, 'PlatformTemplates: "platform.templates"'),
-    # ⚠️ 前端：模板测试 + 真机段 + 冒烟配板段
-    (ntest_js, "data-tpl-library"),
-    (browser, "templateLibrary"),
+    # ⚠️ 冒烟配板段
     (smoke_js, "ListPlatformTemplates"),
 ]
 for src_, needle in ANCHORS:
@@ -388,13 +399,13 @@ for needle in ("4 → 5", "6 → 7", "11 → 12"):
 # --- 9. 新场景码 ----------------------------------------------------------
 if "E_PLT_22_NO_BOARD" not in text:
     err("[新码] 规格里没有提到 `E_PLT_22_NO_BOARD`")
-if "E_PLT_23_PINMUX_INVALID" not in text:
-    err("[新码] 规格里没有提到 `E_PLT_23_PINMUX_INVALID`")
+# ⚠️ `E_PLT_23_PINMUX_INVALID` 随 pinmux 退役（`83aafb9`）⇒ ⇒ 规格里提到它是
+#   **历史事实**，但**不再要求它在代码里被产生**（常量仍在、无路径产生）。
 
 # --- 10. 上一批的破坏性改动没有被回退（STAGE-51）---------------------------
 for needle in ("pub struct McuSpec", "McuIsaInfo", "isa_gate_error",
                "E_PLT_20_FW_ISA_MISMATCH", "E_PLT_21"):
-    if needle not in (platform_rs + host_rs + error_rs):
+    if needle not in (platform_rs + KERNEL_LAYER + error_rs):
         err(f"[回退] 缺 `{needle}` ⇒ ⇒ 上一批（STAGE-51）的破坏性改动**被回退了**")
 # ⚠️ 可读版本列表必须收着 1 / 2 / 3 / 4（存量板档案零风险）。
 m = re.search(r"SUPPORTED_PLATFORM_SCHEMA_VERSIONS:\s*&\[u32\]\s*=\s*&\[([^\]]*)\]",
@@ -416,12 +427,12 @@ else:
 for src_, name in ((platform_rs, "契约层"), (model_rs, "契约层"), (mmap_js, "前端")):
     if "pub auto_selectable" in src_ or "auto_selectable:" in src_:
         err(f"[B3] {name}还有 `auto_selectable` 字段/键（B3 摘除不彻底）")
-for src_, name in ((platform_rs, "契约层"), (host_rs, "内核")):
+for src_, name in ((platform_rs, "契约层"), (KERNEL_LAYER, "内核")):
     if "fn choose_description" in src_ or "choose_description(" in src_:
         err(f"[B3] {name}还有 `choose_description` 函数/调用（自动选档链路没删干净）")
 
 # --- 12. 模板协议主题逐字同 ------------------------------------------------
-host_topic = re.search(r'TOPIC_PLATFORM_TEMPLATES:\s*&str\s*=\s*"([^"]+)"', host_rs)
+host_topic = re.search(r'TOPIC_PLATFORM_TEMPLATES:\s*&str\s*=\s*"([^"]+)"', KERNEL_LAYER)
 js_topic = re.search(r"PlatformTemplates:\s*['\"]([^'\"]+)['\"]", mirror_js)
 if not host_topic:
     err("[模板] 内核读不到 TOPIC_PLATFORM_TEMPLATES")
@@ -448,5 +459,7 @@ print(f"  版本号：SCHEMA_VERSION={EXPECT_VERSIONS['SCHEMA_VERSION']}"
       f" / SIM_STATE={EXPECT_VERSIONS['SIM_STATE_SCHEMA_VERSION']}"
       f" / PLATFORM=性质断言（∈ SUPPORTED）"
       f" / PLATFORM_RULES=性质断言（只许升）")
-print("  新场景码：E_PLT-22（无板装载）· E_PLT-23（pinmux 非法）—— 唯一落点已钉")
+print("  新场景码：E_PLT-22（无板装载）—— 唯一落点已钉")
+print("  ⚠️ 引脚复用 / pinmux 那一半已于 v0.77 批退役（83aafb9）⇒ ⇒ 相关锚点已移除；"
+      "模板导入 / 不兜底生效板那一半仍在守")
 sys.exit(0)

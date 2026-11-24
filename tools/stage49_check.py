@@ -57,12 +57,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: ⚠️ **四个版本号的期望值**（7d / 8 用）—— 本批**描述格式升版** ⇒ ⇒
 #: `PLATFORM_SCHEMA_VERSION` 1 → 2 · `PLATFORM_RULES_VERSION` 3 → 4 ⇒ ⇒
 #: **契约信封 `SCHEMA_VERSION` 不动**（仍 11）· `SIM_STATE_SCHEMA_VERSION` 仍 2。
+#: ⚠️ **单调下界**（**不是**等值）：升版不红、**回退**才红。
 EXPECT_VERSIONS = {
-    "SCHEMA_VERSION": "11",
-    "SIM_STATE_SCHEMA_VERSION": "2",
-    "PLATFORM_SCHEMA_VERSION": "2",
-    "PLATFORM_RULES_VERSION": "4",
+    "SCHEMA_VERSION": 11,
+    "SIM_STATE_SCHEMA_VERSION": 2,
+    "PLATFORM_SCHEMA_VERSION": 2,
+    "PLATFORM_RULES_VERSION": 4,
 }
+
+#: ⚠️ **台账三处合体**（闭环即整行移入归档 · 本仓规约）。
+LEDGER_ARCHIVE_RELS = (
+    "docs/reviews/REVIEWS-archive.md",
+    "docs/progress/PROGRESS-history.md",
+)
 
 LIB_REL = "crates/contract/src/lib.rs"
 MODEL_REL = "crates/contract/src/model.rs"
@@ -103,9 +110,14 @@ KNOWN_ACCEPT = {
 MUTATION_IDS = list(range(1, 8))
 
 #: ⚠️ **本批的两个新场景码**（各有**唯一定义处** ⇒ ⇒ 一码一义）。
+#: ⚠️ **`E_PLT_19_PINS_INVALID` 随 `pins` 段退役**（v0.77 批 · `eccc15c`）：
+#:    常量仍在（编号**保留号 retired**，不许被别的含义复用）⇒ ⇒ 但它**不再被
+#:    任何路径产生** ⇒ ⇒ 所以只剩 `E_PLT_18` 这一条要判「有定义处 + 规格写明」。
 EXPECT_NEW_CODES = [
     "E_PLT_18_ROLES_INVALID",
-    "E_PLT_19_PINS_INVALID",
+]
+RETIRED_CODES = [
+    ("E_PLT_19_PINS_INVALID", 19, "`pins` 段退役（v0.77 · eccc15c）"),
 ]
 
 
@@ -219,14 +231,20 @@ platform_rs = read(PLATFORM_REL) or ""
 error_rs = read(ERROR_REL) or ""
 host_platform = read(HOST_PLATFORM_REL) or ""
 host_rs = read(HOST_REL) or ""
+host_layer = "\n".join(
+    f.read_text(encoding="utf-8")
+    for f in sorted((REPO_ROOT / "crates/kernel/src/kernel_host").glob("*.rs"))
+)
 ktest = read(KTEST_REL) or ""
 mirror_js = read(MIRROR_REL) or ""
 mmap_js = read(MMAP_REL) or ""
 boardstore_js = read(BOARDSTORE_REL) or ""
 browser = read(BROWSER_REL) or ""
 ledger = read(LEDGER_REL) or ""
+ledger += "\n" + "\n".join(read(_r) or "" for _r in LEDGER_ARCHIVE_RELS)
 
 # 7d. 四个版本号（契约层 + 前端镜像）
+actual_schema = None
 for name, want in EXPECT_VERSIONS.items():
     m = None
     for src_ in (lib, model_rs, protocol_rs, platform_rs):
@@ -236,16 +254,19 @@ for name, want in EXPECT_VERSIONS.items():
     if not m:
         err(f"[版本] 契约层读不到 {name}")
         continue
-    if m.group(1) != want:
-        err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want}")
+    if int(m.group(1)) < want:
+        err(f"[版本] {name} = {m.group(1)} **低于**本批落地值 {want}"
+            " ⇒ ⇒ 版本被**回退**了（升版不红、回退才红）")
+    elif name == "SCHEMA_VERSION":
+        actual_schema = int(m.group(1))
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
 m2 = re.search(r"SCHEMA_VERSION\s*=\s*['\"]?(\d+)", mirror_js)
 if not m2:
     err("[版本] 前端镜像读不到 `SCHEMA_VERSION`")
-elif m2.group(1) != EXPECT_VERSIONS["SCHEMA_VERSION"]:
+elif actual_schema is not None and int(m2.group(1)) != actual_schema:
     err(f"[版本] 前端镜像的 SCHEMA_VERSION = {m2.group(1)} ≠ 契约层的 "
-        f"{EXPECT_VERSIONS['SCHEMA_VERSION']} ⇒ ⇒ 两边**不一致**")
+        f"{actual_schema} ⇒ ⇒ 两边**漂了**")
 
 # 7e. 跨层源码锚点
 ANCHORS = [
@@ -256,8 +277,8 @@ ANCHORS = [
     # ⚠️ **D-177 的 C**（裁决 E）：描述里的角色声明
     (platform_rs, "pub struct DeviceRoles"),
     (platform_rs, "pub roles: Option<DeviceRoles>"),
-    (platform_rs, "pub struct PinBinding"),
-    (platform_rs, "pub pins: Option<Vec<PinBinding>>"),
+    # ⚠️ `PinBinding` / `pins` 段随 **v0.77 批**退役（`eccc15c`）⇒ ⇒ 不再判
+    #   （判了只会永远红）；`E_PLT_19` 的编号保留在 RETIRED_CODES 里登记。
     # ⚠️ **B2**（裁决 B / H / I）：`base` 可缺省 + 装配期分配
     # ⚠️ **枚举变体的字段**在 Rust 里**不是** `pub`（那是枚举**定义**上的
     #   写法）⇒ ⇒ ⇒ 这里钉**实际**的字段形状（`base: Option<u32>`）。
@@ -266,7 +287,7 @@ ANCHORS = [
     (host_platform, "pub fn assign_bases("),
     # ⚠️ **前端那几条**（N-1 ~ N-4）
     (mmap_js, "export function normalizeRoles"),
-    (mmap_js, "export function normalizePins"),
+    # ⚠️ `normalizePins`（`pins` 草稿往返）随退役一并删除。
     (boardstore_js, "PLATFORM_RULES_VERSION"),
     # ⚠️ **真机段**（B-151 ~ B-155）
     (browser, "platformSchemaV2"),
@@ -327,6 +348,19 @@ for code in EXPECT_NEW_CODES:
         err(f"[新码] `{code}` 的定义处**不止一处** ⇒ ⇒ 一码多义")
     if code not in text:
         err(f"[新码] 规格里没有写 `{code}`")
+# ⚠️ **退役保留号**：常量还在、值还是原来那个、而且**不许**被另一个名字占用。
+for code, value, why in RETIRED_CODES:
+    m = re.search(rf"pub const {code}:\s*u16\s*=\s*(\d+);", error_rs)
+    if not m:
+        err(f"[新码] 契约层没有 `{code}` 的定义处（{why} ⇒ ⇒ 保留号也必须留痕）")
+    elif int(m.group(1)) != value:
+        err(f"[新码] `{code}` 的编号从 {value} 变成了 {m.group(1)}"
+            " ⇒ ⇒ 保留号被挪用了")
+    else:
+        other = re.search(rf"pub const (E_PLT_\w+):\s*u16\s*=\s*{value};", error_rs)
+        if other and other.group(1) != code:
+            err(f"[新码] 编号 {value} 同时被 `{other.group(1)}` 与 `{code}` 占用"
+                " ⇒ ⇒ 一码两义")
 # ⚠️ **不许复用 `E_PLT_16`** ⇒ ⇒ 「一个场景码只一个含义」这条没被破坏。
 if "E_PLT_18" in error_rs and "E_PLT_16" in error_rs:
     # 两个码**各自独立**存在 ⇒ ⇒ 合法；这里只查**没有把新码定义成旧码的别名**。
@@ -335,15 +369,11 @@ if "E_PLT_18" in error_rs and "E_PLT_16" in error_rs:
             err(f"[新码] `{code}` 被定义成 `E_PLT_16` 的别名 ⇒ ⇒ 一码两义")
 
 # --- 10. 上一批的破坏性改动没有被回退（STAGE-48）---------------------------
-for dto in ("pub struct BridgeReportDto", "pub struct DroppedWireDto",
-            "pub enum WireDropReason"):
-    if dto not in model_rs:
-        err(f"[回退] 契约层没有 `{dto}` ⇒ ⇒ 上一批（STAGE-48）的连线报告"
-            f"**被回退了**")
+# ⚠️ STAGE-48 的连线报告三个 DTO 随 **v0.77 批**退役（`16c01a7`）⇒ ⇒ 不再判。
 if "E_PLT_17_BOARD_MISMATCH" not in error_rs:
     err("[回退] 契约层没有 `E_PLT_17_BOARD_MISMATCH` ⇒ ⇒ 上一批那个场景码"
         "**被回退了**")
-if "E_PLT_17_BOARD_MISMATCH" not in host_rs:
+if "E_PLT_17_BOARD_MISMATCH" not in host_layer:
     err("[回退] 内核侧没有引用 `E_PLT_17_BOARD_MISMATCH` ⇒ ⇒ 上一批那个判定"
         "**被回退了**")
 # ⚠️ **另外三个版本号不许被带走**（本批只许升描述格式那两个）。
@@ -356,8 +386,9 @@ for name in ("SCHEMA_VERSION", "SIM_STATE_SCHEMA_VERSION"):
                 break
     if not m:
         err(f"[回退] 读不到 {name}")
-    elif m.group(1) != EXPECT_VERSIONS[name]:
-        err(f"[回退] {name} = {m.group(1)} ⇒ ⇒ 本批**只**许升描述格式那两个")
+    elif int(m.group(1)) < EXPECT_VERSIONS[name]:
+        err(f"[回退] {name} = {m.group(1)} **低于**本批落地值 "
+            f"{EXPECT_VERSIONS[name]} ⇒ ⇒ 版本被**回退**了")
 
 # ---------------------------------------------------------------------------
 # 结论
@@ -377,5 +408,6 @@ print(f"  版本号：SCHEMA_VERSION={EXPECT_VERSIONS['SCHEMA_VERSION']}"
       f" / SIM_STATE={EXPECT_VERSIONS['SIM_STATE_SCHEMA_VERSION']}"
       f" / PLATFORM={EXPECT_VERSIONS['PLATFORM_SCHEMA_VERSION']}"
       f" / PLATFORM_RULES={EXPECT_VERSIONS['PLATFORM_RULES_VERSION']}")
-print(f"  新场景码：{len(EXPECT_NEW_CODES)} 个（各有唯一定义处）")
+print(f"  新场景码：{len(EXPECT_NEW_CODES)} 个（各有唯一定义处）"
+      f" · 退役保留号 {len(RETIRED_CODES)} 个（`E_PLT-19` · `pins` 段退役）")
 sys.exit(0)

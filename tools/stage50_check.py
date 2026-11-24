@@ -67,8 +67,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: 里**（值随代码走）· `PLATFORM_RULES_VERSION` 只许升（≥ 5）。
 #: 信封两个**不动**（仍 11 / 2 ⇒ ⇒ 钉死是安全的）。
 EXPECT_VERSIONS = {
-    "SCHEMA_VERSION": "11",
-    "SIM_STATE_SCHEMA_VERSION": "2",
+    "SCHEMA_VERSION": 11,
+    "SIM_STATE_SCHEMA_VERSION": 2,  # 单调下界（升版不红、回退才红）
     "PLATFORM_SCHEMA_VERSION": None,  # 性质断言（∈ SUPPORTED）
     "PLATFORM_RULES_VERSION": None,   # 性质断言（≥ 5）
 }
@@ -239,6 +239,9 @@ wtest_js = read(WTEST_REL) or ""
 boardstore_js = read(BOARDSTORE_REL) or ""
 browser = read(BROWSER_REL) or ""
 ledger = read(LEDGER_REL) or ""
+ledger += "\n" + "\n".join(
+    read(_r) or "" for _r in ("docs/reviews/REVIEWS-archive.md",
+                              "docs/progress/PROGRESS-history.md"))
 
 # 7d. 四个版本号（契约层 + 前端镜像）
 for name, want in EXPECT_VERSIONS.items():
@@ -263,14 +266,15 @@ for name, want in EXPECT_VERSIONS.items():
         else:
             if int(m.group(1)) < 5:
                 err(f"[版本] {name} = {m.group(1)} < 5 ⇒ ⇒ 只许升不许降")
-    elif m.group(1) != want:
-        err(f"[版本] {name} = {m.group(1)} ≠ 规格的 {want}")
+    elif int(m.group(1)) < want:
+        err(f"[版本] {name} = {m.group(1)} **低于**本批落地值 {want}"
+            " ⇒ ⇒ 版本被**回退**了（升版不红、回退才红）")
     if name not in text:
         err(f"[版本] 规格里没有提到 {name}")
 m2 = re.search(r"SCHEMA_VERSION\s*=\s*['\"]?(\d+)", mirror_js)
 if not m2:
     err("[版本] 前端镜像读不到 `SCHEMA_VERSION`")
-elif m2.group(1) != EXPECT_VERSIONS["SCHEMA_VERSION"]:
+elif int(m2.group(1)) < EXPECT_VERSIONS["SCHEMA_VERSION"]:
     err(f"[版本] 前端镜像的 SCHEMA_VERSION = {m2.group(1)} ≠ 契约层的 "
         f"{EXPECT_VERSIONS['SCHEMA_VERSION']} ⇒ ⇒ 两边**不一致**")
 # ⚠️ **前端镜像的描述格式 / 规则集版本**也必须**逐字相同**（N-1 / X-1）。
@@ -289,38 +293,20 @@ for name in ("PLATFORM_SCHEMA_VERSION", "PLATFORM_RULES_VERSION"):
             f"{m4.group(1)} ⇒ ⇒ 两边**不一致**")
 
 # 7e. 跨层源码锚点
+#: ⚠️ **本批的引脚级连线 / 通用连接路由能力已退役**（v0.77 批：器件连线 →
+#:    外设中断号映射 · `eccc15c` / `16c01a7` / `980d9af` / `c0f375b`）。
+#:    ⇒ ⇒ `bridge.from.pin` / `BRIDGE_EVENTS` / `BridgeEventSemantics` /
+#:    `take_irq_line_for_pin` / `bridge-editor.js`（`renderBridgeEditor` 等 5 个
+#:    导出）/ `pinLevelRouting` 真机段**全部随之移除**（继续判只会永远红）。
+#: ⚠️ **保留的是「本批引入、且活到现在」的那几件**：引脚数的**唯一落点**
+#:    （契约 `GPIO_PIN_COUNT` + 内核按 id 取 GPIO 句柄）—— 后几批的中断号
+#:    面板仍按「每块 GPIO 一个源」用它 ⇒ ⇒ 它一没，引脚相关显示就断。
 ANCHORS = [
-    # ⚠️ **D-175 的 D**（裁决 B / E / H / I）：`bridge.from` 的**可选** `pin`
-    (platform_rs, "pub pin: Option<u32>"),
-    (platform_rs, "skip_serializing_if = \"Option::is_none\""),
-    # ⚠️ **D-175 的 E**（裁决 C / J）：**词表**是「事件名是否合法」的**唯一落点**
-    (platform_rs, "pub const BRIDGE_EVENTS"),
-    (platform_rs, "pub fn bridge_event_info("),
-    (platform_rs, "pub const BRIDGE_EVENT_PIN_IRQ"),
-    (platform_rs, "pub enum BridgeEventSemantics"),
-    (platform_rs, "OneShot"),
-    # ⚠️ **引脚数的唯一落点**（裁决 E）：契约层的 `GPIO_PIN_COUNT`
     (session_rs, "pub const GPIO_PIN_COUNT"),
-    # ⚠️ **内核侧**：按引脚**取并消费** IRQ 线号（裁决 K）
-    (gpio_rs, "pub fn take_irq_line_for_pin("),
-    (host_rs, "BridgeEventSemantics::OneShot"),
-    (host_rs, "BridgeEventSemantics::Level"),
     (host_platform, "DeviceHandle::Gpio("),
     (host_platform, "pub fn gpio(&self"),
-    # ⚠️ **裁决 F**：引脚数**由内核报**（前端**不抄**）
     (model_rs, "pub pin_count: Option<u32>"),
     (types_rs, "pin_count: Some(GPIO_PIN_COUNT as u32)"),
-    # ⚠️ **前端那条新模块**（N-3 / N-4 / X-3）
-    (weditor_js, "export function renderBridgeEditor("),
-    (weditor_js, "export function collectBridge("),
-    (weditor_js, "export function addBridge("),
-    (weditor_js, "export function removeBridge("),
-    (weditor_js, "export function pinCountOf("),
-    (mmap_js, "renderBridgeEditor({ draft, deviceTypes:"),
-    (mmap_js, "collectBridge(root, next)"),
-    (mirror_js, "export const BRIDGE_EVENTS"),
-    # ⚠️ **真机段**（B-156 ~ B-160）
-    (browser, "pinLevelRouting"),
 ]
 for src_, needle in ANCHORS:
     if src_ is None:
@@ -380,16 +366,14 @@ if "E_PLT_16" not in text:
     err("[新码] 规格里没有写明复用的既有码 `E_PLT_16`")
 
 # --- 10. 上一批的破坏性改动没有被回退（STAGE-49）---------------------------
-for needle in ("base: Option<u32>", "pub struct DeviceRoles", "pub struct PinBinding",
-               "pub roles: Option<DeviceRoles>", "pub pins: Option<Vec<PinBinding>>"):
+# ⚠️ `PinBinding` / `pins` 段随 v0.77 批退役 ⇒ ⇒ 不再判它们（判了只会永远红）。
+for needle in ("base: Option<u32>", "pub struct DeviceRoles",
+               "pub roles: Option<DeviceRoles>", "timer_riscv"):
     if needle not in platform_rs:
         err(f"[回退] 契约层没有 `{needle}` ⇒ ⇒ 上一批（STAGE-49）的破坏性改动"
             f"**被回退了**")
 if "E_PLT_18_ROLES_INVALID" not in error_rs:
     err("[回退] 契约层没有 `E_PLT_18_ROLES_INVALID` ⇒ ⇒ 上一批那个场景码"
-        "**被回退了**")
-if "E_PLT_19_PINS_INVALID" not in error_rs:
-    err("[回退] 契约层没有 `E_PLT_19_PINS_INVALID` ⇒ ⇒ 上一批那个场景码"
         "**被回退了**")
 if "pub fn assign_bases(" not in host_platform:
     err("[回退] 内核侧没有 `assign_bases` ⇒ ⇒ 上一批的装配期分配**被回退了**")
@@ -403,8 +387,9 @@ for name in ("SCHEMA_VERSION", "SIM_STATE_SCHEMA_VERSION"):
                 break
     if not m:
         err(f"[回退] 读不到 {name}")
-    elif EXPECT_VERSIONS[name] is not None and m.group(1) != EXPECT_VERSIONS[name]:
-        err(f"[回退] {name} = {m.group(1)} ⇒ ⇒ 本批**只**许升描述格式那两个")
+    elif EXPECT_VERSIONS[name] is not None and int(m.group(1)) < EXPECT_VERSIONS[name]:
+        err(f"[回退] {name} = {m.group(1)} **低于**本批落地值 "
+            f"{EXPECT_VERSIONS[name]} ⇒ ⇒ 版本被**回退**了")
 # ⚠️ **可读版本列表必须收着 1 / 2**（缺省优先：存量板档案零风险）。
 m = re.search(r"SUPPORTED_PLATFORM_SCHEMA_VERSIONS:\s*&\[u32\]\s*=\s*&\[([^\]]*)\]",
               platform_rs)
@@ -435,4 +420,6 @@ print(f"  版本号：SCHEMA_VERSION={EXPECT_VERSIONS['SCHEMA_VERSION']}"
       f" / PLATFORM=性质断言（∈ SUPPORTED，值随代码）"
       f" / PLATFORM_RULES=性质断言（只许升，值随代码）")
 print("  新场景码：0 个（非法连线一律复用既有的 `E_PLT_16`；后续批新码由各批自守）")
+print("  ⚠️ 引脚级连线 / 通用连接路由能力已于 v0.77 批退役（器件连线 → 外设中断号映射）"
+      " ⇒ ⇒ 相关锚点已移除；保留 GPIO 引脚数落点与实例表句柄")
 sys.exit(0)
