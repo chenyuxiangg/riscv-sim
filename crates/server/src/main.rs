@@ -62,6 +62,7 @@ usage: riscv_sim_server [options]
   DELETE /api/sessions/<id>    cancel, join, unregister; a second delete is 404
   PUT    /api/sessions/<id>/board   {template|description, expected_revision?} -> current map
   POST   /api/sessions/<id>/image   octet-stream (+X-Image-Name) or {path} -> load receipt
+  POST   /api/boot                  {path, prefix?, steps?, timeout_ms?, write_to?} -> console bytes + X-Boot-*
   GET    /api/board/templates       builtin template metadata
   GET    /api/board/templates/<id>  full PlatformDescription (404 E_PLT-22 if unknown)
   POST   /api/sessions/<id>/run     {steps|timeout_ms}? -> stop_reason / executed / pc / console

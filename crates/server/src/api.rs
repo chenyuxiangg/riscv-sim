@@ -41,6 +41,11 @@ const DEFAULT_MEMORY_LEN: u32 = 64;
 /// 一次反汇编的默认条数。
 const DEFAULT_DISASM_COUNT: u32 = 16;
 
+/// `/api/boot` 的默认指令预算 / 硬上限，以及每个窗口的条数。
+const BOOT_DEFAULT_STEPS: u32 = 1_000_000;
+const BOOT_MAX_STEPS: u32 = 100_000_000;
+const BOOT_CHUNK: u32 = 10_000;
+
 /// 一次符号列表的默认条数 / 硬上限（**服务端**的界，不是内核判据）。
 const DEFAULT_SYMBOL_LIMIT: usize = 512;
 const MAX_SYMBOL_LIMIT: usize = 4096;
@@ -189,6 +194,7 @@ pub fn router(state: AppState) -> Router {
             "/api/sessions/{id}/breakpoints/{bp}/enabled",
             put(enable_breakpoint),
         )
+        .route("/api/boot", post(boot))
         .route("/api/board/templates", get(list_templates))
         .route("/api/board/templates/{id}", get(get_template))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -802,6 +808,265 @@ async fn enable_breakpoint(
     )?))
 }
 
+/// `POST /api/boot` 的请求体（**一把梭** · R-08）。
+#[derive(Debug, Default, Deserialize)]
+pub struct BootRequest {
+    /// 镜像路径（白名单内；必填）。
+    pub path: String,
+    /// 板模板 id；缺省 ⇒ `default`（一把梭不该逼客户端先配板）。
+    #[serde(default)]
+    pub board: Option<String>,
+    /// console 里出现这个前缀就停（字节级子串）。
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// 指令预算（缺省 1 000 000，上限 100 000 000）。
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// 墙钟上限（毫秒，缺省 `--max-run-ms`）。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// 把抓到的 console 字节写到这里（必须在 `--allow-image-root` 内）。
+    #[serde(default)]
+    pub write_to: Option<String>,
+}
+
+/// 一条 curl 跑完「配板 → 装载 → 跑到停点 → 取 console」（R-08）。
+///
+/// ⚠️ **临时会话**：为一请求建一条、跑完就删 ⇒ ⇒ 一把梭不占会话配额（也
+/// 不给调用方留下要清理的东西）。失败路径也走 `delete`（best effort）。
+///
+/// ⚠️ **不是第二套停因**：每次窗口都是 `registry.run(steps=chunk)`，停因
+/// 仍由内核 `run_until` 给；这里只做「攒 console / 判前缀 / 判预算」。
+async fn boot(
+    State(state): State<AppState>,
+    Json(request): Json<BootRequest>,
+) -> Result<Response, ApiError> {
+    let path = request.path.trim().to_string();
+    if path.is_empty() {
+        return Err(ApiError::bad_request("field `path` is required"));
+    }
+    let steps = match request.steps {
+        None => BOOT_DEFAULT_STEPS,
+        Some(0) => return Err(ApiError::bad_request("field `steps` must be >= 1")),
+        Some(steps) if steps > BOOT_MAX_STEPS => {
+            return Err(ApiError::bad_request(format!(
+                "steps {steps} exceeds the boot cap ({BOOT_MAX_STEPS})"
+            )))
+        }
+        Some(steps) => steps,
+    };
+    let timeout_ms = match request.timeout_ms {
+        None => state.max_run_ms,
+        Some(0) => return Err(ApiError::bad_request("field `timeout_ms` must be >= 1")),
+        Some(timeout_ms) if timeout_ms > state.max_run_ms => {
+            return Err(ApiError::bad_request(format!(
+                "timeout_ms {timeout_ms} exceeds --max-run-ms ({})",
+                state.max_run_ms
+            )))
+        }
+        Some(timeout_ms) => timeout_ms,
+    };
+
+    // 读镜像（与 `POST …/image` 的路径通道同一口径）。
+    let resolved = upload::whitelist_path(state.allow_image_root.as_deref(), &path)?;
+    let read_from = resolved.clone();
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&read_from))
+        .await
+        .map_err(|err| ApiError::bad_request(format!("image read task failed: {err}")))?
+        .map_err(|err| ApiError::bad_request(format!("image path {path:?} cannot be read: {err}")))?;
+    if bytes.is_empty() {
+        return Err(ApiError::bad_request(format!("image {path:?} is empty")));
+    }
+    let name = upload::name_from_path(&resolved);
+    let kind = upload::kind_for(&name, &bytes)?;
+
+    // 建临时会话（缺省板 = default）。
+    let board = match request.board {
+        Some(board) => Some(board),
+        None => Some("default".to_string()),
+    };
+    let info = state
+        .registry
+        .create(board, crate::session::BoardSource::Request)?;
+    let id = info.id.clone();
+
+    let outcome = boot_once(
+        &state,
+        &id,
+        name,
+        kind,
+        bytes,
+        request.prefix,
+        steps,
+        timeout_ms,
+        request.write_to,
+    )
+    .await;
+    // ⚠️ 无论如何都删：一把梭是**一次性**资源。
+    let _ = state.registry.delete(&id);
+    outcome
+}
+
+/// `boot` 的正文：装载 → 分窗跑到停点 / 前缀 / 预算 → 收 console。
+#[allow(clippy::too_many_arguments)]
+async fn boot_once(
+    state: &AppState,
+    id: &str,
+    name: String,
+    kind: riscv_sim_contract::model::ImageKind,
+    bytes: Vec<u8>,
+    prefix: Option<String>,
+    steps: u32,
+    timeout_ms: u64,
+    write_to: Option<String>,
+) -> Result<Response, ApiError> {
+    let loaded = state.registry.load_image(id, name, kind, bytes)?;
+    let started = Instant::now();
+    let deadline = Duration::from_millis(timeout_ms);
+    let mut remaining = steps;
+    let mut executed: u64 = 0;
+    let mut collected: Vec<u8> = Vec::new();
+    let mut console_offset: u64 = 0;
+    let mut console_total: u64 = 0;
+    let mut window_lost = false;
+    let mut stop = String::from("budget");
+
+    loop {
+        if remaining == 0 {
+            stop = String::from("budget");
+            break;
+        }
+        if started.elapsed() >= deadline {
+            stop = String::from("timeout");
+            break;
+        }
+        let chunk = remaining.min(BOOT_CHUNK);
+        let report = state.registry.run(id, Some(chunk), None)?;
+        let ran = report
+            .get("executed")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        executed += ran;
+        remaining = remaining.saturating_sub(u32::try_from(ran).unwrap_or(chunk));
+
+        // 取这一窗口新产生的 console 字节。
+        let console = state.registry.console(id, console_offset, BOOT_CHUNK as usize)?;
+        let base = console.get("base").and_then(|value| value.as_u64()).unwrap_or(0);
+        console_total = console
+            .get("total")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(console_total);
+        if base > console_offset {
+            // 环把窗口裁掉了 ⇒ ⇒ 只能从新的 base 接着读（不假装没丢）。
+            window_lost = true;
+            console_offset = base;
+        }
+        if let Some(chunk) = console.get("bytes").and_then(|value| value.as_array()) {
+            let chunk: Vec<u8> = chunk
+                .iter()
+                .filter_map(|byte| byte.as_u64().map(|value| value as u8))
+                .collect();
+            console_offset += chunk.len() as u64;
+            collected.extend_from_slice(&chunk);
+        }
+        if let Some(prefix) = &prefix {
+            if contains(&collected, prefix.as_bytes()) {
+                stop = String::from("prefix");
+                break;
+            }
+        }
+
+        let stop_reason = report
+            .get("stop_reason")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        match stop_reason.as_str() {
+            "steps" => {}
+            other => {
+                stop = other.to_string();
+                break;
+            }
+        }
+    }
+
+    if let Some(target) = write_to {
+        write_console_bytes(state.allow_image_root.as_deref(), &target, &collected)?;
+    }
+
+    let board = loaded
+        .get("platform_revision")
+        .and_then(|value| value.as_u64())
+        .map(|revision| revision.to_string())
+        .unwrap_or_default();
+    let status = if stop == "timeout" {
+        StatusCode::GATEWAY_TIMEOUT
+    } else {
+        StatusCode::OK
+    };
+    let response = Response::builder()
+        .status(status)
+        .header("content-type", "application/octet-stream")
+        .header("x-boot-stop", stop.as_str())
+        .header("x-boot-executed", executed.to_string())
+        .header("x-boot-console-total", console_total.to_string())
+        .header("x-boot-console-lost", if window_lost { "1" } else { "0" })
+        .header("x-boot-board-revision", board)
+        .body(Body::from(collected))
+        .map_err(|err| ApiError::bad_request(format!("cannot build boot response: {err}")))?;
+    Ok(response)
+}
+
+/// 把 console 字节写到 `write_to`（**必须**落在 `--allow-image-root` 内）。
+///
+/// ⚠️ 目标文件通常**还不存在** ⇒ ⇒ 不能直接 `canonicalize` 它；规范化
+/// **父目录**，再把文件名接上 ⇒ ⇒ `..` 穿越照样被拒。
+fn write_console_bytes(root: Option<&std::path::Path>, target: &str, bytes: &[u8]) -> Result<(), ApiError> {
+    let root = root.ok_or_else(|| {
+        ApiError::bad_request("`write_to` needs --allow-image-root (there is no writable root)")
+    })?;
+    let canonical_root = std::fs::canonicalize(root).map_err(|err| {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            "E_STORE-07",
+            format!("the allow-image-root {root:?} cannot be resolved: {err}"),
+        )
+    })?;
+    let requested = std::path::Path::new(target);
+    let parent = requested
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|err| {
+        ApiError::bad_request(format!("write_to parent {parent:?} cannot be resolved: {err}"))
+    })?;
+    let file_name = requested
+        .file_name()
+        .ok_or_else(|| ApiError::bad_request("`write_to` must name a file"))?;
+    let resolved = canonical_parent.join(file_name);
+    if !resolved.starts_with(&canonical_root) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "E_STORE-07",
+            format!("write_to {target:?} is outside the allow-image-root {canonical_root:?}"),
+        ));
+    }
+    std::fs::write(&resolved, bytes).map_err(|err| {
+        ApiError::bad_request(format!("write_to {target:?} cannot be written: {err}"))
+    })
+}
+
+/// 子串查找（字节级）—— 与 `osz-boot` 的 `contains` 同一口径。
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
 /// 暂停会话（控制面）：置位即返回，推进者在下一个窗口边界停。
 async fn pause_session(
     State(state): State<AppState>,
@@ -1047,5 +1312,13 @@ mod tests {
         assert_eq!(plan_symbol_limit(Some(0)), 0);
         assert_eq!(plan_symbol_limit(Some(16)), 16);
         assert_eq!(plan_symbol_limit(Some(99_999)), 4_096);
+    }
+
+    /// 前缀判据：字节级子串（与 `osz-boot --prefix` 同一口径）。
+    #[test]
+    fn boot_contains_matches_a_byte_substring() {
+        assert!(contains(b"abcOSZ$ def", b"OSZ$ "));
+        assert!(!contains(b"abc", b"OSZ$ "));
+        assert!(contains(b"abc", b""));
     }
 }

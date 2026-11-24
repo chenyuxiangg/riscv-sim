@@ -50,8 +50,7 @@ use std::time::{Duration, Instant};
 use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, ProductTree, Project};
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 
-use riscv_sim_kernel::kernel_host::platform;
-use riscv_sim_kernel::kernel_host::KernelHost;
+use riscv_sim_kernel::kernel_host::{platform, KernelHost, RunStop};
 use riscv_sim_kernel::m14_bus::REGION_KIND_RAM;
 
 /// 指令预算（默认）。
@@ -62,6 +61,12 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// console 字节流的上限（默认）——防止死循环的 guest 把 stdout 灌爆。
 const DEFAULT_MAX_CONSOLE: usize = 1 << 20;
+
+/// 一次 `run_until` 窗口的指令条数。
+///
+/// ⚠️ 分片的理由是 **streaming**：`--prefix` 要在跑的过程中判、stdout 也要
+/// 边跑边吐；条数本身不影响停因（停因仍由内核 `run_until` 判）。
+const WINDOW: u32 = 10_000;
 
 /// 运行配置。
 struct Config {
@@ -211,25 +216,48 @@ fn main() -> ExitCode {
 /// 装载镜像 —— **自动选档**要靠镜像的地址区间。
 ///
 /// ⚠️ 装载**不跑** guest ⇒ ⇒ 只是把描述挑出来、把内存图建好。
-fn load_host(bytes: Vec<u8>) -> Result<KernelHost, String> {
-    let project = Project {
-        id: "osz-boot".to_string(),
-        name: "osz-boot".to_string(),
-        tree: ProductTree::default(),
-        images: vec![ImageRef {
-            name: "image.elf".to_string(),
-            kind: ImageKind::Elf,
-            source: ImageSource::Bytes(bytes),
-        }],
-        version: Default::default(),
-    };
-
-    let mut host = KernelHost::new();
-    let events = host.handle_message(&Message::command(0, CommandPayload::LoadProject(project)));
-    if let Some(err) = first_error(&events) {
-        return Err(err);
+fn load_host(
+    bytes: Vec<u8>,
+) -> Result<(KernelHost, riscv_sim_contract::platform::PlatformDescription), String> {
+    // ⚠️ **v0.76 起「无板不装载」**：老路子 `KernelHost::new()` 之后直接
+    //   `LoadProject` 会回 `E_PLT-22`（本 runner 就这样断过链）。
+    // ⇒ ⇒ 按**优先级**挨个试内置板：第一块能装上的就是它。
+    // ⚠️ 判据仍是**内核**的（装不上就是装不上）⇒ ⇒ 这里只负责换一块板再问。
+    let mut descriptions = platform::builtin_descriptions()
+        .map_err(|err| format!("{err}"))?;
+    descriptions.sort_by_key(|description| description.priority);
+    let mut last_error = String::from("E_PLT-22:no builtin board could host this image");
+    for description in descriptions {
+        let project = Project {
+            id: "osz-boot".to_string(),
+            name: "osz-boot".to_string(),
+            tree: ProductTree::default(),
+            images: vec![ImageRef {
+                name: "image.elf".to_string(),
+                kind: ImageKind::Elf,
+                source: ImageSource::Bytes(bytes.clone()),
+            }],
+            version: Default::default(),
+        };
+        let mut host = KernelHost::new();
+        let events = host.handle_message(&Message::command(
+            0,
+            CommandPayload::SetMemoryMap {
+                description: description.clone(),
+                expected_revision: None,
+            },
+        ));
+        if let Some(err) = first_error(&events) {
+            last_error = err;
+            continue;
+        }
+        let events = host.handle_message(&Message::command(0, CommandPayload::LoadProject(project)));
+        match first_error(&events) {
+            Some(err) => last_error = err,
+            None => return Ok((host, description)),
+        }
     }
-    Ok(host)
+    Err(last_error)
 }
 
 /// 打印**实际会用的**那份描述的 RAM 窗口（`base:size`，**十进制**）。
@@ -248,24 +276,16 @@ fn print_memory(cfg: &Config) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let host = match load_host(bytes) {
-        Ok(host) => host,
+    // ⚠️ 生效的那份描述 = **宿主真的装上的那一块** ⇒ ⇒ 直接用它算窗口，
+    //    不再按 id 去猜（猜错就是第二个真相）。
+    let (host, description) = match load_host(bytes) {
+        Ok(loaded) => loaded,
         Err(err) => {
             eprintln!("osz-boot: {err}");
             return ExitCode::from(3);
         }
     };
 
-    // ⚠️ 生效的那份描述 = **宿主选出来的那一份** ⇒ ⇒ 按 **id** 取回**同一份**
-    // 内置描述 ⇒ ⇒ 「取哪个 RAM 段」这条规则仍然只有**契约层**那一个落点。
-    let id = host.platform_id().to_string();
-    let description = match platform::builtin_description(&id) {
-        Ok(description) => description,
-        Err(err) => {
-            eprintln!("osz-boot: {err}");
-            return ExitCode::from(3);
-        }
-    };
     let Some((base, size)) = description.ram_window() else {
         eprintln!("osz-boot: the effective description declares no RAM region");
         return ExitCode::from(3);
@@ -327,14 +347,14 @@ fn run(cfg: &Config) -> Verdict {
         Err(e) => return Verdict::Error(format!("read:{}:{}", cfg.path, e)),
     };
 
-    let mut host = match load_host(bytes) {
-        Ok(host) => host,
+    let (mut host, description) = match load_host(bytes) {
+        Ok(loaded) => loaded,
         Err(err) => return Verdict::KernelError(err),
     };
-    let mut seq: u64 = 1;
     if cfg.verbose {
         eprintln!(
-            "[osz-boot] profile={:?} entry-pc=0x{:08x}",
+            "[osz-boot] board={} profile={:?} entry-pc=0x{:08x}",
+            description.id,
             host.memory_profile(),
             host.pc()
         );
@@ -353,7 +373,8 @@ fn run(cfg: &Config) -> Verdict {
     let reason: &str;
 
     loop {
-        if host.total_executed() >= cfg.budget {
+        let executed = host.total_executed();
+        if executed >= cfg.budget {
             reason = "budget-exhausted";
             break;
         }
@@ -364,15 +385,51 @@ fn run(cfg: &Config) -> Verdict {
             return Verdict::Timeout;
         }
 
-        let events = host.handle_message(&Message::command(seq, CommandPayload::Continue));
-        seq += 1;
-
-        if let Some(err) = first_error(&events) {
-            let _ = out.flush();
-            return Verdict::KernelError(err);
+        // ⚠️ **停因判定只有内核一处**：窗口只是「一次问多少条」⇒ ⇒ `Steps`
+        //    表示窗口跑满（继续），其余都是 guest / 宿主真的停了。
+        let window = std::cmp::min(
+            WINDOW,
+            u32::try_from(cfg.budget - executed).unwrap_or(WINDOW),
+        );
+        let report = host.run_until(Some(window), None, &|| false);
+        match report.stop {
+            RunStop::Steps | RunStop::Budget => {}
+            RunStop::Halted(riscv_sim_contract::protocol::HaltReason::EndOfExecution) => {
+                // 取走最后一批 console 再收尾。
+                let chunk = host.drain_console();
+                if !chunk.is_empty() {
+                    console.extend_from_slice(&chunk);
+                    let _ = out.write_all(&chunk);
+                }
+                reason = "end-of-execution";
+                break;
+            }
+            RunStop::Halted(riscv_sim_contract::protocol::HaltReason::Trap) => {
+                let _ = out.flush();
+                return Verdict::KernelError(format!("E_ENG:trap at pc 0x{:08x}", report.pc));
+            }
+            RunStop::Halted(riscv_sim_contract::protocol::HaltReason::Watchdog) => {
+                let _ = out.flush();
+                return Verdict::KernelError(format!("E_ENG:watchdog at pc 0x{:08x}", report.pc));
+            }
+            RunStop::Halted(other) => {
+                let _ = out.flush();
+                return Verdict::KernelError(format!(
+                    "E_DBG:stopped by {other:?} at pc 0x{:08x}",
+                    report.pc
+                ));
+            }
+            RunStop::Timeout => {
+                let _ = out.flush();
+                return Verdict::Timeout;
+            }
+            RunStop::Paused => {
+                let _ = out.flush();
+                return Verdict::KernelError("E_DBG:paused".to_string());
+            }
         }
 
-        // 取走这一批的 console 字节。
+        // 取走这一窗口的 console 字节。
         let chunk = host.drain_console();
         if !chunk.is_empty() {
             console.extend_from_slice(&chunk);
