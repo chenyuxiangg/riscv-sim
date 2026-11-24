@@ -250,6 +250,69 @@ fn load_project_emits_an_image_loaded_receipt() {
     assert_eq!(receipt.6, host.map_revision(), "platform_revision 要能对回当前图");
 }
 
+/// 一块**自跳**的镜像（`jal x0, 0`）⇒ ⇒ 永不前进、永不结束，专门用来验
+/// 「墙钟 / 步进 / 暂停」这三条宿主侧停因。
+fn spin_project() -> Project {
+    let mut load = demo_project();
+    load.images = vec![ImageRef {
+        name: "spin.bin".to_string(),
+        kind: ImageKind::RawHex,
+        source: ImageSource::Bytes(vec![0x6F, 0x00, 0x00, 0x00]),
+    }];
+    load
+}
+
+fn loaded_spinner() -> KernelHost {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    let events = dispatch(&mut host, CommandPayload::LoadProject(spin_project()));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventPayload::Error { .. })),
+        "自跳镜像必须装载成功：{events:?}"
+    );
+    host
+}
+
+/// **墙钟停因**（R-05 / R-11）：`timeout_ms` 到了 ⇒ `Timeout`，已经跑过的
+/// 窗口**不回滚**（`executed > 0`、pc 停在镜像里）。
+#[test]
+fn run_until_reports_a_timeout_after_the_wall_clock() {
+    let mut host = loaded_spinner();
+    let report = host.run_until(None, Some(20), &|| false);
+    assert_eq!(report.stop, RunStop::Timeout, "到点必须报 Timeout");
+    assert!(report.executed > 0, "超时前跑过的条数不许被抹成 0");
+    assert_eq!(report.pc, 0, "自跳的 pc 永远是 0");
+}
+
+/// **步进停因**：`Some(n)` ⇒ 恰好 n 条，`stop = Steps`（不是 halt）。
+#[test]
+fn run_until_steps_exactly_n_instructions() {
+    let mut host = loaded_spinner();
+    let before = host.total_executed();
+    let report = host.run_until(Some(3), None, &|| false);
+    assert_eq!(report.stop, RunStop::Steps);
+    assert_eq!(report.executed, 3, "StepN 必须恰好 3 条");
+    assert_eq!(host.total_executed(), before + 3);
+}
+
+/// **暂停位**在窗口边界生效：闭包说「要停」⇒ `Paused`，且**一条都不跑**。
+#[test]
+fn run_until_honours_the_pause_request_before_the_first_window() {
+    let mut host = loaded_spinner();
+    let report = host.run_until(None, None, &|| true);
+    assert_eq!(report.stop, RunStop::Paused, "暂停位要先于窗口被读");
+    assert_eq!(report.executed, 0, "已经要求暂停了还跑一个窗口，就是谎报");
+}
+
 /// **空工程不发抖**（契约 v19）：配板用的 `images: []` **不是**一次装载
 /// ⇒ ⇒ 一条回执都不该有（否则「装了什么 = 什么也没装」）。
 #[test]

@@ -1435,6 +1435,11 @@ mod assembly;
 /// 暂停、寄存器读写、协议协商、console 输入写入。
 mod execute;
 
+/// **跑到停点的唯一实现**（`run` / `step` / 离线 runner 共用）—— 见
+/// [`KernelHost::run_until`]。`RunStop` / `RunReport` 一起露出，服务端要按
+/// 「为什么停」回 body。
+pub use execute::{RunReport, RunStop};
+
 #[cfg(test)]
 mod tests_watchdog;
 

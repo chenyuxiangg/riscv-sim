@@ -185,6 +185,17 @@ pub fn board_failure(code: &str, detail: &str) -> ApiError {
     ApiError::new(status, code, detail)
 }
 
+/// 读 console 发生点：`E_SESS-04`（窗口丢失）⇒ **409**（客户端要重新对齐，
+/// 不是请求错）⇒ 其余 400。
+pub fn console_failure(code: &str, detail: &str) -> ApiError {
+    let status = if code == "E_SESS-04" {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    ApiError::new(status, code, detail)
+}
+
 /// 装载发生点：内核码 ⇒ 状态（表 9）。
 ///
 /// - `E_PLT-22`（无板装载）⇒ **409**（不是 404：板不存在不在这里说，见上）；

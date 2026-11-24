@@ -26,7 +26,175 @@ use super::watchdog::{
 };
 use super::{kernel_descriptor, KernelHost, E_OBS_02_PIPELINE_UNAVAILABLE, KERNEL_CAP_BITS};
 
+/// 从一批事件里取**第一个真停因**（`EndOfExecution` 不算：它是「预算窗口
+/// 跑满」的占位，窗口循环要靠**进度**判定真结束）。
+fn real_halt(events: &[EventPayload]) -> Option<HaltReason> {
+    events.iter().find_map(|event| match event {
+        EventPayload::Halted {
+            reason: HaltReason::EndOfExecution,
+            ..
+        } => None,
+        EventPayload::Halted { reason, .. } => Some(*reason),
+        _ => None,
+    })
+}
+
+/// 从一批事件里取第一条 `Error`（`(code, message)`）。
+fn first_error(events: &[EventPayload]) -> Option<(String, String)> {
+    events.iter().find_map(|event| match event {
+        EventPayload::Error { code, message } => Some((code.clone(), message.clone())),
+        _ => None,
+    })
+}
+
+/// 一次「跑到停点」的运行，**为什么停下**（M-24 · R-05 · P0-4）。
+///
+/// ⚠️ **这是内核侧的单一停因口径**（D5 的硬约束）：服务端的 `run`、以后的
+/// `/api/boot`、以及离线的 `osz-boot` **都必须**走 [`KernelHost::run_until`]
+/// ⇒ ⇒ 三处不能各自长出一套「什么时候算停」的判断。
+///
+/// ⚠️ **`Budget` / `Timeout` 不是 `HaltReason`**：契约里的停止原因描述的是
+/// **guest 为什么停**（断点 / 观察点 / trap / 结束 / 用户暂停）；「跑满了
+/// 我们给的预算」「墙钟到了」是**宿主**的决定 ⇒ ⇒ 它们住这里，**不上线**
+/// （契约因此不用再升版）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStop {
+    /// guest 自己停在某个地方（真正的一次 halt）。
+    Halted(HaltReason),
+    /// `max_steps` 跑满（`StepN` 的正常完成）。
+    Steps,
+    /// 指令预算跑满（`steps` 用尽之后的「还差一点」不算，这里指上限命中）。
+    Budget,
+    /// 墙钟超时（宿主熔断，R-11）。
+    Timeout,
+    /// 控制面要求暂停（会话被 `POST …/pause` 叫停）。
+    Paused,
+}
+
+/// 一次运行的结论（`executed` 是**本次**跑的条数，不是会话累计）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunReport {
+    /// 为什么停。
+    pub stop: RunStop,
+    /// 本次跑了多少条指令。
+    pub executed: u64,
+    /// 停下时的 pc。
+    pub pc: u32,
+}
+
 impl KernelHost {
+    /// **跑到停点**：`run` / `step` 与离线 runner 共用的唯一实现（R-05 · D5）。
+    ///
+    /// 语义（按次序判定，与设计表 13 一致）：
+    ///
+    /// 1. `max_steps = Some(n)` ⇒ 交给 [`Self::on_run`] 跑**恰好** n 条
+    ///    （内核自己分块）；中途命中真停因 ⇒ `Halted`，否则 `Steps`；
+    /// 2. `max_steps = None` ⇒ **窗口循环**：每个窗口一次 `on_run(None)`
+    ///    （≤ `DEFAULT_INSTRUCTION_BUDGET` 条）。每窗口之间依次看
+    ///    「暂停位 / 墙钟 / 进度」：
+    ///    - 暂停位 ⇒ `on_pause()` 并返回 `Paused`；
+    ///    - 墙钟到 ⇒ `Timeout`（**不回滚已完成的窗口**，R-11）；
+    ///    - 窗口里出现**真停因** ⇒ `Halted`；
+    ///    - 窗口**零进展** ⇒ `Halted(EndOfExecution)`（程序跑完了，或引擎
+    ///      卡住了 —— 这一条让「有限程序」能正常收尾，而不是等超时）。
+    ///
+    /// ⚠️ **`timeout_ms` 只对 `max_steps = None` 生效**：`StepN` 是调试器
+    /// 语义（「恰好 n 条」），中途熔断会让它变成「跑了多少算多少」⇒ ⇒
+    /// 那是两件事，混在一起客户端没法判。
+    pub fn run_until(
+        &mut self,
+        max_steps: Option<u32>,
+        timeout_ms: Option<u64>,
+        pause_requested: &dyn Fn() -> bool,
+    ) -> RunReport {
+        let before = self.total_executed();
+        let started = HostInstant::now();
+
+        // ---- ① 步进：一次交给内核（它自己按预算分块）----
+        if let Some(n) = max_steps {
+            let events = self.on_run(Some(n));
+            if let Some(reason) = real_halt(&events) {
+                return RunReport {
+                    stop: RunStop::Halted(reason),
+                    executed: self.total_executed().saturating_sub(before),
+                    pc: self.pc(),
+                };
+            }
+            // ⚠️ 步进跑满之后**也**看一次暂停位：`pause` 与 `step` 可能同时
+            //   到达（控制面不进队列）⇒ ⇒ 不在这里落一次，用户会以为
+            //   「按了暂停没用」。
+            if pause_requested() {
+                let _ = self.on_pause();
+                return RunReport {
+                    stop: RunStop::Paused,
+                    executed: self.total_executed().saturating_sub(before),
+                    pc: self.pc(),
+                };
+            }
+            return RunReport {
+                stop: RunStop::Steps,
+                executed: self.total_executed().saturating_sub(before),
+                pc: self.pc(),
+            };
+        }
+
+        // ---- ② 继续：窗口循环（每个窗口一个指令预算）----
+        loop {
+            if pause_requested() {
+                let _ = self.on_pause();
+                return RunReport {
+                    stop: RunStop::Paused,
+                    executed: self.total_executed().saturating_sub(before),
+                    pc: self.pc(),
+                };
+            }
+            if let Some(ms) = timeout_ms {
+                if started.elapsed_ms_since() >= ms {
+                    return RunReport {
+                        stop: RunStop::Timeout,
+                        executed: self.total_executed().saturating_sub(before),
+                        pc: self.pc(),
+                    };
+                }
+            }
+
+            let progressed_before = self.total_executed();
+            let events = self.on_run(None);
+            let progressed = self.total_executed().saturating_sub(progressed_before);
+
+            // 引擎自己报的错（看门狗终止 / 总线错误…）先落：这是一次**失败**，
+            // 不是停点。用 `Halted(Trap)` 表达「机器停了、但不是正常停点」，
+            // 由调用方按 `Error` 事件的原话报错。
+            if let Some((code, _message)) = first_error(&events) {
+                return RunReport {
+                    stop: RunStop::Halted(if code.starts_with("E_ENG-") {
+                        HaltReason::Watchdog
+                    } else {
+                        HaltReason::Trap
+                    }),
+                    executed: self.total_executed().saturating_sub(before),
+                    pc: self.pc(),
+                };
+            }
+            if let Some(reason) = real_halt(&events) {
+                return RunReport {
+                    stop: RunStop::Halted(reason),
+                    executed: self.total_executed().saturating_sub(before),
+                    pc: self.pc(),
+                };
+            }
+            if progressed == 0 {
+                // 零进展：程序真跑完了（`mret` 到不存在的 pc），或者引擎
+                // 卡在一个永远不前进的状态。两种都该**现在**收尾。
+                return RunReport {
+                    stop: RunStop::Halted(HaltReason::EndOfExecution),
+                    executed: self.total_executed().saturating_sub(before),
+                    pc: self.pc(),
+                };
+            }
+        }
+    }
+
     /// 继续运行（`Continue` 或 `StepN`）。
     pub(super) fn on_run(&mut self, steps: Option<u32>) -> Vec<EventPayload> {
         self.on_run_inner(steps, false)

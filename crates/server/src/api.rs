@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -30,6 +30,9 @@ use crate::upload;
 /// 远程模式的令牌头名（R-15）。
 const TOKEN_HEADER: &str = "x-auth-token";
 
+/// 一次 console 读的默认上限（64 KiB）。真正的上界是 `--max-console`。
+const DEFAULT_CONSOLE_READ: usize = 64 * 1024;
+
 /// 全局状态 + 会话表把手。
 #[derive(Clone)]
 pub struct AppState {
@@ -47,6 +50,8 @@ pub struct AppState {
     pub allow_image_root: Option<PathBuf>,
     /// 单次上传的镜像字节上限（`--max-image-bytes`）。
     pub max_image_bytes: usize,
+    /// `run` 一次请求的墙钟上限（`--max-run-ms`）。
+    pub max_run_ms: u64,
     /// 远程模式令牌；`None` ⇒ 不校验。
     pub token: Option<String>,
     /// 会话表。
@@ -64,8 +69,13 @@ impl AppState {
             max_console: cfg.max_console,
             allow_image_root: cfg.allow_image_root.clone(),
             max_image_bytes: cfg.max_image_bytes,
+            max_run_ms: cfg.max_run_ms,
             token: cfg.token.clone(),
-            registry: Arc::new(SessionRegistry::new(cfg.max_sessions, cfg.session_ttl)),
+            registry: Arc::new(SessionRegistry::new(
+                cfg.max_sessions,
+                cfg.session_ttl,
+                cfg.max_console,
+            )),
         }
     }
 }
@@ -148,6 +158,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/pause", post(pause_session))
         .route("/api/sessions/{id}/board", put(set_board))
         .route("/api/sessions/{id}/image", post(load_image))
+        .route("/api/sessions/{id}/run", post(run_session))
+        .route("/api/sessions/{id}/step", post(step_session))
+        .route("/api/sessions/{id}/console", get(read_console))
         .route("/api/board/templates", get(list_templates))
         .route("/api/board/templates/{id}", get(get_template))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -358,6 +371,149 @@ async fn get_template(Path(id): Path<String>) -> Result<Json<serde_json::Value>,
     Ok(Json(json!({ "id": id, "description": description })))
 }
 
+/// `POST …/run` 的请求体：**整份可选**。
+#[derive(Debug, Default, Deserialize)]
+pub struct RunRequest {
+    /// 指令上限（不给 ⇒ 只看墙钟）。
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// 墙钟上限（毫秒）；不给 ⇒ 用 `--max-run-ms`。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// 把请求折成 `run_until` 的两个参数（**纯函数** ⇒ ⇒ 三条校验可单测）。
+///
+/// 规则：
+/// - `steps = 0` ⇒ 400（「跑 0 条」没有意义，且会让调用方以为跑过）；
+/// - **`steps` 与 `timeout_ms` 同时给 ⇒ 400**：`StepN` 是「恰好 n 条」的
+///   调试器语义，套墙钟会让它变成「跑了多少算多少」⇒ ⇒ 两件事不能混；
+/// - `timeout_ms = 0` ⇒ 400；`> --max-run-ms` ⇒ 400（**不静默夹到上限**，
+///   否则客户端以为它要的 30 s 生效了）。
+pub fn plan_run(
+    request: RunRequest,
+    max_run_ms: u64,
+) -> Result<(Option<u32>, Option<u64>), ApiError> {
+    if let (Some(_), Some(_)) = (request.steps, request.timeout_ms) {
+        return Err(ApiError::bad_request(
+            "give either `steps` or `timeout_ms`, not both (step semantics are exact-n)",
+        ));
+    }
+    if let Some(steps) = request.steps {
+        if steps == 0 {
+            return Err(ApiError::bad_request("field `steps` must be >= 1"));
+        }
+        return Ok((Some(steps), None));
+    }
+    let timeout_ms = request.timeout_ms.unwrap_or(max_run_ms);
+    if timeout_ms == 0 {
+        return Err(ApiError::bad_request("field `timeout_ms` must be >= 1"));
+    }
+    if timeout_ms > max_run_ms {
+        return Err(ApiError::bad_request(format!(
+            "timeout_ms {timeout_ms} exceeds --max-run-ms ({max_run_ms}); raise the limit or lower the request"
+        )));
+    }
+    Ok((None, Some(timeout_ms)))
+}
+
+/// 跑到停点（R-05）。
+///
+/// ⚠️ **`timeout` 回 504，但 body 仍带停点信息**：只回一个错误体的话，
+/// 客户端拿不到「跑到哪儿了」—— 而熔断最常见的用法正是「跑了 5 秒，停在
+/// pc=X，已执行 N 条」。
+async fn run_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<RunRequest>>,
+) -> Result<Response, ApiError> {
+    let request = body.map(|Json(request)| request).unwrap_or_default();
+    let (steps, timeout_ms) = plan_run(request, state.max_run_ms)?;
+    let report = state.registry.run(&id, steps, timeout_ms)?;
+    if report.get("stop_reason").and_then(|value| value.as_str()) == Some("timeout") {
+        let mut timeout_body = report;
+        timeout_body["code"] = json!(format!("E_{}-06", riscv_sim_contract::error::ErrorFamily::Session.as_str()));
+        let limit_ms = timeout_ms.unwrap_or(state.max_run_ms);
+        timeout_body["detail"] = json!(format!(
+            "run hit the wall-clock limit ({limit_ms} ms); the guest is stopped, see `executed` / `pc`"
+        ));
+        timeout_body["status"] = json!(504);
+        return Ok((StatusCode::GATEWAY_TIMEOUT, Json(timeout_body)).into_response());
+    }
+    Ok(Json(report).into_response())
+}
+
+/// `POST …/step` 的请求体。
+#[derive(Debug, Deserialize)]
+pub struct StepRequest {
+    /// **恰好**跑多少条（`n >= 1`）。
+    pub n: u32,
+}
+
+/// 精确 n 条（R-05）。**没有墙钟**：`StepN` 语义就是「恰好 n 条」。
+async fn step_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<StepRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.n == 0 {
+        return Err(ApiError::bad_request("field `n` must be >= 1"));
+    }
+    let report = state.registry.run(&id, Some(request.n), None)?;
+    Ok(Json(report))
+}
+
+/// `GET …/console` 的查询串。
+#[derive(Debug, Default, Deserialize)]
+pub struct ConsoleQuery {
+    /// 起始绝对偏移（缺省 0）。
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// 最多多少字节（缺省 64 KiB，且不超过 `--max-console`）。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// 读 console 字节（R-06）。
+///
+/// ⚠️ **回原始字节**（`application/octet-stream`），不套 JSON：console 是
+/// 文本流，把它塞进 JSON 数组会让 `curl | xxd` 这类用法变得没法用。
+/// 三对方位信息走 header：`X-Console-Offset` / `X-Console-Base` /
+/// `X-Console-Total`。
+async fn read_console(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ConsoleQuery>,
+) -> Result<Response, ApiError> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_CONSOLE_READ)
+        .min(state.max_console.max(1));
+    let body = state.registry.console(&id, offset, limit)?;
+    let bytes: Vec<u8> = body
+        .get("bytes")
+        .and_then(|value| value.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|byte| byte.as_u64().map(|value| value as u8))
+                .collect()
+        })
+        .unwrap_or_default();
+    let base = body.get("base").and_then(|value| value.as_u64()).unwrap_or(0);
+    let total = body.get("total").and_then(|value| value.as_u64()).unwrap_or(0);
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("x-console-offset", offset.to_string())
+        .header("x-console-base", base.to_string())
+        .header("x-console-total", total.to_string())
+        .body(Body::from(bytes))
+        .map_err(|err| ApiError::bad_request(format!("cannot build console response: {err}")))?;
+    Ok(response)
+}
+
 /// 暂停会话（控制面）：置位即返回，推进者在下一个窗口边界停。
 async fn pause_session(
     State(state): State<AppState>,
@@ -491,5 +647,59 @@ mod tests {
         let info = state.registry.create(board, source).unwrap();
         assert_eq!(info.board.as_deref(), Some("minimal"));
         assert_eq!(info.board_source.as_str(), "startup-default");
+    }
+
+    /// `plan_run` 的三条拒绝：两个都给、`steps=0`、超上限。
+    #[test]
+    fn plan_run_rejects_conflicting_or_zero_bounds() {
+        let both = plan_run(
+            RunRequest {
+                steps: Some(3),
+                timeout_ms: Some(100),
+            },
+            5_000,
+        )
+        .expect_err("steps 与 timeout 不能同时给");
+        assert_eq!(both.status(), StatusCode::BAD_REQUEST);
+
+        let zero = plan_run(
+            RunRequest {
+                steps: Some(0),
+                timeout_ms: None,
+            },
+            5_000,
+        )
+        .expect_err("steps=0 没有意义");
+        assert_eq!(zero.status(), StatusCode::BAD_REQUEST);
+
+        let too_long = plan_run(
+            RunRequest {
+                steps: None,
+                timeout_ms: Some(30_000),
+            },
+            5_000,
+        )
+        .expect_err("超上限必须拒，不能静默夹");
+        assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 缺省行为：不写 `timeout_ms` ⇒ 用 `--max-run-ms`；写 `steps` ⇒ 不带墙钟。
+    #[test]
+    fn plan_run_defaults_to_the_process_limit() {
+        assert_eq!(
+            plan_run(RunRequest::default(), 5_000).expect("缺省合法"),
+            (None, Some(5_000))
+        );
+        assert_eq!(
+            plan_run(
+                RunRequest {
+                    steps: Some(7),
+                    timeout_ms: None
+                },
+                5_000
+            )
+            .expect("步进合法"),
+            (Some(7), None)
+        );
     }
 }

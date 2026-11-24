@@ -49,6 +49,7 @@ usage: riscv_sim_server [options]
   --max-sessions <n>       concurrent session quota (default 8)
   --allow-image-root <dir> whitelist root for image paths (default: uploads only)
   --max-image-bytes <n>    per-upload image byte cap (default 16777216)
+  --max-run-ms <ms>        wall-clock cap for one run (default 5000)
   --allow-remote           allow a non-loopback bind (needs --token too)
   --token <secret>         bearer token checked in remote mode
   -h, --help               print this message
@@ -63,6 +64,9 @@ usage: riscv_sim_server [options]
   POST   /api/sessions/<id>/image   octet-stream (+X-Image-Name) or {path} -> load receipt
   GET    /api/board/templates       builtin template metadata
   GET    /api/board/templates/<id>  full PlatformDescription (404 E_PLT-22 if unknown)
+  POST   /api/sessions/<id>/run     {steps|timeout_ms}? -> stop_reason / executed / pc / console
+  POST   /api/sessions/<id>/step    {n} -> exactly n instructions
+  GET    /api/sessions/<id>/console ?offset&limit -> raw bytes + X-Console-Base/Total
 ";
 
 fn main() -> ExitCode {
@@ -113,6 +117,42 @@ fn main() -> ExitCode {
     }
 }
 
+/// 等一个终止信号，回一句**人话**说明是哪一个。
+///
+/// ⚠️ **SIGTERM 必须处理**：`kill <pid>`（systemd、docker stop、CI 的清理
+/// 步骤）发的都是它，而 `tokio::signal::ctrl_c()` **只**认 SIGINT ⇒ ⇒
+/// 只等 ctrl-c 的话，脚本发 SIGTERM 之后进程会一直挂在端口上（实测过：
+/// 端口占着，要用 `kill -9` 才退）。
+///
+/// ⚠️ **非 Unix 平台**没有 SIGTERM 的概念 ⇒ 只等 ctrl-c（编译期分支，
+/// 不是运行期猜）。
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(signal) => signal,
+            Err(err) => {
+                // 装不上 SIGTERM 处理器不是致命错误：退化成只认 ctrl-c，
+                // 但要**说出来**（否则用户以为 SIGTERM 生效了）。
+                eprintln!("riscv_sim_server: cannot hook SIGTERM ({err}); only ctrl-c stops the server");
+                let _ = tokio::signal::ctrl_c().await;
+                return "ctrl-c";
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "ctrl-c",
+            _ = term.recv() => "SIGTERM",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "ctrl-c"
+    }
+}
+
 /// 绑定、打印**实际**地址、开始服务。
 ///
 /// ⚠️ 打印的是 `local_addr()`，不是 `SocketAddr::new(bind, port)`：后者是
@@ -156,8 +196,8 @@ async fn serve(cfg: Config) -> Result<(), String> {
         result = axum::serve(listener, api::router(state.clone())) => {
             result.map_err(|e| format!("serve {local}: {e}"))
         }
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("riscv_sim_server: ctrl-c, shutting sessions down");
+        signal = shutdown_signal() => {
+            eprintln!("riscv_sim_server: {signal}, shutting sessions down");
             Ok(())
         }
     };

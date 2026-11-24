@@ -26,6 +26,10 @@ pub const DEFAULT_MAX_SESSIONS: usize = 8;
 /// 会被解析器当畸形，报出来的错跟真原因（太大）对不上。
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
+/// `run` 的墙钟上限默认值（毫秒）。R-11：不给上限就等于允许「一个请求把
+/// 进程占死」。
+pub const DEFAULT_MAX_RUN_MS: u64 = 5_000;
+
 /// 默认 console 缓冲上限（字节）。与 `osz-boot` 的 `--max-console` 同量级
 /// ⇒ ⇒ 两条入口在「溢出」这件事上不会给出不同的字节数。
 pub const DEFAULT_MAX_CONSOLE: usize = 1 << 20;
@@ -49,6 +53,8 @@ pub struct Config {
     pub allow_image_root: Option<PathBuf>,
     /// 单次上传的镜像字节上限（`--max-image-bytes`）。
     pub max_image_bytes: usize,
+    /// `run` 一次请求的墙钟上限（`--max-run-ms`）。
+    pub max_run_ms: u64,
     /// 是否允许绑定非回环地址。默认 `false`。
     pub allow_remote: bool,
     /// 远程模式令牌。回环模式下即使给了也只在请求校验时生效。
@@ -66,6 +72,7 @@ impl Default for Config {
             max_sessions: DEFAULT_MAX_SESSIONS,
             allow_image_root: None,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_run_ms: DEFAULT_MAX_RUN_MS,
             allow_remote: false,
             token: None,
         }
@@ -96,6 +103,7 @@ impl Config {
                 "--max-sessions" => "--max-sessions",
                 "--allow-image-root" => "--allow-image-root",
                 "--max-image-bytes" => "--max-image-bytes",
+                "--max-run-ms" => "--max-run-ms",
                 "--allow-remote" => "--allow-remote",
                 "--token" => "--token",
                 other if other.starts_with('-') => {
@@ -174,6 +182,16 @@ impl Config {
                         );
                     }
                     cfg.max_image_bytes = bytes;
+                }
+                "--max-run-ms" => {
+                    let raw = value(&mut it, flag)?;
+                    let ms = raw
+                        .parse::<u64>()
+                        .map_err(|_| format!("bad --max-run-ms value {raw:?}: not milliseconds"))?;
+                    if ms == 0 {
+                        return Err("bad --max-run-ms value 0: limit must be positive".to_string());
+                    }
+                    cfg.max_run_ms = ms;
                 }
                 "--allow-remote" => cfg.allow_remote = true,
                 "--token" => {

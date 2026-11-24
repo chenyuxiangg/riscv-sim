@@ -21,7 +21,7 @@
 //! - **控制面**（暂停 / 取消）：走 `Arc<AtomicU8>` 的位标记，**不进队列**；
 //!   推进者在自己下一个窗口边界看到位就停（≤ 1 个量子）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 
 use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, Project, ProjectVersion};
 use riscv_sim_contract::platform::PlatformDescription;
-use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
+use riscv_sim_contract::protocol::{CommandPayload, EventPayload, HaltReason, Message};
 use riscv_sim_contract::SCHEMA_VERSION;
-use riscv_sim_kernel::kernel_host::KernelHost;
+use riscv_sim_kernel::kernel_host::{KernelHost, RunStop};
 
 use crate::error::ApiError;
 
@@ -48,6 +48,62 @@ pub const CTRL_CANCEL: u8 = 1 << 1;
 /// 窗口判定，见 P0-4）⇒ ⇒ 两层各管一件事：内核管「跑多久」，这里管
 /// 「回执多久没来」。
 const JOB_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 会话的 **console 字节环**（R-06）。
+///
+/// ⚠️ **环形裁尾 + 记丢弃区间**（不是「静默丢」）：`drop` 之前的偏移读不到
+/// 就回 `409 + E_SESS-04`，并把 `base` 一起给出去 ⇒ ⇒ 客户端能重新对齐，
+/// 而不是以为「console 突然变空了」。
+#[derive(Debug)]
+struct ConsoleRing {
+    buf: VecDeque<u8>,
+    /// 环里第一个字节的**绝对**偏移。
+    base: u64,
+    /// 从会话开始到现在写进环的总字节数（含已被裁掉的）。
+    total: u64,
+    cap: usize,
+}
+
+impl ConsoleRing {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: VecDeque::new(),
+            base: 0,
+            total: 0,
+            cap: cap.max(1),
+        }
+    }
+
+    /// 追加字节；超出上限时**从尾部裁**（新字节一定留住）。
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.total += bytes.len() as u64;
+        self.buf.extend(bytes.iter().copied());
+        if self.buf.len() > self.cap {
+            let drop = self.buf.len() - self.cap;
+            self.buf.drain(..drop);
+            self.base += drop as u64;
+        }
+    }
+
+    /// 读 `[offset, offset + limit)`。
+    ///
+    /// 早于 `base` ⇒ `Err(base)`（窗口丢了，告诉客户端从哪重新读）；
+    /// 晚于 `total` ⇒ 空（只是还没产生）。
+    fn read(&self, offset: u64, limit: usize) -> Result<Vec<u8>, u64> {
+        if offset < self.base {
+            return Err(self.base);
+        }
+        if offset >= self.total {
+            return Ok(Vec::new());
+        }
+        let skip = (offset - self.base) as usize;
+        let take = limit.min(self.buf.len().saturating_sub(skip));
+        Ok(self.buf.iter().skip(skip).take(take).copied().collect())
+    }
+}
 
 /// 会话板的来源。**必须记下来**：同一份「板 id」可能来自启动默认或请求，
 /// 事后追「这块板从哪来」只能靠它。
@@ -104,6 +160,25 @@ enum Job {
         description: Box<PlatformDescription>,
         /// 乐观并发的期望修订号；`None` ⇒ 不检查。
         expected_revision: Option<u64>,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 跑到停点（R-05）：内核侧的 `run_until`（**唯一**停因判定），回执带
+    /// 停因、本次条数、pc 与本次新增的 console 字节。
+    Run {
+        /// 指令上限（`step` 就是 `Some(n)`；`run` 不给就是只看墙钟）。
+        steps: Option<u32>,
+        /// 墙钟上限（毫秒）；对 `steps = Some(n)` **不生效**（见内核注释）。
+        timeout_ms: Option<u64>,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 读 console（R-06）：从会话环里取 `[offset, offset+limit)`。
+    Console {
+        /// 起始绝对偏移。
+        offset: u64,
+        /// 最多多少字节。
+        limit: usize,
         /// 回执通道。
         reply: Sender<JobReply>,
     },
@@ -297,6 +372,34 @@ impl SessionHandle {
         )
     }
 
+    /// 跑到停点（R-05）。停因由内核的 `run_until` 给，这里只搬运。
+    pub fn run(
+        &self,
+        steps: Option<u32>,
+        timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Run {
+                steps,
+                timeout_ms,
+                reply,
+            },
+            crate::error::load_failure,
+        )
+    }
+
+    /// 读 console（R-06）。
+    pub fn console(&self, offset: u64, limit: usize) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Console {
+                offset,
+                limit,
+                reply,
+            },
+            crate::error::console_failure,
+        )
+    }
+
     /// 装载镜像（R-04）：把**已经拿到手的字节**包成一个单镜像工程交给内核，
     /// 回执是那一条 `ImageLoaded` + 落点 pc。
     ///
@@ -325,6 +428,8 @@ pub struct SessionRegistry {
     inner: Arc<Mutex<Inner>>,
     max_sessions: usize,
     ttl: Duration,
+    /// 每会话 console 环上限（`--max-console`）。
+    max_console: usize,
 }
 
 struct Inner {
@@ -336,7 +441,7 @@ struct Inner {
 
 impl SessionRegistry {
     /// 建表。`max_sessions` 是并发上限（配额），`ttl` 是空闲回收窗口。
-    pub fn new(max_sessions: usize, ttl: Duration) -> Self {
+    pub fn new(max_sessions: usize, ttl: Duration, max_console: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 next: 1,
@@ -344,6 +449,7 @@ impl SessionRegistry {
             })),
             max_sessions,
             ttl,
+            max_console,
         }
     }
 
@@ -379,6 +485,18 @@ impl SessionRegistry {
             return Err(ApiError::session_quota(self.max_sessions));
         }
 
+        // ⚠️ **建会话就把板配进内核**，不是只记个名字：P0-3 的冒烟里
+        //   `POST /api/sessions {"board":"default"}` 之后装载仍回
+        //   `E_PLT-22`（会话写着 board=default，内核那边却没生效板）——
+        //   「状态里有、真相里没有」正是这条要堵的洞。
+        let description = match board.as_deref() {
+            Some(template) => Some(
+                riscv_sim_kernel::kernel_host::platform::builtin_description(template)
+                    .map_err(|_| ApiError::template_not_found(template))?,
+            ),
+            None => None,
+        };
+
         let seq = inner.next;
         inner.next += 1;
         let id = format!("sess-{seq:06x}");
@@ -399,7 +517,16 @@ impl SessionRegistry {
             busy: Arc::clone(&busy),
             alive: Arc::clone(&alive),
             last_active: Arc::clone(&last_active),
-            join: spawn_worker(id.clone(), rx, ctrl, busy, alive, last_active),
+            join: spawn_worker(
+                id.clone(),
+                rx,
+                ctrl,
+                busy,
+                alive,
+                last_active,
+                self.max_console,
+                description,
+            ),
         });
         let info = handle.info();
         inner.sessions.insert(id, handle);
@@ -497,6 +624,50 @@ impl SessionRegistry {
         Ok(reply)
     }
 
+    /// 跑到停点（R-05）。**借**一条会话，同 [`Self::set_board`]。
+    pub fn run(
+        &self,
+        id: &str,
+        steps: Option<u32>,
+        timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| ApiError::session_poisoned("registry"))?;
+            Arc::clone(
+                guard
+                    .sessions
+                    .get(id)
+                    .ok_or_else(|| ApiError::session_not_found(id))?,
+            )
+        };
+        handle.run(steps, timeout_ms)
+    }
+
+    /// 读 console（R-06）。**借**一条会话，同 [`Self::set_board`]。
+    pub fn console(
+        &self,
+        id: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| ApiError::session_poisoned("registry"))?;
+            Arc::clone(
+                guard
+                    .sessions
+                    .get(id)
+                    .ok_or_else(|| ApiError::session_not_found(id))?,
+            )
+        };
+        handle.console(offset, limit)
+    }
+
     /// 装载镜像（R-04）。**借**一条会话，同 [`Self::set_board`]。
     pub fn load_image(
         &self,
@@ -586,6 +757,26 @@ impl SessionRegistry {
     }
 }
 
+/// 停因的**线上拼写**（HTTP body 的 `stop_reason`）。
+///
+/// ⚠️ 这是**服务端**的词表，不是契约 `HaltReason` 的照抄：`steps` / `budget` /
+/// `timeout` / `pause` 里有三个是宿主的决定（guest 没停）⇒ ⇒ 它们不进契约。
+fn stop_label(stop: RunStop) -> &'static str {
+    match stop {
+        RunStop::Halted(HaltReason::Breakpoint) => "breakpoint",
+        RunStop::Halted(HaltReason::StepOver) => "step-over",
+        RunStop::Halted(HaltReason::Watchpoint) => "watchpoint",
+        RunStop::Halted(HaltReason::EndOfExecution) => "end",
+        RunStop::Halted(HaltReason::Trap) => "trap",
+        RunStop::Halted(HaltReason::UserPause) => "pause",
+        RunStop::Halted(HaltReason::Watchdog) => "watchdog",
+        RunStop::Steps => "steps",
+        RunStop::Budget => "budget",
+        RunStop::Timeout => "timeout",
+        RunStop::Paused => "pause",
+    }
+}
+
 /// 从事件流里取出内核报的第一条错误。
 fn kernel_failure(events: &[EventPayload]) -> Option<KernelFailure> {
     events.iter().find_map(|event| match event {
@@ -670,12 +861,34 @@ fn spawn_worker(
     busy: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     last_active: Arc<Mutex<Instant>>,
+    max_console: usize,
+    board: Option<PlatformDescription>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name(format!("sess-{id}"))
         .spawn(move || {
             // `KernelHost` 是 `!Send` ⇒ ⇒ 只能在这里 `new()`，不能从外面搬进来。
             let mut host = KernelHost::new();
+            let mut console = ConsoleRing::new(max_console);
+            // 启动默认 / 请求指定的板，在建会话的这一刻就配进内核 ⇒ ⇒
+            // 会话一出生就能直接 `…/image` 装载（R-03 的「配板先于装载」）。
+            if let Some(description) = board {
+                let events = host.handle_message(&Message::command(
+                    1,
+                    CommandPayload::SetMemoryMap {
+                        description,
+                        expected_revision: None,
+                    },
+                ));
+                // 内置模板不可能配不上：配不上说明模板表坏了 ⇒ ⇒ 会话直接中毒，
+                // 不要带着「有板」的假象去跑。
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, EventPayload::Error { .. })),
+                    "内置板模板必须能配上：{events:?}"
+                );
+            }
             // panic 也要把 `alive` 落下去 ⇒ ⇒ 外面才会说「中毒」而不是「忙」。
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 while let Ok(job) = rx.recv() {
@@ -688,6 +901,56 @@ fn spawn_worker(
                             let _ = reply.send(PingReply {
                                 pc: host.pc(),
                                 executed: host.total_executed(),
+                            });
+                        }
+                        Job::Run {
+                            steps,
+                            timeout_ms,
+                            reply,
+                        } => {
+                            // ⚠️ 暂停位在**窗口边界**被读（≤1 个预算窗口的延迟）：
+                            //   `run_until` 收一个闭包 ⇒ ⇒ 内核不知道「谁在要求暂停」，
+                            //   只知道「要不要停」。
+                            let pause_flag = Arc::clone(&ctrl);
+                            let report = host.run_until(steps, timeout_ms, &|| {
+                                pause_flag.load(Ordering::Acquire) & CTRL_PAUSE != 0
+                            });
+                            // ⚠️ 跑完**立刻**把字节从内核搬进会话环：内核侧的捕获环
+                            //   也是有界的，攒着不取会丢最新的字节。
+                            let drained = host.drain_console();
+                            let run_base = console.total;
+                            console.push(&drained);
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "stop_reason": stop_label(report.stop),
+                                "executed": report.executed,
+                                "pc": report.pc,
+                                "total_executed": host.total_executed(),
+                                "console": {
+                                    "base": run_base,
+                                    "bytes": drained,
+                                    "total": console.total,
+                                },
+                            })));
+                        }
+                        Job::Console {
+                            offset,
+                            limit,
+                            reply,
+                        } => {
+                            let _ = reply.send(match console.read(offset, limit) {
+                                Ok(bytes) => Ok(serde_json::json!({
+                                    "offset": offset,
+                                    "base": console.base,
+                                    "total": console.total,
+                                    "bytes": bytes,
+                                })),
+                                Err(base) => Err(KernelFailure {
+                                    code: "E_SESS-04".to_string(),
+                                    message: format!(
+                                        "console window lost: the ring starts at offset {base}; \
+                                         re-read from there (requested offset {offset})"
+                                    ),
+                                }),
                             });
                         }
                         Job::SetBoard {
@@ -752,7 +1015,7 @@ mod tests {
     use super::*;
 
     fn registry() -> SessionRegistry {
-        SessionRegistry::new(2, Duration::from_millis(50))
+        SessionRegistry::new(2, Duration::from_millis(50), 1024)
     }
 
     #[test]
@@ -812,7 +1075,7 @@ mod tests {
 
     #[test]
     fn ttl_reaps_idle_sessions() {
-        let registry = SessionRegistry::new(4, Duration::from_millis(20));
+        let registry = SessionRegistry::new(4, Duration::from_millis(20), 1024);
         let info = registry.create(None, BoardSource::None).unwrap();
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(registry.sweep(), 1);
@@ -827,5 +1090,43 @@ mod tests {
         registry.create(None, BoardSource::None).unwrap();
         registry.shutdown();
         assert_eq!(registry.used(), 0);
+    }
+
+    /// **环的上限只裁旧字节**：新字节必须留住，`base` 随裁掉的量推进。
+    #[test]
+    fn console_ring_keeps_the_newest_bytes_and_advances_the_base() {
+        let mut ring = ConsoleRing::new(4);
+        ring.push(b"abcdef");
+        assert_eq!(ring.total, 6, "total 数的是**写过**的全部，不是现在还在的");
+        assert_eq!(ring.base, 2, "裁掉 2 个 ⇒ base 推到 2");
+        let bytes = ring.read(2, 8).expect("窗口内必须能读");
+        assert_eq!(bytes, b"cdef");
+        // 早于 base 的偏移 ⇒ 报 base（客户端据此重新对齐）。
+        let lost = ring.read(0, 8).expect_err("丢失的窗口必须报错");
+        assert_eq!(lost, 2);
+        // 晚于 total 的偏移 ⇒ 空，不是错（只是还没产生）。
+        assert_eq!(ring.read(6, 8).expect("未产生不算丢"), b"");
+    }
+
+    /// `limit` 小于剩余量时**只给 limit**，且不越界。
+    #[test]
+    fn console_ring_read_respects_the_limit() {
+        let mut ring = ConsoleRing::new(64);
+        ring.push(b"0123456789");
+        assert_eq!(ring.read(3, 2).expect("窗口内"), b"34");
+        assert_eq!(ring.read(9, 99).expect("窗口内"), b"9");
+    }
+
+    /// 停因词表：**宿主侧四种**停因必须与契约 `HaltReason` 分开拼写。
+    #[test]
+    fn stop_label_separates_host_stops_from_guest_halts() {
+        assert_eq!(stop_label(RunStop::Halted(HaltReason::Breakpoint)), "breakpoint");
+        assert_eq!(stop_label(RunStop::Halted(HaltReason::Trap)), "trap");
+        assert_eq!(stop_label(RunStop::Steps), "steps");
+        assert_eq!(stop_label(RunStop::Budget), "budget");
+        assert_eq!(stop_label(RunStop::Timeout), "timeout");
+        // `UserPause` 与宿主 `Paused` **同一个词**：调用方只关心「停了」。
+        assert_eq!(stop_label(RunStop::Halted(HaltReason::UserPause)), "pause");
+        assert_eq!(stop_label(RunStop::Paused), "pause");
     }
 }
