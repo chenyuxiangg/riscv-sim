@@ -180,12 +180,102 @@ fn load_project_resets_and_clears_the_session() {
         },
     );
     let events = dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    // ⚠️ **v0.144（契约 v19）**：装载**成功**多一条回执 ⇒ ⇒ 事件从
+    //   1 条变 2 条（`ImageLoaded` + `Tick`）⇒ ⇒ 「订阅被清空」这条判据
+    //   **不变**（波形仍然一条都不该有）。
     assert_eq!(
         events.len(),
-        1,
-        "装载后订阅已被清空，不应再推波形：{events:?}"
+        2,
+        "装载后应是「回执 + tick」，且订阅已被清空、不应再推波形：{events:?}"
     );
-    first_tick(&events);
+    match &events[0] {
+        EventPayload::ImageLoaded { .. } => {}
+        other => panic!("装载回执必须排第一，实际是 {other:?}"),
+    }
+    first_tick(&events[1..]);
+}
+
+/// **R-04 的装载回执**（契约 v19）：成功装载 ⇒ 一条 `ImageLoaded`，
+/// 报告的就是**真写进总线**的那批段。
+///
+#[test]
+fn load_project_emits_an_image_loaded_receipt() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    let events = dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    let receipt = events
+        .iter()
+        .find_map(|event| match event {
+            EventPayload::ImageLoaded {
+                name,
+                kind,
+                entry,
+                segments,
+                elf_bits,
+                has_rvc,
+                platform_revision,
+            } => Some((
+                name.clone(),
+                kind.clone(),
+                *entry,
+                segments.clone(),
+                *elf_bits,
+                *has_rvc,
+                *platform_revision,
+            )),
+            _ => None,
+        })
+        .expect("成功装载必须回一条 ImageLoaded");
+    assert_eq!(receipt.0, "demo-firmware.bin", "name 要回显 ImageRef.name");
+    assert_eq!(receipt.1, ImageKind::RawHex, "kind 与请求同源");
+    assert_eq!(receipt.2, 0, "raw blob 的 entry 恒为 0");
+    assert_eq!(receipt.4, 0, "非 ELF ⇒ elf_bits = 0");
+    assert!(!receipt.5, "非 ELF ⇒ 没有 RVC 事实");
+    // 段就是那块镜像，**且只报形状**。
+    assert_eq!(receipt.3.len(), 1, "一个镜像一段：{:?}", receipt.3);
+    assert_eq!(receipt.3[0].base, 0, "raw blob 落在基址 0");
+    assert_eq!(
+        receipt.3[0].size,
+        super::DEMO_FIRMWARE_BYTES.len() as u32,
+        "size 必须等于真正写进总线的字节数"
+    );
+    // 修订号对得上宿主现在的图。
+    assert_eq!(receipt.6, host.map_revision(), "platform_revision 要能对回当前图");
+}
+
+/// **空工程不发抖**（契约 v19）：配板用的 `images: []` **不是**一次装载
+/// ⇒ ⇒ 一条回执都不该有（否则「装了什么 = 什么也没装」）。
+#[test]
+fn an_empty_project_does_not_emit_an_image_loaded_receipt() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    let mut project = demo_project();
+    project.images.clear();
+    let events = dispatch(&mut host, CommandPayload::LoadProject(project));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventPayload::ImageLoaded { .. })),
+        "空工程不该有装载回执：{events:?}"
+    );
+    // ⚠️ 空工程**也不装镜像** ⇒ ⇒ 机器上一条指令都没有 ⇒ ⇒ PC 停在 0
+    //   （「已装载」这条判据的覆盖在 `image_loaded` 自己的用例里，这里只
+    //   钉「不发回执」这一件事）。
+    assert_eq!(host.pc(), 0, "空工程不该把机器带起来");
 }
 
 #[test]

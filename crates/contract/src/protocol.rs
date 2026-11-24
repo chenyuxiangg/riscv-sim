@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, LocalVarInfo, Project, SimState,
-    StackFrame, Symbol, TraceFilter, TraceFormat, TraceSource, Watchpoint, WaveformHistory,
-    WriteSize,
+    Breakpoint, BreakpointInfo, DeltaRegister, DisasmEntryDto, ImageKind, ImageSegment,
+    LocalVarInfo, Project, SimState, StackFrame, Symbol, TraceFilter, TraceFormat, TraceSource,
+    Watchpoint, WaveformHistory, WriteSize,
 };
 use crate::platform::{PlatformDescription, RegionSpec};
 use crate::SCHEMA_VERSION;
@@ -951,6 +951,38 @@ pub enum EventPayload {
         /// **不是** base64、**不是**字符串 —— 与 `Console` 事件同口径）。
         bytes: Vec<u8>,
     },
+    /// **镜像装载回执**（v19 · M-24 · R-04）—— 内核在**装载成功**之后发的
+    /// 那一条「真装了什么」。
+    ///
+    /// ⚠️ **只在成功时发**：装载失败走既有的 `Error` 事件（`E_PLT-17` /
+    /// `E_PLT-20` / `E_PLT-22` / `E_LDR-01` …）⇒ ⇒ 本事件**从不**表示
+    /// 失败 ⇒ ⇒ 客户端看到它 = 机器**已经**换过镜像了。
+    ///
+    /// ⚠️ **不替代 `MemoryMap { loaded }`**：后者是「这张图里有没有镜像
+    /// 字节」的**状态位**（配板后的空工程也会回它），本事件是「这一次
+    /// 装了什么」的**回执** ⇒ ⇒ 一个说状态、一个说动作 ⇒ 不重复。
+    ///
+    /// ⚠️ **一镜像一条**：工程里有几个带字节的镜像 ⇒ 发几条（`name` 回显
+    /// `ImageRef.name`）⇒ ⇒ 客户端按名字对上自己上传的那份。
+    ///
+    /// ⚠️ **`platform_revision`** = 这次装载**之后**的图修订号 ⇒ ⇒ 客户端
+    /// 能把它对回「装到哪张板上」。
+    ImageLoaded {
+        /// 回显 `ImageRef.name`（**空串**表示宿主没给名字）。
+        name: String,
+        /// 解析出来的镜像种类（与 `ImageRef.kind` 同源判定）。
+        kind: ImageKind,
+        /// 入口地址（raw blob 恒为 `0`）。
+        entry: u32,
+        /// 实际写进总线的那些段（`base` + `size`；零长段**不在**其中）。
+        segments: Vec<ImageSegment>,
+        /// ELF 头的 class 位（`0` = 非 ELF，raw / hex 镜像）。
+        elf_bits: u32,
+        /// ELF `e_flags` 的 `EF_RISCV_RVC`（`elf_bits == 0` 时恒 `false`）。
+        has_rvc: bool,
+        /// 装载后生效图的修订号。
+        platform_revision: u64,
+    },
 }
 
 impl Default for EventPayload {
@@ -1049,9 +1081,14 @@ mod tests {
     /// `ListWatchExprs`）+ `WatchValues` 事件 + `WatchExpr` / `WatchValue`
     /// 两个 DTO 全删 ⇒ ⇒ 线上**少 4 个变体 + 2 个 DTO**；
     /// `StepOver` 与 `HaltReason::StepOver` **一字不动**（v14 的另一半还在用）。
+    ///
+    /// **v19** adds `EventPayload::ImageLoaded`（v0.144 · M-24 · R-04）：
+    /// 装载**成功之后**多一条回执（name / kind / entry / segments /
+    /// elf_bits+has_rvc / platform_revision）⇒ ⇒ 线上**多一个事件变体 +
+    /// 一个 DTO**（`model::ImageSegment`）。
     #[test]
-    fn the_schema_version_is_eighteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 18);
+    fn the_schema_version_is_nineteen() {
+        assert_eq!(crate::SCHEMA_VERSION, 19);
     }
 
     /// **批 C**（STAGE-55）：`Halted` 多一个**可选**的 `trigger_addr`
@@ -1396,8 +1433,9 @@ mod tests {
         assert_eq!(msg.schema_version, crate::SCHEMA_VERSION);
         let json = serde_json::to_value(&msg).expect("json");
         // ⚠️ **v17（v0.77 · STAGE-53）**：`SetBudget` 变体退役；
-        //    **v18（v0.138）**：观察表达式整块下线（3 条命令 + 1 条事件）。
-        assert_eq!(json["schema_version"], 18);
+        //    **v18（v0.138）**：观察表达式整块下线（3 条命令 + 1 条事件）；
+        //    **v19（v0.144 · M-24）**：装载回执 `ImageLoaded` 上线。
+        assert_eq!(json["schema_version"], 19);
     }
 
     // -----------------------------------------------------------------

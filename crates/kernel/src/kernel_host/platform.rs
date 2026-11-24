@@ -153,6 +153,35 @@ pub fn builtin_descriptions() -> Result<Vec<PlatformDescription>, PlatformError>
         .collect()
 }
 
+/// **模板清单的元数据**（id / name / priority / device_count），按
+/// `priority` 升序（v0.76 · STAGE-52 · 裁决 M）。
+///
+/// ⚠️ **唯一定义点**：内核的 `PlatformTemplates` 事件与 M-24 的
+/// `GET /api/board/templates` **都调这里** ⇒ ⇒ 「清单长什么样」不会在两个
+/// 地方各算一遍（`device_count` 的定义一变两边一起变）。
+pub fn template_infos() -> Vec<riscv_sim_contract::model::PlatformTemplateInfo> {
+    let mut templates: Vec<riscv_sim_contract::model::PlatformTemplateInfo> =
+        BUILTIN_DESCRIPTIONS
+            .iter()
+            .filter_map(|(id, json)| {
+                let description = parse_description(json).ok()?;
+                let device_count = description
+                    .regions
+                    .iter()
+                    .filter(|region| matches!(region, RegionSpec::Peripheral { .. }))
+                    .count() as u32;
+                Some(riscv_sim_contract::model::PlatformTemplateInfo {
+                    id: (*id).to_string(),
+                    name: description.name.clone(),
+                    priority: description.priority,
+                    device_count,
+                })
+            })
+            .collect();
+    templates.sort_by_key(|entry| entry.priority);
+    templates
+}
+
 /// 从**文件路径**读一份描述（运行时路径 —— 裁决 F）。
 ///
 /// ⚠️ 与内置路径**共用** [`parse_description`] ⇒ **同一个解析器 + 同一个

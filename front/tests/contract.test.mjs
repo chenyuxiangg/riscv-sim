@@ -472,6 +472,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.backtrace([], false)),
             // STAGE-55 真相候选列表批：当前帧局部变量回执。
             variantOf(Event.locals(null, [], false)),
+            // 契约 v19 新增：镜像装载回执（M-24 · R-04）。
+            variantOf(Event.imageLoaded("fw.bin", "RawHex", 0, [], 0, false, 0)),
         ].sort();
         assert.deepEqual(js, rust, "JS 事件变体与 Rust EventPayload 不一致");
     });
@@ -657,6 +659,10 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 // ⚠️ **STAGE-55 真相候选列表批** ⇒ ⇒ 字段名逐字比对的登记处
                 //   （`function` / `vars` / `truncated`）。
                 Locals: Event.locals(null, [], false),
+                // ⚠️ **契约 v19**（装载回执）⇒ ⇒ 字段名逐字比对的登记处
+                //   （`name` / `kind` / `entry` / `segments` / `elf_bits` /
+                //   `has_rvc` / `platform_revision`）。
+                ImageLoaded: Event.imageLoaded("fw.bin", "RawHex", 0, [], 0, false, 0),
             },
         };
 

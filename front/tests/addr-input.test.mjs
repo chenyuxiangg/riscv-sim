@@ -633,12 +633,12 @@ describe("一个落点与契约版本", () => {
         //   它**继续**有效）⇒ ⇒ 逐字保留。
         const contract = readFileSync(resolve(repoRoot, "crates/contract/src/lib.rs"), "utf8");
         assert.ok(
-            contract.includes("pub const SCHEMA_VERSION: u32 = 18;"),
+            contract.includes("pub const SCHEMA_VERSION: u32 = 19;"),
             "契约的 `SCHEMA_VERSION` 必须**是 18**（v16 访问值 · v17 `SetBudget` 退役 · v18 观察表达式下线）",
         );
         const mirror = readFileSync(resolve(frontDir, "lib/message.js"), "utf8");
         assert.ok(
-            mirror.includes("SCHEMA_VERSION = 18"),
+            mirror.includes("SCHEMA_VERSION = 19"),
             "前端镜像的 `SCHEMA_VERSION` 必须**是 18**（与契约层同批升版）",
         );
         const kernel = readFileSync(

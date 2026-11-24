@@ -12,8 +12,8 @@ use riscv_sim_contract::error::{
     PlatformError, E_PLT_13_REVISION_CONFLICT, E_PLT_14_REGION_NOT_FOUND, E_PLT_17_BOARD_MISMATCH,
     E_PLT_22_NO_BOARD, PLATFORM_FAMILY,
 };
-use riscv_sim_contract::model::{PlatformTemplateInfo, Project};
-use riscv_sim_contract::platform::{PlatformDescription, RegionSpec};
+use riscv_sim_contract::model::{ImageSegment, Project};
+use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::port::ExecutionBackend;
 use riscv_sim_contract::protocol::{EventPayload, MemoryMapOp};
 
@@ -268,6 +268,50 @@ impl KernelHost {
             .any(|p| p.segments.iter().any(|(_, bytes)| !bytes.is_empty()));
         self.image_loaded = has_image_bytes;
 
+        // ---- 第五步之后：回「这次真装了什么」（v19 · M-24 · R-04）----
+        //
+        // ⚠️ **位置纪律**：全部步骤都成功之后才发 ⇒ ⇒ 装载失败早已
+        //   `return` ⇒ ⇒ 客户端看到这条事件 = 机器**已经**换过镜像了
+        //   （这条事件**从不**表示失败）。
+        //
+        // ⚠️ **与写总线的那批段同源**：`parsed` 就是上面第五步真正
+        //   `load_bytes` 用的那一份 ⇒ ⇒ 不是第二次解析 ⇒ ⇒ 报告与事实
+        //   不会漂。
+        //
+        // ⚠️ **零长段不发、空工程不发**：判据与 `image_loaded` 同一口径
+        //   （`!bytes.is_empty()`）⇒ ⇒ 配板用的空工程（`images: []` 或
+        //   全是零长段）**一条都不发** ⇒ ⇒ 不会出现「装了什么 = 什么也没
+        //   装」的回执。
+        //
+        // ⚠️ **一镜像一条**：工程里几个带字节的镜像就发几条 ⇒ ⇒ 客户端
+        //   按 `name` 对上自己上传的那份。
+        let mut loaded_events: Vec<EventPayload> = Vec::new();
+        for (image, p) in project.images.iter().zip(parsed.iter()) {
+            let segments: Vec<ImageSegment> = p
+                .segments
+                .iter()
+                .filter(|(_, bytes)| !bytes.is_empty())
+                .map(|(base, bytes)| ImageSegment {
+                    base: *base,
+                    size: bytes.len() as u32,
+                })
+                .collect();
+            if segments.is_empty() {
+                continue;
+            }
+            loaded_events.push(EventPayload::ImageLoaded {
+                name: image.name.clone(),
+                kind: image.kind.clone(),
+                entry: p.entry,
+                segments,
+                elf_bits: p.elf_isa.bits,
+                has_rvc: p.elf_isa.has_rvc,
+                // 修订号是**当前生效图**的 ⇒ ⇒ 读在装载之后（上面
+                // 「待生效的板被应用」那一步已经把 +1 算完）。
+                platform_revision: self.map_revision,
+            });
+        }
+
         // ⚠️ **镜像字节留在宿主**（v0.31 · STAGE-16 裁决 C 第 ④ 步）：
         // 记住**最后一个装载成功的工程** ⇒ 卸载之后**不必重新选文件**就能
         // 重装。
@@ -301,7 +345,10 @@ impl KernelHost {
         self.watchdog = HostWatchdog::new();
         self.hms.reset_session();
 
-        let mut events = vec![self.tick()];
+        // ⚠️ **回执排在 tick 之前**：客户端先看到「装了什么」，再看到
+        //   「现在什么样」 ⇒ ⇒ 同一条 `Vec` 里的次序就是它读到的次序。
+        let mut events = loaded_events;
+        events.push(self.tick());
         if let Some(wave) = self.register_waveform(true) {
             events.push(wave);
         }
@@ -608,30 +655,11 @@ impl KernelHost {
     /// ⚠️ 顺序**按 priority 升序** ⇒ 确定性（default 10 → qemu-virt 20 →
     /// minimal 30）⇒ ⇒ **数值不在这份代码里**（那是内置 JSON 的事）。
     pub(crate) fn platform_templates_event(&self) -> EventPayload {
-        let ids = [
-            platform::PLATFORM_ID_DEFAULT,
-            platform::PLATFORM_ID_QEMU_VIRT,
-            platform::PLATFORM_ID_MINIMAL,
-        ];
-        let mut templates: Vec<PlatformTemplateInfo> = ids
-            .iter()
-            .filter_map(|id| {
-                let description = platform::builtin_description(id).ok()?;
-                let device_count = description
-                    .regions
-                    .iter()
-                    .filter(|region| matches!(region, RegionSpec::Peripheral { .. }))
-                    .count() as u32;
-                Some(PlatformTemplateInfo {
-                    id: (*id).to_string(),
-                    name: description.name.clone(),
-                    priority: description.priority,
-                    device_count,
-                })
-            })
-            .collect();
-        templates.sort_by_key(|entry| entry.priority);
-        EventPayload::PlatformTemplates { templates }
+        // ⚠️ 元数据**不在**这里算：它住 `platform::template_infos`（M-24 的
+        //   模板端点调的也是那一份）⇒ ⇒ 一个定义点。
+        EventPayload::PlatformTemplates {
+            templates: platform::template_infos(),
+        }
     }
 
     pub(crate) fn device_instances_event(&self) -> EventPayload {

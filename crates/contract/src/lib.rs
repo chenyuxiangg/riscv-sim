@@ -367,7 +367,18 @@ pub mod snapshot;
 ///   表达式是同名前缀的两件事；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `3`（快照载荷没变：观察项本来
 ///   不进会话快照）。
-pub const SCHEMA_VERSION: u32 = 18;
+///
+/// Contract **v19** adds `EventPayload::ImageLoaded`（v0.144 · M-24 · R-04）：
+///
+/// - 内核在装载**成功之后**多回一条「真装了什么」（name / kind / entry /
+///   segments 的 `base`+`size` / `elf_bits`+`has_rvc` / `platform_revision`）；
+/// - 新 DTO `model::ImageSegment`（只报形状，**不带字节**）；
+/// - ⇒ ⇒ 线上**多一个事件变体 + 一个 DTO** ⇒ ⇒ `SCHEMA_VERSION` 18 → 19；
+/// - ⚠️ 命令侧**一字不动**；`MemoryMap { loaded }` 仍是「有没有镜像字节」
+///   的状态位（**不**被本事件取代：一个说状态，一个说动作）；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `3`、`PLATFORM_SCHEMA_VERSION`
+///   stays `1`。
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// 契约 crate 自身的版本号 —— 供 `GET /api/version` 回给客户端（M-24 · R-01）。
 ///

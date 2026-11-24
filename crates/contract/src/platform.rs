@@ -2534,9 +2534,11 @@ mod tests {
     /// 命令 / 事件各加两个 ⇒ ⇒ **线上形状变了**）⇒ ⇒ 同理。
     /// ⚠️ **v0.138**（契约 v18）moved it **17 → 18**（观察表达式整块下线
     /// ⇒ ⇒ 线上少 3 条命令 + 1 条事件 ⇒ ⇒ 同理）。
+    /// ⚠️ **v0.144**（契约 v19）moved it **18 → 19**（装载回执
+    /// `ImageLoaded` 上线 ⇒ ⇒ 线上**多一个事件变体 + 一个 DTO** ⇒ ⇒ 同理）。
     #[test]
-    fn s16_a1_the_contract_schema_version_is_eighteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 18);
+    fn s16_a1_the_contract_schema_version_is_nineteen() {
+        assert_eq!(crate::SCHEMA_VERSION, 19);
     }
     /// **STAGE-16 A-2** — the **description format**'s version is still
     /// `1`.

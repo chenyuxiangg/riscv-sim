@@ -149,8 +149,10 @@
 /** Protocol schema version — mirrors `riscv_sim_contract::SCHEMA_VERSION`. */
 // ⚠️ **v16**：`TraceEvent` 带访问值；**v17**：`SetBudget` 变体退役
 //   （v0.77 · STAGE-53）；**v18**：观察表达式整块下线（v0.138 · 删 3 条命令 +
-//   1 条事件 + 2 个 DTO）⇒ ⇒ 前端镜像跟契约层**同批**。
-export const SCHEMA_VERSION = 18;
+//   1 条事件 + 2 个 DTO）；**v19**：装载回执 `EventPayload::ImageLoaded`
+//   上线（v0.144 · M-24 · R-04 · 多 1 条事件 + 1 个 DTO `ImageSegment`）
+//   ⇒ ⇒ 前端镜像跟契约层**同批**。
+export const SCHEMA_VERSION = 19;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -441,6 +443,8 @@ export const EVENT_TOPIC = Object.freeze({
     Backtrace: "debug.backtrace",
     // STAGE-55 真相候选列表批：当前帧局部变量回执（只读）。
     Locals: "debug.locals",
+    // 契约 v19 新增：镜像装载回执（M-24 · R-04）。
+    ImageLoaded: "image.loaded",
 });
 
 /**
@@ -1274,6 +1278,47 @@ export const Event = Object.freeze({
             function: fnName ? String(fnName) : null,
             vars: vars ?? [],
             truncated: Boolean(truncated),
+        },
+    }),
+    /**
+     * `EventPayload::ImageLoaded { … }` —— 镜像装载**回执**（契约 v19 ·
+     * M-24 · R-04）。
+     *
+     * ⚠️ **只在成功时发**：装载失败走 `Error` 事件 ⇒ ⇒ 看到它 = 机器**已经**
+     * 换过镜像了。
+     *
+     * ⚠️ **不替代 `MemoryMap.loaded`**：那个是「图里有没有镜像字节」的
+     * 状态位（配板后的空工程也会回），本事件是「这一次装了什么」的动作。
+     *
+     * ⚠️ **字段名逐字跟 Rust**：`elf_bits` / `has_rvc` / `platform_revision`
+     * 都是 snake_case ⇒ ⇒ 它们**就是**线上拼写，别在这里转成驼峰。
+     *
+     * @param {string} name — 回显 `ImageRef.name`
+     * @param {string} kind — `ImageKind` 标签（`"Elf"` / `"RawHex"`）
+     * @param {number} entry — 入口地址（raw blob 恒为 0）
+     * @param {Array<{base: number, size: number}>} segments — 只报形状
+     * @param {number} elfBits — ELF class 位（0 = 非 ELF）
+     * @param {boolean} hasRvc — ELF `e_flags` 的 `EF_RISCV_RVC`
+     * @param {number} platformRevision — 装载后生效图的修订号
+     * @returns {{ImageLoaded: object}}
+     */
+    imageLoaded: (
+        name,
+        kind,
+        entry,
+        segments,
+        elfBits,
+        hasRvc,
+        platformRevision,
+    ) => ({
+        ImageLoaded: {
+            name: String(name ?? ""),
+            kind: String(kind ?? "RawHex"),
+            entry: Number(entry ?? 0),
+            segments: segments ?? [],
+            elf_bits: Number(elfBits ?? 0),
+            has_rvc: Boolean(hasRvc),
+            platform_revision: Number(platformRevision ?? 0),
         },
     }),
 });

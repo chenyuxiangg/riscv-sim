@@ -198,6 +198,29 @@ impl Default for ImageRef {
     }
 }
 
+/// 一个**已写进总线**的装载段的形状（v19 · M-24 · `ImageLoaded` 事件）。
+///
+/// ⚠️ **只报形状，不带字节**：段内容动辄几十 KB，回执要的是「装到哪儿、
+/// 多大」，不是再传一遍镜像 ⇒ ⇒ 总线上线口径不变（`bytes` 仍是
+/// `MemoryDump` 的事）。
+///
+/// ⚠️ **`base` + `size` 同源**：与内核实际 `load_bytes` 的那些段**同一次**
+/// 解析（M-06 `LoadImage`）⇒ ⇒ 回执**不是**第二次解析的产物 ⇒ ⇒ 报告与
+/// 事实不会漂。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSegment {
+    /// 物理起始地址（装载进总线用的那个地址）。
+    pub base: u32,
+    /// 字节长度（`0` 的段**不进回执** —— 它没写总线）。
+    pub size: u32,
+}
+
+impl Default for ImageSegment {
+    fn default() -> Self {
+        Self { base: 0, size: 0 }
+    }
+}
+
 /// Image format selector (M-06).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageKind {
