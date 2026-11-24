@@ -67,6 +67,14 @@ usage: riscv_sim_server [options]
   POST   /api/sessions/<id>/run     {steps|timeout_ms}? -> stop_reason / executed / pc / console
   POST   /api/sessions/<id>/step    {n} -> exactly n instructions
   GET    /api/sessions/<id>/console ?offset&limit -> raw bytes + X-Console-Base/Total
+  GET    /api/sessions/<id>/state   -> pc / registers[32] / executed
+  GET    /api/sessions/<id>/memory  ?addr&len -> {addr, len, bytes}
+  GET    /api/sessions/<id>/symbols ?limit -> {symbols, returned}
+  GET    /api/sessions/<id>/disasm  ?addr&count -> {entries} (may be short)
+  GET    /api/sessions/<id>/breakpoints -> {breakpoints, pc}
+  POST   /api/sessions/<id>/breakpoints {addr|symbol|condition} -> 201 + table
+  DELETE /api/sessions/<id>/breakpoints/<bp> -> table (idempotent)
+  PUT    /api/sessions/<id>/breakpoints/<bp>/enabled {enabled} -> table
 ";
 
 fn main() -> ExitCode {

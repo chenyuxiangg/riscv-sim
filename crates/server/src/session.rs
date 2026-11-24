@@ -173,6 +173,30 @@ enum Job {
         /// 回执通道。
         reply: Sender<JobReply>,
     },
+    /// 读状态（R-07）：pc / 32 个通用寄存器 / 已执行条数。
+    State {
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 读符号表（R-07）：宿主侧已有索引，**不重解析**镜像。
+    Symbols {
+        /// 最多多少条。
+        limit: usize,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 调试命令（R-07）：`DumpMemory` / `Disasm` / 断点族**原样透传**给内核，
+    /// 事件再翻成 JSON。
+    ///
+    /// ⚠️ 走一条通用作业而不是四个专用作业：这四条命令的**判据全在内核**
+    /// （`E_DBG-03` 的越界、`E_DBG-02` 的名字 / 表达式）⇒ 服务端再造一层
+    /// 判据就是第二个真相。
+    Debug {
+        /// 要发给内核的命令。
+        command: CommandPayload,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
     /// 读 console（R-06）：从会话环里取 `[offset, offset+limit)`。
     Console {
         /// 起始绝对偏移。
@@ -400,6 +424,27 @@ impl SessionHandle {
         )
     }
 
+    /// 读状态（R-07）。
+    pub fn state(&self) -> Result<serde_json::Value, ApiError> {
+        self.submit(|reply| Job::State { reply }, crate::error::debug_failure)
+    }
+
+    /// 列符号（R-07）。
+    pub fn symbols(&self, limit: usize) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Symbols { limit, reply },
+            crate::error::debug_failure,
+        )
+    }
+
+    /// 调试命令透传（R-07）。
+    pub fn debug(&self, command: CommandPayload) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Debug { command, reply },
+            crate::error::debug_failure,
+        )
+    }
+
     /// 装载镜像（R-04）：把**已经拿到手的字节**包成一个单镜像工程交给内核，
     /// 回执是那一条 `ImageLoaded` + 落点 pc。
     ///
@@ -549,6 +594,20 @@ impl SessionRegistry {
         (infos, self.max_sessions, inner.sessions.len())
     }
 
+    /// 取一条会话的句柄（**放锁**后调用方才用它干活）。不存在 ⇒ 404。
+    fn handle_for(&self, id: &str) -> Result<Arc<SessionHandle>, ApiError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::session_poisoned("registry"))?;
+        Ok(Arc::clone(
+            guard
+                .sessions
+                .get(id)
+                .ok_or_else(|| ApiError::session_not_found(id))?,
+        ))
+    }
+
     /// 取一条会话（探活一次，证明不是「表里有、线程已死」）。
     pub fn probe(&self, id: &str) -> Result<(SessionInfo, u32, u64), ApiError> {
         let handle = {
@@ -666,6 +725,28 @@ impl SessionRegistry {
             )
         };
         handle.console(offset, limit)
+    }
+
+    /// 读状态（R-07）。**借**一条会话，同 [`Self::set_board`]。
+    pub fn state(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.state()
+    }
+
+    /// 列符号（R-07）。
+    pub fn symbols(&self, id: &str, limit: usize) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.symbols(limit)
+    }
+
+    /// 调试命令（R-07）。
+    pub fn debug(
+        &self,
+        id: &str,
+        command: CommandPayload,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.debug(command)
     }
 
     /// 装载镜像（R-04）。**借**一条会话，同 [`Self::set_board`]。
@@ -853,6 +934,113 @@ fn load_reply(host: &KernelHost, events: &[EventPayload]) -> JobReply {
     })
 }
 
+/// 这条调试命令会不会动断点表（⇒ ⇒ 回执要另问一次 `ListBreakpoints`）。
+fn breakpoint_family(command: &CommandPayload) -> bool {
+    matches!(
+        command,
+        CommandPayload::SetBreakpoint(_)
+            | CommandPayload::ClearBreakpoint { .. }
+            | CommandPayload::SetBreakpointEnabled { .. }
+            | CommandPayload::ListBreakpoints
+    )
+}
+
+/// 把调试命令的回执翻成**扁平** JSON。
+///
+/// ⚠️ **不**直接 `serde_json::to_value(EventPayload)`：契约事件的线上形状是
+/// 外部标签（`{"MemoryDump": {...}}`）⇒ ⇒ 那样前端要多剥一层，而 HTTP 的
+/// 契约就是「一条请求 = 一个对象」⇒ ⇒ 这里按命令逐条翻。
+fn debug_reply(
+    command: &CommandPayload,
+    host: &KernelHost,
+    events: &[EventPayload],
+    table_events: Option<&[EventPayload]>,
+) -> JobReply {
+    if let Some(failure) = kernel_failure(events) {
+        return Err(failure);
+    }
+    match command {
+        CommandPayload::ResolveSymbol { name } => {
+            let resolved = events.iter().rev().find_map(|event| match event {
+                EventPayload::SymbolResolved {
+                    symbol,
+                    candidates,
+                    total,
+                    ..
+                } => Some((symbol.clone(), candidates.clone(), *total)),
+                _ => None,
+            });
+            match resolved {
+                Some((symbol, candidates, total)) => Ok(serde_json::json!({
+                    "name": name,
+                    "symbol": symbol,
+                    "candidates": candidates,
+                    "candidates_total": total,
+                })),
+                None => Err(KernelFailure {
+                    code: "E_PROTO-08".to_string(),
+                    message: "内核回 ResolveSymbol 却没有 SymbolResolved 事件".to_string(),
+                }),
+            }
+        }
+        CommandPayload::DumpMemory { addr, .. } => {
+            let bytes = events.iter().rev().find_map(|event| match event {
+                EventPayload::MemoryDump { bytes, .. } => Some(bytes.clone()),
+                _ => None,
+            });
+            match bytes {
+                Some(bytes) => Ok(serde_json::json!({
+                    "addr": addr,
+                    "len": bytes.len(),
+                    "bytes": bytes,
+                })),
+                None => Err(KernelFailure {
+                    code: "E_PROTO-08".to_string(),
+                    message: "内核回 DumpMemory 却没有 MemoryDump 事件".to_string(),
+                }),
+            }
+        }
+        CommandPayload::Disasm { addr, count } => {
+            let entries = events.iter().rev().find_map(|event| match event {
+                EventPayload::Disasm { entries } => Some(entries.clone()),
+                _ => None,
+            });
+            match entries {
+                Some(entries) => Ok(serde_json::json!({
+                    "addr": addr,
+                    "requested": count,
+                    "returned": entries.len(),
+                    // 可能**短于** count：地址未映射就截断（不是错误）。
+                    "entries": entries,
+                })),
+                None => Err(KernelFailure {
+                    code: "E_PROTO-08".to_string(),
+                    message: "内核回 Disasm 却没有 Disasm 事件".to_string(),
+                }),
+            }
+        }
+        _ => {
+            // 断点族（Set / Clear / Enable / List）的回执都是**整张表**。
+            // `Set` / `Clear` 的即时事件里没有表 ⇒ ⇒ 用先问出来的那次。
+            let source = table_events.unwrap_or(events);
+            let table = source.iter().rev().find_map(|event| match event {
+                EventPayload::Breakpoints { breakpoints } => Some(breakpoints.clone()),
+                _ => None,
+            });
+            match table {
+                Some(breakpoints) => Ok(serde_json::json!({
+                    "breakpoints": breakpoints,
+                    "pc": host.pc(),
+                })),
+                None => Err(KernelFailure {
+                    code: "E_PROTO-08".to_string(),
+                    message: "断点命令没有 Breakpoints 回执".to_string(),
+                }),
+            }
+        }
+    }
+}
+
 /// 起会话线程：宿主从生到死只属于这里。
 fn spawn_worker(
     id: String,
@@ -952,6 +1140,39 @@ fn spawn_worker(
                                     ),
                                 }),
                             });
+                        }
+                        Job::State { reply } => {
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "pc": host.pc(),
+                                "registers": host.registers(),
+                                "executed": host.total_executed(),
+                            })));
+                        }
+                        Job::Symbols { limit, reply } => {
+                            let symbols = host.list_symbols(limit);
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "symbols": symbols,
+                                "returned": symbols.len(),
+                                "limit": limit,
+                            })));
+                        }
+                        Job::Debug { command, reply } => {
+                            let events = host.handle_message(&Message::command(1, command.clone()));
+                            // ⚠️ 断点族里 `SetBreakpoint` / `ClearBreakpoint` 的即时
+                            //   回执只有 `Tick`（内核 v13 起表只由 `ListBreakpoints`
+                            //   给）⇒ ⇒ **另问一次**表，回执才是「现在真实有什么」。
+                            let table = breakpoint_family(&command).then(|| {
+                                host.handle_message(&Message::command(
+                                    1,
+                                    CommandPayload::ListBreakpoints,
+                                ))
+                            });
+                            let _ = reply.send(debug_reply(
+                                &command,
+                                &host,
+                                &events,
+                                table.as_deref(),
+                            ));
                         }
                         Job::SetBoard {
                             description,

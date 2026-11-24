@@ -15,9 +15,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use riscv_sim_contract::model::{Breakpoint, BreakpointKind};
 use riscv_sim_contract::platform::PlatformDescription;
+use riscv_sim_contract::protocol::CommandPayload;
 use riscv_sim_kernel::kernel_host::platform;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -32,6 +34,16 @@ const TOKEN_HEADER: &str = "x-auth-token";
 
 /// 一次 console 读的默认上限（64 KiB）。真正的上界是 `--max-console`。
 const DEFAULT_CONSOLE_READ: usize = 64 * 1024;
+
+/// 一次内存转储的默认字节数（上界由契约 `DUMP_MAX_BYTES` 管）。
+const DEFAULT_MEMORY_LEN: u32 = 64;
+
+/// 一次反汇编的默认条数。
+const DEFAULT_DISASM_COUNT: u32 = 16;
+
+/// 一次符号列表的默认条数 / 硬上限（**服务端**的界，不是内核判据）。
+const DEFAULT_SYMBOL_LIMIT: usize = 512;
+const MAX_SYMBOL_LIMIT: usize = 4096;
 
 /// 全局状态 + 会话表把手。
 #[derive(Clone)]
@@ -161,6 +173,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/step", post(step_session))
         .route("/api/sessions/{id}/console", get(read_console))
+        .route("/api/sessions/{id}/state", get(session_state))
+        .route("/api/sessions/{id}/memory", get(read_memory_range))
+        .route("/api/sessions/{id}/symbols", get(list_symbols))
+        .route("/api/sessions/{id}/disasm", get(disassemble))
+        .route(
+            "/api/sessions/{id}/breakpoints",
+            get(list_breakpoints).post(set_breakpoint),
+        )
+        .route(
+            "/api/sessions/{id}/breakpoints/{bp}",
+            delete(clear_breakpoint),
+        )
+        .route(
+            "/api/sessions/{id}/breakpoints/{bp}/enabled",
+            put(enable_breakpoint),
+        )
         .route("/api/board/templates", get(list_templates))
         .route("/api/board/templates/{id}", get(get_template))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -514,6 +542,266 @@ async fn read_console(
     Ok(response)
 }
 
+/// 读状态（R-07）：`{pc, registers[32], executed}`。
+async fn session_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(state.registry.state(&id)?))
+}
+
+/// `GET …/memory` 的查询串。
+#[derive(Debug, Default, Deserialize)]
+pub struct MemoryQuery {
+    /// 起始地址（**必填**；缺了是 HTTP 层的参数不完整，内核无法替它判）。
+    #[serde(default)]
+    pub addr: Option<u32>,
+    /// 字节数（缺省 64；`0` 与 `> DUMP_MAX_BYTES` 由内核回 `E_DBG-03`）。
+    #[serde(default)]
+    pub len: Option<u32>,
+}
+
+/// 读一段内存（R-07）：走契约 `DumpMemory` ⇒ 一次最多 `DUMP_MAX_BYTES`。
+///
+/// ⚠️ **长度合法性不在这里夹**：`len == 0` / 超限是内核 `E_DBG-03` 的判据
+/// ⇒ ⇒ 服务端再判一次就是第二个真相（也省得两边口径漂）。
+async fn read_memory_range(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<MemoryQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let addr = query
+        .addr
+        .ok_or_else(|| ApiError::bad_request("query `addr` is required"))?;
+    let len = query.len.unwrap_or(DEFAULT_MEMORY_LEN);
+    Ok(Json(state.registry.debug(
+        &id,
+        CommandPayload::DumpMemory { addr, len },
+    )?))
+}
+
+/// `GET …/symbols` 的查询串。
+#[derive(Debug, Default, Deserialize)]
+pub struct SymbolsQuery {
+    /// 最多多少条（缺省 512，硬上限 4096）。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// 列符号（R-07）。**只读宿主索引**，不重解析镜像。
+async fn list_symbols(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<SymbolsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = plan_symbol_limit(query.limit);
+    Ok(Json(state.registry.symbols(&id, limit)?))
+}
+
+/// 符号条数上限的折算（**纯函数**，可单测）。
+///
+/// 缺省 512；`0` ⇒ **空表**（「要 0 条」这个请求是明确的，不替它改）；
+/// 超 4096 ⇒ 夹到 4096（这是**服务端**自己的界，不是内核判据）。
+pub fn plan_symbol_limit(limit: Option<usize>) -> usize {
+    match limit {
+        Some(0) => 0,
+        Some(limit) => limit.min(MAX_SYMBOL_LIMIT),
+        None => DEFAULT_SYMBOL_LIMIT,
+    }
+}
+
+/// `GET …/disasm` 的查询串。
+#[derive(Debug, Default, Deserialize)]
+pub struct DisasmQuery {
+    /// 起始地址（必填）。
+    #[serde(default)]
+    pub addr: Option<u32>,
+    /// 最多多少条（缺省 16；可能短于它 —— 未映射地址就截断，不是错误）。
+    #[serde(default)]
+    pub count: Option<u32>,
+}
+
+/// 反汇编（R-07）。
+async fn disassemble(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<DisasmQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let addr = query
+        .addr
+        .ok_or_else(|| ApiError::bad_request("query `addr` is required"))?;
+    let count = query.count.unwrap_or(DEFAULT_DISASM_COUNT);
+    Ok(Json(state.registry.debug(
+        &id,
+        CommandPayload::Disasm { addr, count },
+    )?))
+}
+
+/// 断点表的「新条目要什么」（**HTTP 面**的三选一）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BreakpointPlan {
+    /// 直接给地址。
+    Address(u32),
+    /// 给符号名 ⇒ 先 `ResolveSymbol` 拿到地址，再按 `kind = Symbol` 注册。
+    Symbol(String),
+    /// 只给条件表达式 ⇒ 观察式条目，`id = 0` 由内核分配。
+    Condition(String),
+}
+
+/// `POST …/breakpoints` 的请求体。
+#[derive(Debug, Default, Deserialize)]
+pub struct BreakpointRequest {
+    /// 地址（与 `symbol`、`condition` 三选一）。
+    #[serde(default)]
+    pub addr: Option<u32>,
+    /// 符号名（与 `addr`、`condition` 三选一）。
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// 条件表达式（与 `addr`、`symbol` 三选一）。
+    #[serde(default)]
+    pub condition: Option<String>,
+}
+
+/// 三选一的校验（**纯函数**，可单测）。
+///
+/// 给两个 / 给零个都拒：这条请求的三种形态在语义上**互斥**（地址是给定
+/// 事实、符号要解析、条件不绑地址）⇒ 允许两个同时出现就是允许自相矛盾。
+pub fn plan_breakpoint(request: BreakpointRequest) -> Result<BreakpointPlan, ApiError> {
+    let given = [
+        request.addr.is_some(),
+        request.symbol.is_some(),
+        request.condition.is_some(),
+    ]
+    .iter()
+    .filter(|given| **given)
+    .count();
+    if given != 1 {
+        return Err(ApiError::bad_request(
+            "give exactly one of `addr`, `symbol`, `condition`",
+        ));
+    }
+    if let Some(addr) = request.addr {
+        return Ok(BreakpointPlan::Address(addr));
+    }
+    if let Some(symbol) = request.symbol {
+        let symbol = symbol.trim().to_string();
+        if symbol.is_empty() {
+            return Err(ApiError::bad_request("field `symbol` must not be blank"));
+        }
+        return Ok(BreakpointPlan::Symbol(symbol));
+    }
+    let condition = request.condition.unwrap_or_default();
+    if condition.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "field `condition` must not be blank (use `addr` for an unconditional breakpoint)",
+        ));
+    }
+    Ok(BreakpointPlan::Condition(condition))
+}
+
+/// 读断点表（R-07）。
+async fn list_breakpoints(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state.registry.debug(&id, CommandPayload::ListBreakpoints)?,
+    ))
+}
+
+/// 下断点（R-07）：地址 / 符号 / 条件三选一，回执是**当前真实表**。
+///
+/// ⚠️ **符号类必须先解地址**：内核的 `SetBreakpoint` 只认 `addr`（`kind`
+/// 只是来源标记，不负责解析）⇒ ⇒ 服务端先发 `ResolveSymbol`，解不出来就
+/// 如实拒，**不编**一个地址。
+async fn set_breakpoint(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<BreakpointRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let breakpoint = match plan_breakpoint(request)? {
+        BreakpointPlan::Address(addr) => Breakpoint {
+            id: addr,
+            addr,
+            source_hint: None,
+            enabled: true,
+            kind: BreakpointKind::Address,
+            condition: None,
+        },
+        BreakpointPlan::Symbol(name) => {
+            let resolved = state
+                .registry
+                .debug(&id, CommandPayload::ResolveSymbol { name: name.clone() })?;
+            let addr = resolved
+                .get("symbol")
+                .and_then(|symbol| symbol.get("addr"))
+                .and_then(|addr| addr.as_u64())
+                .ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "E_DBG-02",
+                        format!("no such symbol: {name}"),
+                    )
+                })? as u32;
+            Breakpoint {
+                id: addr,
+                addr,
+                source_hint: Some(name),
+                enabled: true,
+                kind: BreakpointKind::Symbol,
+                condition: None,
+            }
+        }
+        BreakpointPlan::Condition(condition) => Breakpoint {
+            // 观察式条目没有地址 ⇒ `id = 0` 是「请内核分配」（与前端同口径）。
+            id: 0,
+            addr: 0,
+            source_hint: None,
+            enabled: true,
+            kind: BreakpointKind::Condition,
+            condition: Some(condition),
+        },
+    };
+    let table = state
+        .registry
+        .debug(&id, CommandPayload::SetBreakpoint(breakpoint))?;
+    Ok((StatusCode::CREATED, Json(table)))
+}
+
+/// 删断点（R-07）。幂等：id 不存在 ⇒ 表不变、仍 200。
+async fn clear_breakpoint(
+    State(state): State<AppState>,
+    Path((id, bp)): Path<(String, u32)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        state
+            .registry
+            .debug(&id, CommandPayload::ClearBreakpoint { id: bp })?,
+    ))
+}
+
+/// `PUT …/breakpoints/{id}/enabled` 的请求体。
+#[derive(Debug, Deserialize)]
+pub struct EnableRequest {
+    /// 开 / 关。
+    pub enabled: bool,
+}
+
+/// 断点启停（R-07）。幂等：id 不存在 ⇒ 表不变、仍 200。
+async fn enable_breakpoint(
+    State(state): State<AppState>,
+    Path((id, bp)): Path<(String, u32)>,
+    Json(request): Json<EnableRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(state.registry.debug(
+        &id,
+        CommandPayload::SetBreakpointEnabled {
+            id: bp,
+            enabled: request.enabled,
+        },
+    )?))
+}
+
 /// 暂停会话（控制面）：置位即返回，推进者在下一个窗口边界停。
 async fn pause_session(
     State(state): State<AppState>,
@@ -701,5 +989,63 @@ mod tests {
             .expect("步进合法"),
             (Some(7), None)
         );
+    }
+
+    /// 断点三选一：只给一个才通过；给零个 / 两个都拒。
+    #[test]
+    fn plan_breakpoint_requires_exactly_one_selector() {
+        assert_eq!(
+            plan_breakpoint(BreakpointRequest {
+                addr: Some(0x20),
+                ..Default::default()
+            })
+            .expect("只给地址"),
+            BreakpointPlan::Address(0x20)
+        );
+        assert_eq!(
+            plan_breakpoint(BreakpointRequest {
+                symbol: Some(" main ".into()),
+                ..Default::default()
+            })
+            .expect("只给符号（首尾空白要剪掉）"),
+            BreakpointPlan::Symbol("main".into())
+        );
+        assert!(matches!(
+            plan_breakpoint(BreakpointRequest {
+                condition: Some("x1 == 0".into()),
+                ..Default::default()
+            })
+            .expect("只给条件"),
+            BreakpointPlan::Condition(_)
+        ));
+
+        for request in [
+            BreakpointRequest::default(),
+            BreakpointRequest {
+                addr: Some(1),
+                symbol: Some("main".into()),
+                condition: None,
+            },
+            BreakpointRequest {
+                symbol: Some("   ".into()),
+                ..Default::default()
+            },
+            BreakpointRequest {
+                condition: Some("  ".into()),
+                ..Default::default()
+            },
+        ] {
+            let err = plan_breakpoint(request).expect_err("非法组合必须拒");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// 符号条数：缺省 512、`0` 就是空表、超上限夹到 4096。
+    #[test]
+    fn plan_symbol_limit_defaults_and_clamps() {
+        assert_eq!(plan_symbol_limit(None), 512);
+        assert_eq!(plan_symbol_limit(Some(0)), 0);
+        assert_eq!(plan_symbol_limit(Some(16)), 16);
+        assert_eq!(plan_symbol_limit(Some(99_999)), 4_096);
     }
 }

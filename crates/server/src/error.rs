@@ -214,6 +214,15 @@ pub fn load_failure(code: &str, detail: &str) -> ApiError {
     ApiError::new(status, code, detail)
 }
 
+/// 调试读面（R-07）：`E_DBG-03`（转储长度越界 / 非法）⇒ **400**，
+/// `E_DBG-02`（符号名 / 表达式非法）⇒ **400**，其余 ⇒ 400。
+///
+/// ⚠️ 没有 422：读面**不改任何状态** ⇒ ⇒ 「请求不成立」只能是 400，
+/// 不该借用「内容装不上」那个档。
+pub fn debug_failure(code: &str, detail: &str) -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, code, detail)
+}
+
 /// 会话族的码**从契约常量拼出来**，不在这里抄字面量 —— 抄一份就是第二个
 /// 真相，改名时必漂。
 fn session_code(scenario: u16) -> String {

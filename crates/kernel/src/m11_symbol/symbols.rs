@@ -311,6 +311,32 @@ impl SymbolTable {
         Some(&self.by_addr[group_start].1)
     }
 
+    /// 列出符号（M-24 `GET …/symbols` 的读面）。
+    ///
+    /// 排序：**有地址的在前**（按地址升序），无地址（`SHN_UNDEF`）的在最后
+    /// （按名字升序）；同地址按名字升序 ⇒ ⇒ 每次调用顺序**确定**（前端
+    /// 列表不会每次刷新都跳）。
+    ///
+    /// `limit == 0` ⇒ 空；超出部分**不**给（调用方拿到的是有界列表）。
+    pub fn list(&self, limit: usize) -> Vec<Symbol> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut all: Vec<Symbol> = self
+            .by_name
+            .values()
+            .map(|(symbol, _)| symbol.clone())
+            .collect();
+        all.sort_by(|left, right| {
+            left.addr
+                .unwrap_or(u32::MAX)
+                .cmp(&right.addr.unwrap_or(u32::MAX))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        all.truncate(limit);
+        all
+    }
+
     /// 符号条数（**有名字的**那些）。
     pub fn len(&self) -> usize {
         self.by_name.len()

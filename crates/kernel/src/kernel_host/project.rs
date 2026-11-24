@@ -765,6 +765,13 @@ impl KernelHost {
     /// ⚠️ **镜像字节住在它里面** ⇒ 卸载之后**不必重新选文件**就能重装。
     ///
     /// ⚠️ `None` = 这个会话**还没装载成功过**任何工程。
+    /// 列出符号表（M-24 `GET …/symbols`）。**只读**：不重解析、不改表。
+    ///
+    /// 上限在服务端夹（`limit` 直接透给 [`SymbolTable::list`]）。
+    pub fn list_symbols(&self, limit: usize) -> Vec<riscv_sim_contract::model::Symbol> {
+        self.index.symbols().list(limit)
+    }
+
     pub fn last_project(&self) -> Option<&Project> {
         self.last_project.as_ref()
     }

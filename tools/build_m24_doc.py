@@ -20,8 +20,8 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.2（2026-11-24 方案定稿；P0-1～P0-4 已落地；契约 v19 装载回执；run 停因唯一实现 run_until）· 需求基线 docs/requirements/"
-           "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim feature/m24-p0-4（契约 schema v19 / 内核 0.1.0）")
+VERSION = ("HTML 版 v1.3（2026-11-24 方案定稿；P0-1～P0-5 已落地；契约 v19 装载回执；run 停因唯一实现 run_until）· 需求基线 docs/requirements/"
+           "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim feature/m24-p0-5（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
     ("15", "条需求承接", "R-01～R-15 逐条有落点，无悬空条目"),
@@ -803,7 +803,7 @@ SECTIONS.append({
                 ["P0-2", "会话表 + 专属线程 + 配额 + TTL", "两会话并存、删除互不影响", "P0-1"],
                 ["P0-3", "配板 + 装载（octet-stream / path / 模板）", "osy.elf 装载 entry=0x80000000", "P0-2 + 模板端点"],
                 ["P0-4", "run / step / pause / reset + console ring（已落地：内核 <code>run_until</code> 是停因唯一实现，服务端只做请求折算与 504 包装）", "AC-01 / AC-05 / AC-07 / AC-09", "P0-3"],
-                ["P0-5", "状态 / 内存 / 符号 / 反汇编 / 断点", "AC-04 / AC-06", "P0-4"],
+                ["P0-5", "状态 / 内存 / 符号 / 反汇编 / 断点（已落地：读面全走内核既有命令，符号类断点先 <code>ResolveSymbol</code> 再注册）", "AC-04 / AC-06", "P0-4"],
                 ["P0-6", "<code>/api/boot</code>；<code>osz-boot</code> 换用内核 <code>run_window</code>（CLI 与退出码不变）", "一条 curl 完成 osz 判定，与 Spike MATCH；<code>--print-memory</code> 链路保持；顺带修掉 <code>E_PLT-22</code> 断链", "P0-5"],
                 ["P1", "WS 事件流 + 快照 + trace + 异步 run", "前端 server-mode 分支可用", "P0-6"],
             ],
