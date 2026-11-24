@@ -113,6 +113,7 @@ impl KernelHost {
         // ---- ① 步进：一次交给内核（它自己按预算分块）----
         if let Some(n) = max_steps {
             let events = self.on_run(Some(n));
+            self.pending_events.extend(events.clone());
             if let Some(reason) = real_halt(&events) {
                 return RunReport {
                     stop: RunStop::Halted(reason),
@@ -160,6 +161,9 @@ impl KernelHost {
 
             let progressed_before = self.total_executed();
             let events = self.on_run(None);
+            // ⚠️ 攒起来给事件流（`take_pending_events`）；窗口内的事件原本
+            //    会被丢弃。
+            self.pending_events.extend(events.clone());
             let progressed = self.total_executed().saturating_sub(progressed_before);
 
             // 引擎自己报的错（看门狗终止 / 总线错误…）先落：这是一次**失败**，

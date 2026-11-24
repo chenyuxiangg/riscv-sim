@@ -635,6 +635,13 @@ pub struct KernelHost {
     delta_published_pc: u32,
     /// 是否已经发过全量 `SimStateDelta`。
     delta_published_valid: bool,
+    /// `run_until` **攒下来的**事件（窗口循环里 `on_run` 的返回值）。
+    ///
+    /// ⚠️ **为什么要有它**：`run_until` 只回 [`RunReport`]，而窗口里产生的
+    /// `SimStateDelta` / `Tick` / `Halted` 原本会被丢掉 ⇒ ⇒ 事件流的 WS
+    /// 就看不到「跑的时候发生了什么」。这里只**暂存**，由调用方
+    /// [`KernelHost::take_pending_events`] 取走（取走即清空）。
+    pending_events: Vec<EventPayload>,
     /// M-18 探针注册表（D-46）—— 判沿 + 访存 trace 环。
     probes: Option<Rc<RefCell<ProbeRegistry>>>,
     /// M-19 波形管道（D-46）—— 边沿的环形缓冲（导出用）。
@@ -903,6 +910,7 @@ impl KernelHost {
             published_regs: [0; 32],
             published_pc: 0,
             published_valid: false,
+            pending_events: Vec::new(),
             delta_published_regs: [0; 32],
             delta_published_pc: 0,
             delta_published_valid: false,

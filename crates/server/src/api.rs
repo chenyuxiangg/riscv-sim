@@ -11,13 +11,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use riscv_sim_contract::model::{Breakpoint, BreakpointKind};
+use riscv_sim_contract::model::{Breakpoint, BreakpointKind, TraceFormat, TraceSource};
 use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::CommandPayload;
 use riscv_sim_kernel::kernel_host::platform;
@@ -45,6 +46,20 @@ const DEFAULT_DISASM_COUNT: u32 = 16;
 const BOOT_DEFAULT_STEPS: u32 = 1_000_000;
 const BOOT_MAX_STEPS: u32 = 100_000_000;
 const BOOT_CHUNK: u32 = 10_000;
+
+/// WS 事件流的**轮询节拍**与每次最多取多少帧。
+///
+/// ⚠️ 为什么要轮询：事件环住在会话线程里（`!Send` 的宿主只能在那儿读），
+/// 所以 WS 这一侧只能**按拍查询**，不是内核主动推。
+const WS_POLL: Duration = Duration::from_millis(50);
+const WS_CHUNK: usize = 256;
+
+/// `GET .../events`（REST 版）一次最多取多少帧。
+const DEFAULT_EVENT_LIMIT: usize = 256;
+const MAX_EVENT_LIMIT: usize = 4096;
+
+/// 一次 trace 导出的默认条数。
+const DEFAULT_TRACE_LIMIT: u32 = 1024;
 
 /// 一次符号列表的默认条数 / 硬上限（**服务端**的界，不是内核判据）。
 const DEFAULT_SYMBOL_LIMIT: usize = 512;
@@ -178,6 +193,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/step", post(step_session))
         .route("/api/sessions/{id}/console", get(read_console))
+        .route("/api/sessions/{id}/events", get(read_events))
+        .route("/api/sessions/{id}/events/ws", get(events_ws))
+        .route("/api/sessions/{id}/trace", get(read_trace))
+        .route("/api/sessions/{id}/trace/enabled", put(set_trace_enabled))
         .route("/api/sessions/{id}/state", get(session_state))
         .route("/api/sessions/{id}/memory", get(read_memory_range))
         .route("/api/sessions/{id}/symbols", get(list_symbols))
@@ -466,7 +485,10 @@ async fn run_session(
     let report = state.registry.run(&id, steps, timeout_ms)?;
     if report.get("stop_reason").and_then(|value| value.as_str()) == Some("timeout") {
         let mut timeout_body = report;
-        timeout_body["code"] = json!(format!("E_{}-06", riscv_sim_contract::error::ErrorFamily::Session.as_str()));
+        timeout_body["code"] = json!(format!(
+            "E_{}-06",
+            riscv_sim_contract::error::ErrorFamily::Session.as_str()
+        ));
         let limit_ms = timeout_ms.unwrap_or(state.max_run_ms);
         timeout_body["detail"] = json!(format!(
             "run hit the wall-clock limit ({limit_ms} ms); the guest is stopped, see `executed` / `pc`"
@@ -514,6 +536,186 @@ pub struct ConsoleQuery {
 /// 文本流，把它塞进 JSON 数组会让 `curl | xxd` 这类用法变得没法用。
 /// 三对方位信息走 header：`X-Console-Offset` / `X-Console-Base` /
 /// `X-Console-Total`。
+/// `GET /api/sessions/{id}/events?since=&limit=`
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    /// 起始序号（缺省 = 0，即「从头」）。
+    since: Option<u64>,
+    /// 最多多少帧（默认 256，硬上限 4096）。
+    limit: Option<usize>,
+}
+
+async fn read_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<EventsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let since = query.since.unwrap_or(0);
+    let limit = plan_event_limit(query.limit);
+    let body = state.registry.events(&id, since, limit)?;
+    Ok(Json(body))
+}
+
+/// 事件条数：**缺省 256**，超上限**夹到上限**（读是幂等的，夹不改变语义）。
+fn plan_event_limit(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or(DEFAULT_EVENT_LIMIT)
+        .clamp(1, MAX_EVENT_LIMIT)
+}
+
+/// `GET /api/sessions/{id}/events/ws` —— WS 事件流（P1 的主通道）。
+///
+/// 协议：服务端只往**外**推，一帧一条 JSON
+/// `{since, next, lost, frames:[{seq, event}]}`；客户端拿 `next` 续读。
+async fn events_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    ws.on_upgrade(move |socket| stream_events(socket, state, id))
+}
+
+async fn stream_events(mut socket: WebSocket, state: AppState, id: String) {
+    let mut next: u64 = 0;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(WS_POLL) => {
+                let since = next;
+                let body = match state.registry.events(&id, since, WS_CHUNK) {
+                    Ok(body) => body,
+                    Err(err) => {
+                        // 会话没了（删除 / TTL）⇒ ⇒ 推最后一帧说明原因再关。
+                        //
+                        // ⚠️ **不**把 `ApiError` 的场景码塞进帧里：`ApiError` 的
+                        //    getter 是 `cfg(test)` 的（生产路径只写不读，避免同一
+                        //    判据有第二个消费方）⇒ ⇒ 这里只报「关了」+ 原因类。
+                        //    客户端要精确码就用 `GET .../events` 的 HTTP 错误体。
+                        let reason = if state.registry.probe(&id).is_ok() {
+                            "session busy or shutting down"
+                        } else {
+                            "session gone"
+                        };
+                        let frame = serde_json::json!({
+                            "since": since,
+                            "next": since,
+                            "lost": false,
+                            "frames": [],
+                            "closed": true,
+                            "reason": reason,
+                            "status": err.into_response().status().as_u16(),
+                        });
+                        let _ = socket.send(Message::Text(frame.to_string().into())).await;
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    }
+                };
+                let got_next = body.get("next").and_then(|value| value.as_u64()).unwrap_or(since);
+                let lost = body.get("lost").and_then(|value| value.as_bool()).unwrap_or(false);
+                let frames = body.get("frames").cloned().unwrap_or(json!([]));
+                let frame = serde_json::json!({
+                    "since": since,
+                    "next": got_next,
+                    "lost": lost,
+                    "frames": frames,
+                });
+                next = got_next;
+                if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                    return;
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    // 本端**只往外推**：入向只看「关没关」。
+                    None | Some(Ok(Message::Close(_))) | Some(Err(_)) => return,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+}
+
+/// `GET /api/sessions/{id}/trace?source=&format=&offset=&limit=`
+#[derive(Debug, Deserialize)]
+struct TraceQuery {
+    /// `execution`（缺省）或 `waveform`。
+    source: Option<String>,
+    /// `csv`（缺省）/ `json` / `vcd`（只 warranted waveform）。
+    format: Option<String>,
+    /// 续读起点（条目数）。
+    offset: Option<u64>,
+    /// 本次最多多少条。
+    limit: Option<u32>,
+}
+
+async fn read_trace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<TraceQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = parse_trace_source(query.source.as_deref())?;
+    let format = parse_trace_format(query.format.as_deref(), source)?;
+    let command = CommandPayload::ExportTrace {
+        source,
+        format,
+        offset: query.offset.unwrap_or(0),
+        limit: plan_trace_limit(query.limit),
+        filter: Default::default(),
+    };
+    let body = state.registry.export_trace(&id, command)?;
+    Ok(Json(body))
+}
+
+fn parse_trace_source(raw: Option<&str>) -> Result<TraceSource, ApiError> {
+    match raw.unwrap_or("execution").to_ascii_lowercase().as_str() {
+        "execution" | "exec" => Ok(TraceSource::Execution),
+        "waveform" | "wave" => Ok(TraceSource::Waveform),
+        other => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "E_PROTO-01",
+            format!("unknown trace source {other:?}; expected execution|waveform"),
+        )),
+    }
+}
+
+fn parse_trace_format(raw: Option<&str>, source: TraceSource) -> Result<TraceFormat, ApiError> {
+    let default = match source {
+        TraceSource::Execution => "csv",
+        TraceSource::Waveform => "vcd",
+    };
+    let name = raw.unwrap_or(default).to_ascii_lowercase();
+    match (name.as_str(), source) {
+        ("csv", _) => Ok(TraceFormat::Csv),
+        ("json", TraceSource::Execution) => Ok(TraceFormat::Json),
+        ("vcd", TraceSource::Waveform) => Ok(TraceFormat::Vcd),
+        _ => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "E_PROTO-01",
+            format!("format {name:?} is not valid for source {source:?}; see contract TraceFormat"),
+        )),
+    }
+}
+
+fn plan_trace_limit(requested: Option<u32>) -> u32 {
+    requested
+        .unwrap_or(DEFAULT_TRACE_LIMIT)
+        .min(DEFAULT_TRACE_LIMIT)
+}
+
+/// `PUT /api/sessions/{id}/trace/enabled`
+#[derive(Debug, Deserialize)]
+struct TraceEnabledBody {
+    enabled: bool,
+}
+
+async fn set_trace_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<TraceEnabledBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let reply = state.registry.set_trace(&id, body.enabled)?;
+    Ok(Json(reply))
+}
+
 async fn read_console(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -535,8 +737,14 @@ async fn read_console(
                 .collect()
         })
         .unwrap_or_default();
-    let base = body.get("base").and_then(|value| value.as_u64()).unwrap_or(0);
-    let total = body.get("total").and_then(|value| value.as_u64()).unwrap_or(0);
+    let base = body
+        .get("base")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let total = body
+        .get("total")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
     let response = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
@@ -580,10 +788,11 @@ async fn read_memory_range(
         .addr
         .ok_or_else(|| ApiError::bad_request("query `addr` is required"))?;
     let len = query.len.unwrap_or(DEFAULT_MEMORY_LEN);
-    Ok(Json(state.registry.debug(
-        &id,
-        CommandPayload::DumpMemory { addr, len },
-    )?))
+    Ok(Json(
+        state
+            .registry
+            .debug(&id, CommandPayload::DumpMemory { addr, len })?,
+    ))
 }
 
 /// `GET …/symbols` 的查询串。
@@ -637,10 +846,11 @@ async fn disassemble(
         .addr
         .ok_or_else(|| ApiError::bad_request("query `addr` is required"))?;
     let count = query.count.unwrap_or(DEFAULT_DISASM_COUNT);
-    Ok(Json(state.registry.debug(
-        &id,
-        CommandPayload::Disasm { addr, count },
-    )?))
+    Ok(Json(
+        state
+            .registry
+            .debug(&id, CommandPayload::Disasm { addr, count })?,
+    ))
 }
 
 /// 断点表的「新条目要什么」（**HTTP 面**的三选一）。
@@ -873,7 +1083,9 @@ async fn boot(
     let bytes = tokio::task::spawn_blocking(move || std::fs::read(&read_from))
         .await
         .map_err(|err| ApiError::bad_request(format!("image read task failed: {err}")))?
-        .map_err(|err| ApiError::bad_request(format!("image path {path:?} cannot be read: {err}")))?;
+        .map_err(|err| {
+            ApiError::bad_request(format!("image path {path:?} cannot be read: {err}"))
+        })?;
     if bytes.is_empty() {
         return Err(ApiError::bad_request(format!("image {path:?} is empty")));
     }
@@ -950,8 +1162,13 @@ async fn boot_once(
         remaining = remaining.saturating_sub(u32::try_from(ran).unwrap_or(chunk));
 
         // 取这一窗口新产生的 console 字节。
-        let console = state.registry.console(id, console_offset, BOOT_CHUNK as usize)?;
-        let base = console.get("base").and_then(|value| value.as_u64()).unwrap_or(0);
+        let console = state
+            .registry
+            .console(id, console_offset, BOOT_CHUNK as usize)?;
+        let base = console
+            .get("base")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
         console_total = console
             .get("total")
             .and_then(|value| value.as_u64())
@@ -1021,7 +1238,11 @@ async fn boot_once(
 ///
 /// ⚠️ 目标文件通常**还不存在** ⇒ ⇒ 不能直接 `canonicalize` 它；规范化
 /// **父目录**，再把文件名接上 ⇒ ⇒ `..` 穿越照样被拒。
-fn write_console_bytes(root: Option<&std::path::Path>, target: &str, bytes: &[u8]) -> Result<(), ApiError> {
+fn write_console_bytes(
+    root: Option<&std::path::Path>,
+    target: &str,
+    bytes: &[u8],
+) -> Result<(), ApiError> {
     let root = root.ok_or_else(|| {
         ApiError::bad_request("`write_to` needs --allow-image-root (there is no writable root)")
     })?;
@@ -1038,7 +1259,9 @@ fn write_console_bytes(root: Option<&std::path::Path>, target: &str, bytes: &[u8
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     let canonical_parent = std::fs::canonicalize(parent).map_err(|err| {
-        ApiError::bad_request(format!("write_to parent {parent:?} cannot be resolved: {err}"))
+        ApiError::bad_request(format!(
+            "write_to parent {parent:?} cannot be resolved: {err}"
+        ))
     })?;
     let file_name = requested
         .file_name()
@@ -1064,7 +1287,9 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.len() > haystack.len() {
         return false;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// 暂停会话（控制面）：置位即返回，推进者在下一个窗口边界停。
@@ -1175,8 +1400,7 @@ mod tests {
 
     #[test]
     fn resolve_board_prefers_request_then_startup_default() {
-        let (board, source) =
-            resolve_board(Some("qemu-virt".into()), Some("minimal".into()));
+        let (board, source) = resolve_board(Some("qemu-virt".into()), Some("minimal".into()));
         assert_eq!(board.as_deref(), Some("qemu-virt"));
         assert_eq!(source, BoardSource::Request);
 

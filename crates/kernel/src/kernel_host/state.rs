@@ -3,6 +3,8 @@
 //! ⚠️ 本模块是 [`super::KernelHost`] 的后代子模块 ⇒ ⇒ 可访问宿主私有字段；
 //! 方法仍挂在 `impl KernelHost` 上，对外调用点一字不变。
 
+use riscv_sim_contract::protocol::EventPayload;
+
 use super::KernelHost;
 use crate::m14_bus::Bus;
 use riscv_sim_contract::error::PlatformError;
@@ -11,6 +13,14 @@ use riscv_sim_contract::snapshot::EngineSnapshotDto;
 
 impl KernelHost {
     /// 已经执行的指令总数（headless runner 的预算判据）。
+    /// 取走 `run_until` 攒下的事件（**取走即清空**）。
+    ///
+    /// ⚠️ 与 `handle_message` 的返回值**不是**同一份：这是窗口内部产生的
+    /// 事件，只在 `run_until` 之后有内容。
+    pub fn take_pending_events(&mut self) -> Vec<EventPayload> {
+        std::mem::take(&mut self.pending_events)
+    }
+
     pub fn total_executed(&self) -> u64 {
         self.backend.total_executed()
     }

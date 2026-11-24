@@ -105,6 +105,72 @@ impl ConsoleRing {
     }
 }
 
+/// 事件流订阅的主题（与内核 `kernel_host::topics::TOPIC_STATE_DELTA` 逐字相同）。
+const TOPIC_STATE_DELTA: &str = "sim.state.delta";
+
+/// 一条会话的事件环容量（条）。
+const EVENT_RING_CAP: usize = 4096;
+
+/// 会话**事件环**（P1 的 WS 事件流）。
+///
+/// 与 console 环同一套账法：`seq` 是**会话内**单调的条目号，环满从**旧**
+/// 一端栽（新事件一定留住）⇒ ⇒ 客户端拿着 `seq` 续读，丢窗口时会收到
+/// `lost`（只能从 `next` 重新对齐）。
+#[derive(Debug)]
+struct EventRing {
+    frames: VecDeque<(u64, serde_json::Value)>,
+    /// 下一条要分配的 seq。
+    next: u64,
+    cap: usize,
+}
+
+impl EventRing {
+    fn new(cap: usize) -> Self {
+        Self {
+            frames: VecDeque::new(),
+            next: 0,
+            cap: cap.max(1),
+        }
+    }
+
+    /// 把一批事件压进环（一条事件一帧）。
+    fn push(&mut self, events: &[EventPayload]) {
+        for event in events {
+            // ⚠️ `Tick` 是心跳，**不进流**：它每个窗口一条，对客户端没有信息量，
+            //   却会把环里的真事件挤掉。
+            if matches!(event, EventPayload::Tick { .. }) {
+                continue;
+            }
+            let Ok(value) = serde_json::to_value(event) else {
+                continue;
+            };
+            self.frames.push_back((self.next, value));
+            self.next += 1;
+            while self.frames.len() > self.cap {
+                self.frames.pop_front();
+            }
+        }
+    }
+
+    /// 取 `seq >= since` 的帧（最多 `limit` 条）⇒ `(frames, next, lost)`。
+    fn since(&self, since: u64, limit: usize) -> (Vec<serde_json::Value>, u64, bool) {
+        let oldest = self
+            .frames
+            .front()
+            .map(|(seq, _)| *seq)
+            .unwrap_or(self.next);
+        let lost = since < oldest;
+        let frames: Vec<serde_json::Value> = self
+            .frames
+            .iter()
+            .filter(|(seq, _)| *seq >= since)
+            .take(limit.max(1))
+            .map(|(seq, value)| serde_json::json!({ "seq": seq, "event": value }))
+            .collect();
+        (frames, self.next, lost)
+    }
+}
+
 /// 会话板的来源。**必须记下来**：同一份「板 id」可能来自启动默认或请求，
 /// 事后追「这块板从哪来」只能靠它。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +236,15 @@ enum Job {
         steps: Option<u32>,
         /// 墙钟上限（毫秒）；对 `steps = Some(n)` **不生效**（见内核注释）。
         timeout_ms: Option<u64>,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 读事件流（P1）：`seq >= since` 的帧。
+    Events {
+        /// 起始序号。
+        since: u64,
+        /// 最多多少帧。
+        limit: usize,
         /// 回执通道。
         reply: Sender<JobReply>,
     },
@@ -421,6 +496,28 @@ impl SessionHandle {
                 reply,
             },
             crate::error::console_failure,
+        )
+    }
+
+    /// trace 开关（P1）：`SetTraceEnabled`。
+    pub fn set_trace(&self, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        self.debug(CommandPayload::SetTraceEnabled { enabled })
+    }
+
+    /// trace 导出（P1）：`ExportTrace`。
+    pub fn export_trace(&self, command: CommandPayload) -> Result<serde_json::Value, ApiError> {
+        self.debug(command)
+    }
+
+    /// 读事件流（P1）。
+    pub fn events(&self, since: u64, limit: usize) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Events {
+                since,
+                limit,
+                reply,
+            },
+            crate::error::debug_failure,
         )
     }
 
@@ -727,6 +824,33 @@ impl SessionRegistry {
         handle.console(offset, limit)
     }
 
+    /// trace 开关（P1）。
+    pub fn set_trace(&self, id: &str, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.set_trace(enabled)
+    }
+
+    /// trace 导出（P1）。
+    pub fn export_trace(
+        &self,
+        id: &str,
+        command: CommandPayload,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.export_trace(command)
+    }
+
+    /// 读事件流（P1）。
+    pub fn events(
+        &self,
+        id: &str,
+        since: u64,
+        limit: usize,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.events(since, limit)
+    }
+
     /// 读状态（R-07）。**借**一条会话，同 [`Self::set_board`]。
     pub fn state(&self, id: &str) -> Result<serde_json::Value, ApiError> {
         let handle = self.handle_for(id)?;
@@ -740,11 +864,7 @@ impl SessionRegistry {
     }
 
     /// 调试命令（R-07）。
-    pub fn debug(
-        &self,
-        id: &str,
-        command: CommandPayload,
-    ) -> Result<serde_json::Value, ApiError> {
+    pub fn debug(&self, id: &str, command: CommandPayload) -> Result<serde_json::Value, ApiError> {
         let handle = self.handle_for(id)?;
         handle.debug(command)
     }
@@ -1019,6 +1139,62 @@ fn debug_reply(
                 }),
             }
         }
+        CommandPayload::ExportTrace { offset, limit, .. } => {
+            let chunk = events.iter().rev().find_map(|event| match event {
+                EventPayload::TraceExport {
+                    source,
+                    format,
+                    offset,
+                    next_offset,
+                    total,
+                    bytes,
+                    chunk,
+                    overflow_marked,
+                } => Some(serde_json::json!({
+                    "source": source,
+                    "format": format,
+                    "offset": offset,
+                    "next_offset": next_offset,
+                    "total": total,
+                    "bytes": bytes,
+                    "chunk": chunk,
+                    "overflow_marked": overflow_marked,
+                })),
+                _ => None,
+            });
+            match chunk {
+                Some(value) => Ok(value),
+                None => Err(KernelFailure {
+                    code: "E_PROTO-08".to_string(),
+                    message: format!(
+                        "内核回 ExportTrace 却没有 TraceExport 事件（offset={offset}, limit={limit}）"
+                    ),
+                }),
+            }
+        }
+        CommandPayload::SetTraceEnabled { enabled } => {
+            let state = events.iter().rev().find_map(|event| match event {
+                EventPayload::TraceState {
+                    enabled,
+                    len,
+                    dropped,
+                } => Some(serde_json::json!({
+                    "enabled": enabled,
+                    "len": len,
+                    "dropped": dropped,
+                })),
+                _ => None,
+            });
+            match state {
+                Some(value) => Ok(value),
+                None => Err(KernelFailure {
+                    code: "E_PROTO-08".to_string(),
+                    message: format!(
+                        "内核回 SetTraceEnabled 却没有 TraceState 事件（enabled={enabled}）"
+                    ),
+                }),
+            }
+        }
         _ => {
             // 断点族（Set / Clear / Enable / List）的回执都是**整张表**。
             // `Set` / `Clear` 的即时事件里没有表 ⇒ ⇒ 用先问出来的那次。
@@ -1058,6 +1234,16 @@ fn spawn_worker(
             // `KernelHost` 是 `!Send` ⇒ ⇒ 只能在这里 `new()`，不能从外面搬进来。
             let mut host = KernelHost::new();
             let mut console = ConsoleRing::new(max_console);
+            let mut events_ring = EventRing::new(EVENT_RING_CAP);
+            // 事件流的基础：**订阅 `sim.state.delta`** ⇒ ⇒ 此后每个运行窗口都会
+            // 产出一条增量（不订阅的话内核只发 `Tick`，事件流等于空的）。
+            let baseline = host.handle_message(&Message::command(
+                0,
+                CommandPayload::Subscribe {
+                    topic: TOPIC_STATE_DELTA.to_string(),
+                },
+            ));
+            events_ring.push(&baseline);
             // 启动默认 / 请求指定的板，在建会话的这一刻就配进内核 ⇒ ⇒
             // 会话一出生就能直接 `…/image` 装载（R-03 的「配板先于装载」）。
             if let Some(description) = board {
@@ -1105,6 +1291,7 @@ fn spawn_worker(
                             });
                             // ⚠️ 跑完**立刻**把字节从内核搬进会话环：内核侧的捕获环
                             //   也是有界的，攒着不取会丢最新的字节。
+                            events_ring.push(&host.take_pending_events());
                             let drained = host.drain_console();
                             let run_base = console.total;
                             console.push(&drained);
@@ -1141,6 +1328,18 @@ fn spawn_worker(
                                 }),
                             });
                         }
+                        Job::Events {
+                            since,
+                            limit,
+                            reply,
+                        } => {
+                            let (frames, next, lost) = events_ring.since(since, limit);
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "frames": frames,
+                                "next": next,
+                                "lost": lost,
+                            })));
+                        }
                         Job::State { reply } => {
                             let _ = reply.send(Ok(serde_json::json!({
                                 "pc": host.pc(),
@@ -1167,12 +1366,12 @@ fn spawn_worker(
                                     CommandPayload::ListBreakpoints,
                                 ))
                             });
-                            let _ = reply.send(debug_reply(
-                                &command,
-                                &host,
-                                &events,
-                                table.as_deref(),
-                            ));
+                            events_ring.push(&events);
+                            if let Some(table) = table.as_deref() {
+                                events_ring.push(table);
+                            }
+                            let _ =
+                                reply.send(debug_reply(&command, &host, &events, table.as_deref()));
                         }
                         Job::SetBoard {
                             description,
@@ -1186,6 +1385,7 @@ fn spawn_worker(
                                     expected_revision,
                                 },
                             ));
+                            events_ring.push(&events);
                             let _ = reply.send(board_reply(&host, &events));
                         }
                         Job::Load {
@@ -1208,12 +1408,26 @@ fn spawn_worker(
                                 }],
                                 version: ProjectVersion::default(),
                             };
-                            let events = host
-                                .handle_message(&Message::command(
-                                    1,
-                                    CommandPayload::LoadProject(project),
+                            let events = host.handle_message(&Message::command(
+                                1,
+                                CommandPayload::LoadProject(project),
+                            ));
+                            events_ring.push(&events);
+                            let result = load_reply(&host, &events);
+                            // ⚠️ **`LoadProject` 会清空订阅表**（内核语义：新工程 ⇒
+                            //    旧订阅全部失效，客户端必须重订）。所以装载成功之后
+                            //    必须**立刻重订** `sim.state.delta`，否则此后每个运行
+                            //    窗口又只剩 `Tick` —— 事件流静默变空。
+                            if result.is_ok() {
+                                let restored = host.handle_message(&Message::command(
+                                    2,
+                                    CommandPayload::Subscribe {
+                                        topic: TOPIC_STATE_DELTA.to_string(),
+                                    },
                                 ));
-                            let _ = reply.send(load_reply(&host, &events));
+                                events_ring.push(&restored);
+                            }
+                            let _ = reply.send(result);
                         }
                     }
                     busy.store(false, Ordering::Release);
@@ -1237,6 +1451,36 @@ mod tests {
 
     fn registry() -> SessionRegistry {
         SessionRegistry::new(2, Duration::from_millis(50), 1024)
+    }
+
+    fn delta() -> EventPayload {
+        EventPayload::SimStateDelta {
+            registers: Vec::new(),
+            pc: Some(0),
+            t_ps: 0,
+        }
+    }
+
+    #[test]
+    fn event_ring_skips_ticks_and_caps_itself() {
+        let mut ring = EventRing::new(2);
+        // `Tick` 是心跳 ⇒ **不进流**（不进环、也不占 seq）。
+        ring.push(&[EventPayload::Tick {
+            elapsed_ps: 1,
+            pc: 0,
+        }]);
+        assert_eq!(ring.since(0, 8).0.len(), 0);
+        assert_eq!(ring.since(0, 8).1, 0);
+
+        ring.push(&[delta(), delta(), delta()]);
+        // 环满从旧的一端栽 ⇒ ⇒ 只留最新两条。
+        let (frames, next, lost) = ring.since(0, 8);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(next, 3);
+        // 要过被挤掉的那一条 ⇒ ⇒ `lost` 必须立起来（不能静默跳号）。
+        assert!(lost);
+        // 从环里最旧的那条起读 ⇒ ⇒ 没丢。
+        assert!(!ring.since(1, 8).2);
     }
 
     #[test]
@@ -1272,12 +1516,8 @@ mod tests {
     #[test]
     fn quota_rejects_the_third_session() {
         let registry = registry();
-        registry
-            .create(None, BoardSource::None)
-            .unwrap();
-        registry
-            .create(None, BoardSource::None)
-            .unwrap();
+        registry.create(None, BoardSource::None).unwrap();
+        registry.create(None, BoardSource::None).unwrap();
         let err = registry.create(None, BoardSource::None).unwrap_err();
         assert_eq!(err.code(), "E_SESS-05");
         assert_eq!(err.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
@@ -1341,7 +1581,10 @@ mod tests {
     /// 停因词表：**宿主侧四种**停因必须与契约 `HaltReason` 分开拼写。
     #[test]
     fn stop_label_separates_host_stops_from_guest_halts() {
-        assert_eq!(stop_label(RunStop::Halted(HaltReason::Breakpoint)), "breakpoint");
+        assert_eq!(
+            stop_label(RunStop::Halted(HaltReason::Breakpoint)),
+            "breakpoint"
+        );
         assert_eq!(stop_label(RunStop::Halted(HaltReason::Trap)), "trap");
         assert_eq!(stop_label(RunStop::Steps), "steps");
         assert_eq!(stop_label(RunStop::Budget), "budget");

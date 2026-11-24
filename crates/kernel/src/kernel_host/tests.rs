@@ -160,6 +160,45 @@ fn state_delta_subscription_emits_full_then_incremental_register_state() {
 }
 
 #[test]
+fn run_until_stashes_window_events_for_the_event_stream() {
+    let mut host = KernelHost::new();
+    dispatch(
+        &mut host,
+        CommandPayload::SetMemoryMap {
+            description: platform::builtin_description(platform::PLATFORM_ID_DEFAULT)
+                .expect("内置 default 必须存在"),
+            expected_revision: None,
+        },
+    );
+    dispatch(&mut host, CommandPayload::LoadProject(demo_project()));
+    // ⚠️ **装载之后**才订阅：`LoadProject` 清订阅表（新工程 = 新会话）。
+    dispatch(
+        &mut host,
+        CommandPayload::Subscribe {
+            topic: "sim.state.delta".to_string(),
+        },
+    );
+
+    let report = host.run_until(Some(3), None, &|| false);
+    assert_eq!(report.executed, 3, "StepN 语义是「恰好 n 条」");
+    let pending = host.take_pending_events();
+    assert!(
+        pending
+            .iter()
+            .any(|event| matches!(event, EventPayload::SimStateDelta { .. })),
+        "窗口里产生的 SimStateDelta 必须进 pending（否则事件流静默变空）"
+    );
+    assert!(
+        pending
+            .iter()
+            .any(|event| matches!(event, EventPayload::Tick { .. })),
+        "Tick 也要进 pending —— 由**消费端**决定丢不丢（服务端才过滤）"
+    );
+    // 取走即清空：第二次必须是空的，否则同一条事件会被推两遍。
+    assert!(host.take_pending_events().is_empty());
+}
+
+#[test]
 fn load_project_resets_and_clears_the_session() {
     let mut host = KernelHost::new();
     // 先订阅，再装载 —— 装载会清掉订阅（新工程 = 新会话，FR-13）。
@@ -247,7 +286,11 @@ fn load_project_emits_an_image_loaded_receipt() {
         "size 必须等于真正写进总线的字节数"
     );
     // 修订号对得上宿主现在的图。
-    assert_eq!(receipt.6, host.map_revision(), "platform_revision 要能对回当前图");
+    assert_eq!(
+        receipt.6,
+        host.map_revision(),
+        "platform_revision 要能对回当前图"
+    );
 }
 
 /// 一块**自跳**的镜像（`jal x0, 0`）⇒ ⇒ 永不前进、永不结束，专门用来验

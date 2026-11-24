@@ -8,7 +8,7 @@
 //! ## P0-1 的边界（本文件当前范围）
 //!
 //! 只提供进程入口、参数闸门、`GET /api/version`、`GET /healthz` 与标准错误体。
-//! 会话表、配板、装载、run、console、WS 都在后续切片；**现在打任何别的路径
+//! 会话表、配板、装载、run、console、事件流（WS）、trace 都已落地；**打任何别的路径
 //! 都会拿到 `404 + E_PROTO-08`**，而不是连不上 —— 这样客户端能区分「服务没
 //! 起来」与「路径打错」。
 //!
@@ -76,6 +76,10 @@ usage: riscv_sim_server [options]
   POST   /api/sessions/<id>/breakpoints {addr|symbol|condition} -> 201 + table
   DELETE /api/sessions/<id>/breakpoints/<bp> -> table (idempotent)
   PUT    /api/sessions/<id>/breakpoints/<bp>/enabled {enabled} -> table
+  GET    /api/sessions/<id>/events  ?since&limit -> {frames[{seq,event}], next, lost}
+  GET    /api/sessions/<id>/events/ws  WebSocket: {since, next, lost, frames} 一帧一拍
+  GET    /api/sessions/<id>/trace   ?source(execution|waveform)&format(csv|json|vcd)&offset&limit
+  PUT    /api/sessions/<id>/trace/enabled {enabled} -> {enabled, len, dropped}
 ";
 
 fn main() -> ExitCode {
@@ -145,7 +149,9 @@ async fn shutdown_signal() -> &'static str {
             Err(err) => {
                 // 装不上 SIGTERM 处理器不是致命错误：退化成只认 ctrl-c，
                 // 但要**说出来**（否则用户以为 SIGTERM 生效了）。
-                eprintln!("riscv_sim_server: cannot hook SIGTERM ({err}); only ctrl-c stops the server");
+                eprintln!(
+                    "riscv_sim_server: cannot hook SIGTERM ({err}); only ctrl-c stops the server"
+                );
                 let _ = tokio::signal::ctrl_c().await;
                 return "ctrl-c";
             }
@@ -189,7 +195,11 @@ async fn serve(cfg: Config) -> Result<(), String> {
     // 卡在任何一次请求后面。
     let registry = Arc::clone(&state.registry);
     let tick = std::cmp::min(cfg.session_ttl / 2, Duration::from_secs(30));
-    let tick = if tick.is_zero() { Duration::from_secs(1) } else { tick };
+    let tick = if tick.is_zero() {
+        Duration::from_secs(1)
+    } else {
+        tick
+    };
     let sweeper = tokio::spawn(async move {
         let mut timer = tokio::time::interval(tick);
         loop {
