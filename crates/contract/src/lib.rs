@@ -369,6 +369,18 @@ pub mod snapshot;
 ///   不进会话快照）。
 pub const SCHEMA_VERSION: u32 = 18;
 
+/// 契约 crate 自身的版本号 —— 供 `GET /api/version` 回给客户端（M-24 · R-01）。
+///
+/// ⚠️ **与 [`SCHEMA_VERSION`] 是两件事，不要混**：`SCHEMA_VERSION` 描述
+/// **消息形状**（信封升版才动），本常量描述**这个 crate 的发布版本**。
+/// 客户端协商时两个都要看：形状不符 ⇒ `E_PROTO-01`；版本号只用于诊断
+/// 与镜像比对。
+///
+/// ⚠️ 常量取自 `CARGO_PKG_VERSION`，**不手抄字面量** —— 否则一次
+/// `version.workspace = true` 的升级会让「回给客户端的版本」与「真正
+/// 编进 crate 的版本」分成两个真相。
+pub const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// 转储长度上限（字节）—— v0.57 批（STAGE-42 §2.5 · 裁决 D）。
 ///
 /// ⚠️ **原样拒，不静默截断**：`len == 0` 或 `len > DUMP_MAX_BYTES` ⇒ ⇒
