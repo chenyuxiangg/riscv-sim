@@ -20,12 +20,12 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.0（2026-11-24 方案定稿；§08 五项决策已拍板）· 需求基线 docs/requirements/"
-           "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim d385239（契约 schema v18 / 内核 0.1.0）")
+VERSION = ("HTML 版 v1.1（2026-11-24 方案定稿；P0-1/P0-2/P0-3 已落地；契约 v19 装载回执）· 需求基线 docs/requirements/"
+           "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim 7f23738（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
     ("15", "条需求承接", "R-01～R-15 逐条有落点，无悬空条目"),
-    ("0", "处内核语义变更", "只加宿主层；契约「只增不改」"),
+    ("1", "处内核增量", "装载成功多发一条 ImageLoaded 回执（契约 v19）"),
     ("1", "个新错误族", "契约层新增 SESS 族 7 个场景码"),
     ("1/会话", "专属线程", "KernelHost 为 !Send，靠线程边界隔离"),
 ]
@@ -451,13 +451,17 @@ SECTIONS.append({
         }),
         ("h3", "sec3-5", "3.5 契约增量（只增不改）"),
         ("p", "全量核对过契约 v18：装载 / 运行 / 步进 / 断点 / 观察点 / 寄存器 / 内存转储 / 符号 / 反汇编 / 快照 / trace / 模板 / 板图 —— "
-              "<b>本需求需要的命令一条不缺</b>。因此契约层只加一个错误族，消息形状一个字段不动。"),
+              "<b>本需求需要的命令一条不缺</b>。因此契约层<b>不动任何命令</b>：只加一个错误族，外加一个事件变体（装载回执）。"
+              "回执是<b>用户拍板</b>加的：没有它，客户端只能从 <code>MemoryMap.loaded</code> 这个<b>状态位</code>推断「装载发生过」，"
+              "而段/入口/ISA 事实要么再查一次、要么在宿主侧重解析一遍 —— <b>报告与事实就有两个来源</b>。"),
         ("caption", "表 10 · 契约层与镜像代码的增量清单"),
         ("table", {
             "widths": ["22%", "16%", "12%", "34%", "16%"],
             "head": ["变更项", "位置", "改动量", "理由（判据 D-132 · C）", "版本影响"],
             "rows": [
-                ["新增 <code>ErrorFamily::Session = \"SESS\"</code>", "contract/error.rs 的 <code>error_families!</code>", "1 行", "会话不存在 / 忙 / 中毒 / 窗口丢失 / 额度 / 超时 —— 这些码<b>前端 server-mode 要按码分派</b>（判据②成立）", "<code>SCHEMA_VERSION</code> 保持 18（消息形状未变）"],
+                ["新增 <code>ErrorFamily::Session = \"SESS\"</code>", "contract/error.rs 的 <code>error_families!</code>", "1 行", "会话不存在 / 忙 / 中毒 / 窗口丢失 / 额度 / 超时 —— 这些码<b>前端 server-mode 要按码分派</b>（判据②成立）", "族清单 +1；<code>SCHEMA_VERSION</code> 随之 18 → 19（与下一行同批）"],
+                ["新增 <code>EventPayload::ImageLoaded</code>", "contract/protocol.rs 的 <code>EventPayload</code>", "1 变体（7 字段）", "R-04 要在装载回执里给 entry / segments / isa —— 由<b>内核</b>在装载路径末尾发（与真正 <code>load_bytes</code> 的那份解析同源）⇒ 报告即事实", "线上<b>多一个事件变体</code> ⇒ <code>SCHEMA_VERSION</code> 18 → 19"],
+                ["新增 <code>model::ImageSegment</code>", "contract/model.rs", "1 DTO（base / size）", "只报段<b>形状</b>，不重复传字节（字节仍是 <code>MemoryDump</code> 的事）", "随 v19"],
                 ["<code>E_SESS-01</code> 会话不存在", "同上", "1 常量", "R-02 / R-09 明确要求", "前端 <code>RUST_ERROR_CODE_REFS</code> +1"],
                 ["<code>E_SESS-02</code> 会话忙", "同上", "1 常量", "「忙」必须与「不存在」分开，否则客户端无法决定重试还是重建", "+1"],
                 ["<code>E_SESS-03</code> 会话中毒", "同上", "1 常量", "线程 panic 后不可继续，与业务拒绝不同类", "+1"],
@@ -465,7 +469,8 @@ SECTIONS.append({
                 ["<code>E_SESS-05 / 06</code> 额度 / 超时", "同上（P0 内实现）", "2 常量", "R-11 的 429 与 504 需要可判别的码", "+2"],
                 ["<code>E_SESS-07</code> 未授权", "同上", "1 常量", "<code>--allow-remote</code> 下缺 token（P2 前的最小闸门）", "+1"],
                 ["<code>E_STORE-07</code> 路径越出白名单", "<b>server crate</b> 内部常量", "1 常量", "不跨 crate 共享、前端不分派 ⇒ 按判据 C <b>住模块内</b>", "契约不变"],
-                ["<code>KernelHost::handle_message</code>", "kernel（不改）", "0", "M-24 直接复用；不新增公开方法，也不改 <code>CommandPayload</code>", "无"],
+                ["<code>KernelHost::on_load_project</code> 末尾", "kernel/kernel_host/project.rs", "1 段（发回执）", "回执必须在<b>全部步骤成功之后</b>发；段与第五步 <code>load_bytes</code> 用<b>同一份</code> <code>parsed</code>", "内核语义不变：多一条事件，不改既有行为"],
+                ["<code>platform::template_infos()</code>", "kernel/kernel_host/platform.rs", "1 公开纯函数", "模板清单元数据（<code>device_count</code> 口径）只留<b>一个定义点</b>：内核事件与 <code>GET /api/board/templates</code> 共用", "无"],
             ],
         }),
         ("callout", "一处与需求原文的偏差", "需求 R-15 写的 <code>403 + E_IO-xx</code> 在契约层没有对应族（现只有 <code>STORE</code> 承担持久化/IO）。"
@@ -804,7 +809,7 @@ SECTIONS.append({
             ],
         }),
         ("h3", "sec9-2", "9.2 五项决策与落地取舍"),
-        ("p", "需求文档 §08 的五项会改变实现形态，五项<b>已全部拍板</b>（见表 22 的「已拍板」列）。其中四项按本设计的建议通过；"
+        ("p", "需求文档 §08 的五项会改变实现形态，五项<b>已全部拍板</b>；实施期又追加一项（D6 装载回执，见表 22）。其中 D1–D4 按本设计的建议通过；"
               "D5 改为保留 <code>osz-boot</code> 作为<b>离线</b>入口，因此额外的落地约束是「停因判定必须共处一份实现」，见 §5.2 的末尾说明。"),
         ("caption", "表 22 · 决策点与裁决"),
         ("table", {
@@ -816,6 +821,7 @@ SECTIONS.append({
                 ["D3", "<code>run</code> 语义", "① 同步到停点；② 立即返回 + 回调", "①（已拍板；② 留 P1）", "CI 的「一次调用拿到结果」不可退让"],
                 ["D4", "默认板", "① 不提供；② 启动参数显式配", "②（已拍板）", "显式、可追溯，且不绕过「无板不装载」"],
                 ["D5", "<code>/api/boot</code> 与 CLI", "① CLI 保留为<b>离线</b> runner（不起 daemon）；② CLI 变薄客户端（依赖 daemon）", "①（已拍板）", "离线验证不能依赖常驻进程；代价是停因判定必须共用内核<b>一处</b>，否则两套实现会漂，而两边 debug 都「看着对」"],
+                ["D6", "装载回执", "① 内核发 <code>ImageLoaded</code>（契约升 19）；② 宿主侧再解析一遍合成回执", "①（已拍板）", "解析只在装载路径做<b>一次</b>：回执是「真的装了什么」的证据；宿主侧再解析=两个来源，且多一次 ELF 解析开销"],
             ],
         }),
         ("callout", "本设计对需求的唯一主动偏离", "R-15 的 <code>E_IO-xx</code> 在契约层无族，改落 <code>E_STORE-07</code>（见 §3.5）。"
