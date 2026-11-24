@@ -253,6 +253,7 @@ const EXPECTED_SECTION_NAMES = Object.freeze([
     "boardArchive",
     "boardDelta",
     "boardOrdering",
+    "irqPanel",
     "uiLayout",
     "breakpointUi",
     "liveReadout",
@@ -2450,6 +2451,220 @@ async function runMemoryMapSection(cdp, opts) {
     return { skipped: false, checks };
 }
 
+
+/**
+ * v0.143 真机段：**外设中断号汇总面**（`front/views/components/irq-editor.js`）。
+ *
+ * ⚠️ **这段要钉的是「汇总面真的挂在产品视图上，且提示与内核同口径」**：
+ * - 面板不在 ⇒ 用户看不到全部源号（v0.81 那批视图重构里它曾经变成死导入）；
+ * - 行键与树节点键**不是同一套** ⇒ 点一行会选中别的器件（静默错位）；
+ * - 冲突不提示 ⇒ 用户改到同号/越界只能等内核拒（`E_PLT-12` / `E_PLT-16`）。
+ *
+ * ⚠️ **两块内置模版各管一半判据**（真机上的板必须**真的**来自模版那两条路）：
+ * - `tpl-min`（RAM + UART 源 10 + GPIO 源 11，**没有 PLIC**）⇒ 两行、可点、可判
+ *   「重复」；同时钉住裁决 G 的另一半：「没有 PLIC ⇒ **不**判范围」；
+ * - `tpl-soc`（PLIC 32 个源 + UART 源 10）⇒ 有上界 ⇒ 能判「越界」。
+ *
+ * ⚠️ **只读**判据：面板里**不许**有第二个输入框（同一个量一个编辑面）。
+ *
+ * ⚠️ **段序**：排在板级那几段之后 —— 这一段会**换板**（装模版）⇒ ⇒ 前面那些
+ *   段看到的必须还是它们自己配的那张板。
+ *
+ * @param {object} cdp
+ * @param {{timeoutMs: number}} opts
+ * @returns {Promise<{skipped: boolean, checks: object[]}>}
+ */
+async function runIrqPanelSection(cdp, opts) {
+    /** @type {{name: string, ok: boolean, detail: string}[]} */
+    const checks = [];
+    const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: String(detail) });
+    const T = Math.min(opts.timeoutMs, 8000);
+
+    await runEffect(cdp, 'location.hash = "#/product";');
+    await sleep(300);
+
+    /**
+     * 装一条**内置**模版（走产品视图那条真路径：开对话框 ⇒ 点行 ⇒ 板生效）。
+     *
+     * ⚠️ 判据是 `waitForBoardApplied`（内核帧 / DOM 钩子 / 回执文案三条独立
+     *   证据），不是「对话框关了就算成功」。
+     *
+     * @param {string} templateId
+     * @returns {Promise<{ids: string[], clicked: boolean, applied: boolean}>}
+     */
+    const loadTemplate = async (templateId) => {
+        const opened = await awaitEval(cdp, `(() => {
+            const b = document.querySelector('[data-view-body="product"] [data-action="open-templates"]');
+            if (!b) return false;
+            b.click();
+            return true;
+        })()`);
+        let ids = [];
+        if (opened) {
+            const dl = Date.now() + T;
+            while (Date.now() < dl) {
+                ids = await awaitEval(cdp,
+                    `Array.from(document.querySelectorAll("[data-template-src='builtin']")).map((r) => String(r.getAttribute("data-template-id")))`) ?? [];
+                if (ids.includes(templateId)) break;
+                await sleep(200);
+            }
+        }
+        const clicked = ids.includes(templateId) ? await awaitEval(cdp, `(() => {
+            const row = Array.from(document.querySelectorAll("[data-template-src='builtin']"))
+                .find((r) => String(r.getAttribute("data-template-id")) === ${JSON.stringify(String(templateId))});
+            if (!row) return false;
+            row.click();
+            return true;
+        })()`) : false;
+        const applied = clicked ? await waitForBoardApplied(cdp, String(templateId), T) : false;
+        return { ids, clicked, applied };
+    };
+
+    /** 读一次汇总面现场（行、树键、输入框数、源号上界文案）。 */
+    const readPanel = () => awaitEval(cdp, `(() => {
+        const body = document.querySelector('[data-view-body="product"]');
+        if (!body) return null;
+        const box = body.querySelector('[data-irq-editor]');
+        if (!box) return null;
+        return {
+            rows: Array.from(box.querySelectorAll('[data-irq-row]')).map((r) => ({
+                key: String(r.getAttribute('data-irq-key') ?? ''),
+                line: String(r.getAttribute('data-irq-line') ?? ''),
+                conflict: String(r.getAttribute('data-irq-conflict') ?? ''),
+                text: String(r.textContent ?? ''),
+            })),
+            treeKeys: Array.from(body.querySelectorAll('[data-device-key]')).map((n) => String(n.getAttribute('data-device-key') ?? '')),
+            inputs: box.querySelectorAll('input').length,
+            sources: String(box.querySelector('[data-irq-sources]')?.textContent ?? ''),
+        };
+    })()`);
+
+    /**
+     * 在右栏把**当前选中器件**的 PLIC 源号改成 `value`（必要时先解锁）。
+     *
+     * ⚠️ 解锁会重渲染 ⇒ 输入框句柄失效 ⇒ 解锁后**重新找**输入框再写。
+     *
+     * @param {number} value
+     * @returns {Promise<object|null>}
+     */
+    const typeIrq = async (value) => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const typed = await awaitEval(cdp, `(() => {
+                const body = document.querySelector('[data-view-body="product"]');
+                const input = body?.querySelector('[data-device-param="irq_line"]');
+                if (!input) return { ok: false, why: 'no-input' };
+                if (input.disabled) {
+                    const lock = body.querySelector('[data-action="toggle-lock"]');
+                    if (!lock) return { ok: false, why: 'locked-no-toggle' };
+                    lock.click();
+                    return { ok: false, why: 'unlocked' };
+                }
+                input.value = ${JSON.stringify(String(value))};
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true };
+            })()`);
+            await sleep(250);
+            const state = await readPanel();
+            if (typed?.ok && state) return state;
+            if (state === null) return null;
+            await sleep(200);
+        }
+        return null;
+    };
+
+    // -- ① tpl-min：两行、行键 = 树节点键、只读 -----------------------------
+    const minLoaded = await loadTemplate("tpl-min");
+    add("装内置模版 tpl-min（RAM + UART 源 10 + GPIO 源 11，没有 PLIC）",
+        minLoaded.applied === true,
+        `ids=${JSON.stringify(minLoaded.ids)} clicked=${minLoaded.clicked} applied=${minLoaded.applied}`);
+
+    const minPanel = await readPanel();
+    const minRows = minPanel?.rows ?? [];
+    const aligned = minRows.length === 2
+        && minRows.every((r) => (minPanel?.treeKeys ?? []).includes(r.key));
+    add("汇总面在、两行（UART + GPIO）、行键与树节点逐一对上",
+        Boolean(minPanel) && aligned,
+        `rows=${JSON.stringify(minRows)} treeKeys=${JSON.stringify(minPanel?.treeKeys ?? [])}`);
+    add("源号读的是草稿（UART 10 / GPIO 11）",
+        minRows.some((r) => r.line === "10") && minRows.some((r) => r.line === "11"),
+        `lines=${JSON.stringify(minRows.map((r) => r.line))}`);
+    add("汇总面只读（里面没有第二个输入框）",
+        minPanel?.inputs === 0, `inputs=${minPanel?.inputs}`);
+    add("没有 PLIC 的板 ⇒ 明说「不判范围」（裁决 G：不是非法板）",
+        String(minPanel?.sources ?? "").includes("没有 PLIC"), `sources=${minPanel?.sources}`);
+
+    // -- ② 点一行 ⇒ 右栏切到那个器件 ---------------------------------------
+    const jump = await awaitEval(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="product"] [data-irq-editor]');
+        if (!box) return null;
+        const row = Array.from(box.querySelectorAll('[data-irq-row]')).find((r) => String(r.textContent).includes('GPIO0'));
+        if (!row) return null;
+        const btn = row.querySelector('[data-action="select-irq-device"]');
+        if (!btn) return null;
+        const key = String(btn.getAttribute('data-irq-key') ?? '');
+        btn.click();
+        return { key };
+    })()`);
+    await sleep(250);
+    const jumped = await awaitEval(cdp, `(() => {
+        const body = document.querySelector('[data-view-body="product"]');
+        const active = body?.querySelector('.pw-node.is-active');
+        const base = body?.querySelector('[data-base-input]');
+        return {
+            active: active ? String(active.getAttribute('data-device-key') ?? '') : '',
+            base: base ? String(base.value ?? '') : '',
+        };
+    })()`);
+    add("点汇总面一行 ⇒ 右栏切到 GPIO0（基址 0x40001000）",
+        Boolean(jump) && jumped?.active === jump?.key && String(jumped?.base ?? "").toLowerCase() === "0x40001000",
+        `key=${jump?.key} active=${jumped?.active} base=${jumped?.base}`);
+
+    // -- ③ 重复「提前提示」，改回就消失 -------------------------------------
+    const dup = await typeIrq(10);
+    const dupCount = (dup?.rows ?? []).filter((r) => r.conflict === "duplicate").length;
+    add("把 GPIO 源号改成 10 ⇒ 两行都标「重复」", dupCount === 2,
+        `rows=${JSON.stringify(dup?.rows ?? [])}`);
+
+    const dupBack = await typeIrq(11);
+    const dupClean = (dupBack?.rows ?? []).filter((r) => r.conflict !== "none").length;
+    add("改回 11 ⇒ 冲突消失（不是恒亮的红标）", dupClean === 0,
+        `rows=${JSON.stringify(dupBack?.rows ?? [])}`);
+
+    // -- ④ tpl-soc：有 PLIC ⇒ 越界也要提前提示 -----------------------------
+    const socLoaded = await loadTemplate("tpl-soc");
+    add("装内置模版 tpl-soc（PLIC 32 个源 + UART 源 10）",
+        socLoaded.applied === true,
+        `ids=${JSON.stringify(socLoaded.ids)} clicked=${socLoaded.clicked} applied=${socLoaded.applied}`);
+    const socPanel = await readPanel();
+    const socRows = socPanel?.rows ?? [];
+    add("有 PLIC 的板 ⇒ 汇总面写明上界（1 – 31）",
+        String(socPanel?.sources ?? "").includes("1 – 31") || (socRows.length >= 1 && String(socPanel?.sources ?? "").includes("1 – 31")),
+        `sources=${socPanel?.sources} rows=${JSON.stringify(socRows)}`);
+
+    // 选中唯一那一行（UART），把源号改成 32（= sources ⇒ 不存在那个源）。
+    const socJump = await awaitEval(cdp, `(() => {
+        const box = document.querySelector('[data-view-body="product"] [data-irq-editor]');
+        const first = box?.querySelector('[data-action="select-irq-device"]');
+        if (!first) return null;
+        const key = String(first.getAttribute('data-irq-key') ?? '');
+        first.click();
+        return { key };
+    })()`);
+    await sleep(250);
+    const range = await typeIrq(32);
+    const rangeCount = (range?.rows ?? []).filter((r) => r.conflict === "range").length;
+    add("把 UART 源号改成 32（PLIC 只有 32 个源 ⇒ 合法取值 1..31）⇒ 标「越界」",
+        Boolean(socJump) && rangeCount === 1,
+        `key=${socJump?.key} rows=${JSON.stringify(range?.rows ?? [])}`);
+
+    const rangeBack = await typeIrq(10);
+    const rangeClean = (rangeBack?.rows ?? []).filter((r) => r.conflict !== "none").length;
+    add("改回 10 ⇒ 越界消失", rangeClean === 0,
+        `rows=${JSON.stringify(rangeBack?.rows ?? [])}`);
+
+    return { skipped: false, checks };
+}
 
 /**
  * STAGE-47 · v0.71 批的真机段：**「未知系统」门禁**（B-141 ~ B-145）。
@@ -10963,6 +11178,14 @@ async function main() {
         const boardOrdering = await runSection("boardOrdering", () => runBoardOrderingSection(cdp, opts));
         registerSection("boardOrdering", boardOrdering.checks, {
             title: "乱序到达检查（注入更旧的 memory.map 事件 → 真提交 → 真内核接受）",
+        });
+
+        // -- the IRQ PANEL (v0.143 · 外设中断号汇总面) -------------------------
+        // ⚠️ **必须排在板级那几段之后**：这一段会**换板**（装 qemu-virt 模版）
+        //    ⇒ ⇒ 前面那些段看到的必须还是它们自己配的那张板。
+        const irqPanel = await runSection("irqPanel", () => runIrqPanelSection(cdp, opts));
+        registerSection("irqPanel", irqPanel.checks, {
+            title: "外设中断号汇总面（挂在产品视图上 · 行键 = 树节点键 · 重复/越界提前提示 · 只读）",
         });
 
         // -- the UI LAYOUT (STAGE-34 · v0.49 批) ------------------------------

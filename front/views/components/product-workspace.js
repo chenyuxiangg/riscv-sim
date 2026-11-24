@@ -44,6 +44,7 @@ import {
     planBaseGaps,
 } from "./memory-map.js";
 import { renderImageLoadStatus } from "./image-loader.js";
+import { renderIrqEditor } from "./irq-editor.js";
 
 /** 创建面板里可勾选的器件（顺序即展示顺序）。 */
 export const CREATE_CATALOG = Object.freeze([
@@ -790,6 +791,10 @@ export function renderProductWorkspace(state) {
         : ""}
                 ${notice ? `<p class="pw-tip" data-product-notice>${escapeHtml(notice)}</p>` : ""}
                 ${windowHtml}
+                ${state?.loaded === false ? "" : renderIrqEditor({
+        draft: boardDraft(state),
+        selectedKey: state?.selected ?? null,
+    })}
             </main>
             ${dialog === "create" ? renderCreateDialog(state, locked) : ""}
             ${dialog === "add-device" ? renderAddDeviceDialog(state, locked) : ""}

@@ -74,7 +74,9 @@
 
 import { escapeHtml } from "../../lib/escape.js";
 import { PLATFORM_SCHEMA_VERSION, SCHEMA_VERSION } from "../../lib/message.js";
-import { renderIrqEditor } from "./irq-editor.js";
+// ⚠️ **中断号汇总面的 import 从这里删掉**（v0.143）：它在本模块里**从未被调用**
+//   （v0.77 换掉连线编辑器时留下的死导入）⇒ ⇒ 面板改挂在产品视图
+//   （`product-workspace.js`）那边 ⇒ ⇒ 这里再留一个 import 就是第二个死导入。
 
 // ---------------------------------------------------------------------------
 // 常量

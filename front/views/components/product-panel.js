@@ -172,6 +172,12 @@ const productTreeView = register({
                 setProductState({ selected: el.dataset.deviceKey ?? null, dialog: null });
                 return "cmd-select-device";
             }
+            // ⚠️ **中断号汇总面的行**（v0.143）：键是树节点键，但用的是自己的钩子
+            //   （`data-irq-key`）⇒ ⇒ 不冒充树节点 ⇒ 选中语义与树**同一个动作**。
+            case "select-irq-device": {
+                setProductState({ selected: el.dataset.irqKey ?? null, dialog: null });
+                return "cmd-select-device";
+            }
             case "toggle-lock": {
                 if (state.loaded !== true) return undefined;
                 setProductState({ locked: state.locked === false });
