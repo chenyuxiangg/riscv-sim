@@ -1801,6 +1801,26 @@ select.addr-field {
     border-top: 1px solid var(--line);
     font-size: 11.5px;
 }
+/* 外设中断号汇总面（v0.143 · 只读 + 冲突提示）。 */
+.pw-irq {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 16px 12px;
+    border-top: 1px solid var(--line);
+}
+.pw-irq-bad { color: var(--amber); }
+.pw-table-irq tr.is-active td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.pw-link {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: var(--tx);
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+}
+.pw-link:hover { color: var(--accent); }
 .pw-error {
     display: flex;
     gap: 8px;
