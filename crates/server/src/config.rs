@@ -20,6 +20,12 @@ pub const DEFAULT_SESSION_TTL_SECS: u64 = 900;
 /// 又会被它挡住。
 pub const DEFAULT_MAX_SESSIONS: usize = 8;
 
+/// 一次上传的镜像字节上限（默认 16 MiB，对齐 M-06 的解析限值）。
+///
+/// ⚠️ 超限**原样拒**（413 + `E_PROTO-08`），不静默截断 —— 截断一半的 ELF
+/// 会被解析器当畸形，报出来的错跟真原因（太大）对不上。
+pub const DEFAULT_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+
 /// 默认 console 缓冲上限（字节）。与 `osz-boot` 的 `--max-console` 同量级
 /// ⇒ ⇒ 两条入口在「溢出」这件事上不会给出不同的字节数。
 pub const DEFAULT_MAX_CONSOLE: usize = 1 << 20;
@@ -41,6 +47,8 @@ pub struct Config {
     pub max_sessions: usize,
     /// 镜像路径白名单的根（`--allow-image-root`）。`None` ⇒ 只接受上传的字节。
     pub allow_image_root: Option<PathBuf>,
+    /// 单次上传的镜像字节上限（`--max-image-bytes`）。
+    pub max_image_bytes: usize,
     /// 是否允许绑定非回环地址。默认 `false`。
     pub allow_remote: bool,
     /// 远程模式令牌。回环模式下即使给了也只在请求校验时生效。
@@ -57,6 +65,7 @@ impl Default for Config {
             max_console: DEFAULT_MAX_CONSOLE,
             max_sessions: DEFAULT_MAX_SESSIONS,
             allow_image_root: None,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             allow_remote: false,
             token: None,
         }
@@ -86,6 +95,7 @@ impl Config {
                 "--max-console" => "--max-console",
                 "--max-sessions" => "--max-sessions",
                 "--allow-image-root" => "--allow-image-root",
+                "--max-image-bytes" => "--max-image-bytes",
                 "--allow-remote" => "--allow-remote",
                 "--token" => "--token",
                 other if other.starts_with('-') => {
@@ -152,6 +162,18 @@ impl Config {
                 }
                 "--allow-image-root" => {
                     cfg.allow_image_root = Some(PathBuf::from(value(&mut it, flag)?));
+                }
+                "--max-image-bytes" => {
+                    let raw = value(&mut it, flag)?;
+                    let bytes = raw.parse::<usize>().map_err(|_| {
+                        format!("bad --max-image-bytes value {raw:?}: not bytes")
+                    })?;
+                    if bytes == 0 {
+                        return Err(
+                            "bad --max-image-bytes value 0: limit must be positive".to_string()
+                        );
+                    }
+                    cfg.max_image_bytes = bytes;
                 }
                 "--allow-remote" => cfg.allow_remote = true,
                 "--token" => {

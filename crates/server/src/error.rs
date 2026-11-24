@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use riscv_sim_contract::error::{
     ErrorFamily, E_SESS_01_NOT_FOUND, E_SESS_02_BUSY, E_SESS_03_POISONED,
-    E_SESS_05_QUOTA_EXCEEDED, E_SESS_07_UNAUTHORIZED,
+    E_SESS_05_QUOTA_EXCEEDED, E_SESS_06_TIMEOUT, E_SESS_07_UNAUTHORIZED,
 };
 use serde::Serialize;
 
@@ -93,6 +93,53 @@ impl ApiError {
         )
     }
 
+    /// 504 · 作业回执超时（R-11）。
+    ///
+    /// ⚠️ **不是** `run` 的 `timeout_ms`（那个是内核窗口判定回的
+    /// `Halted { timeout }`）⇒ ⇒ 这里是**服务端**等不到回执的兜底，两层分开。
+    pub fn session_timeout(id: &str) -> Self {
+        Self::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            session_code(E_SESS_06_TIMEOUT),
+            format!("session {id}'s worker did not answer in time; the session may be wedged"),
+        )
+    }
+
+    /// 400 · 请求载荷形状不对（`E_PROTO-08` 在「坏请求」这个发生点）。
+    pub fn bad_request(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "E_PROTO-08", detail)
+    }
+
+    /// 413 · 上传的镜像超过上限（`E_PROTO-08` 在「太大」这个发生点）。
+    pub fn image_too_large(limit: usize) -> Self {
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "E_PROTO-08",
+            format!("image exceeds --max-image-bytes ({limit} bytes); raise the limit or trim the image"),
+        )
+    }
+
+    /// 404 · 板模板不存在（`E_PLT-22` 在「未知模板」这个发生点）。
+    pub fn template_not_found(id: &str) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            format!("E_{}-22", ErrorFamily::Platform.as_str()),
+            format!("no builtin board template {id:?}; GET /api/board/templates lists the known ids"),
+        )
+    }
+
+    /// 403 · 镜像路径不在 `--allow-image-root` 白名单里。
+    ///
+    /// ⚠️ 契约层**没有** IO 族 ⇒ ⇒ 借用既有的 `STORE` 族第 7 号
+    /// （`E_STORE-07`，本 crate 内定义）⇒ ⇒ **不**新开 IO 族（设计裁决）。
+    pub fn image_path_outside_root(path: &str) -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "E_STORE-07",
+            format!("image path {path:?} is outside --allow-image-root; upload the bytes instead"),
+        )
+    }
+
     /// 401 · 远程模式缺令牌（detail 不回显期望值）。
     pub fn unauthorized() -> Self {
         Self::new(
@@ -114,6 +161,46 @@ impl ApiError {
     pub fn code(&self) -> &str {
         &self.code
     }
+
+    /// 本文档用的定位信息（**仅测试用**）。
+    #[cfg(test)]
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+/// 配板发生点：内核码 ⇒ 状态。
+///
+/// ⚠️ `E_PLT-13`（修订号不符）是**并发冲突** ⇒ 409；其余（描述校验失败
+/// `E_PLT-01..16`、未知板 `E_PLT-22` 之外的平台错误）都是「请求不对」⇒ 400。
+///
+/// ⚠️ **未知模板是 404**，但那条由 [`ApiError::template_not_found`] 在
+/// 服务端查模板时就给出（内核根本不会被问到）⇒ ⇒ 这里不会收到那个场景。
+pub fn board_failure(code: &str, detail: &str) -> ApiError {
+    let status = if code == "E_PLT-13" {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    ApiError::new(status, code, detail)
+}
+
+/// 装载发生点：内核码 ⇒ 状态（表 9）。
+///
+/// - `E_PLT-22`（无板装载）⇒ **409**（不是 404：板不存在不在这里说，见上）；
+/// - `E_PLT-17`（镜像落在板外）⇒ **422**：请求合法，内容装不上；
+/// - `E_LDR-*`（ELF 畸形 / 超限 / 段溢出）⇒ **422**：同上；
+/// - `E_PLT-13`（修订号不符）⇒ **409**；
+/// - 其余 ⇒ **400**。
+pub fn load_failure(code: &str, detail: &str) -> ApiError {
+    let status = if code == "E_PLT-22" || code == "E_PLT-13" {
+        StatusCode::CONFLICT
+    } else if code == "E_PLT-17" || code.starts_with("E_LDR-") {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    ApiError::new(status, code, detail)
 }
 
 /// 会话族的码**从契约常量拼出来**，不在这里抄字面量 —— 抄一份就是第二个

@@ -6,21 +6,26 @@
 //! 是 `E_PROTO-08` ⇒ ⇒ 两种 404 必须能被客户端区分开。
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use riscv_sim_contract::platform::PlatformDescription;
+use riscv_sim_kernel::kernel_host::platform;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::{Config, DEFAULT_MAX_CONSOLE};
 use crate::error::ApiError;
 use crate::session::{BoardSource, SessionInfo, SessionRegistry};
+use crate::upload;
 
 /// 远程模式的令牌头名（R-15）。
 const TOKEN_HEADER: &str = "x-auth-token";
@@ -38,6 +43,10 @@ pub struct AppState {
     pub session_ttl: Duration,
     /// 每会话 console 缓冲上限。
     pub max_console: usize,
+    /// 镜像路径白名单根（`--allow-image-root`；`None` ⇒ 只收上传字节）。
+    pub allow_image_root: Option<PathBuf>,
+    /// 单次上传的镜像字节上限（`--max-image-bytes`）。
+    pub max_image_bytes: usize,
     /// 远程模式令牌；`None` ⇒ 不校验。
     pub token: Option<String>,
     /// 会话表。
@@ -53,6 +62,8 @@ impl AppState {
             board: cfg.board.clone(),
             session_ttl: cfg.session_ttl,
             max_console: cfg.max_console,
+            allow_image_root: cfg.allow_image_root.clone(),
+            max_image_bytes: cfg.max_image_bytes,
             token: cfg.token.clone(),
             registry: Arc::new(SessionRegistry::new(cfg.max_sessions, cfg.session_ttl)),
         }
@@ -135,6 +146,10 @@ pub fn router(state: AppState) -> Router {
             get(get_session).delete(delete_session),
         )
         .route("/api/sessions/{id}/pause", post(pause_session))
+        .route("/api/sessions/{id}/board", put(set_board))
+        .route("/api/sessions/{id}/image", post(load_image))
+        .route("/api/board/templates", get(list_templates))
+        .route("/api/board/templates/{id}", get(get_template))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
     Router::new()
@@ -213,6 +228,134 @@ async fn get_session(
         "pc": pc,
         "executed": executed,
     })))
+}
+
+/// `PUT …/board` 的请求体：`template` 与 `description` **二选一**。
+#[derive(Debug, Deserialize)]
+pub struct SetBoardRequest {
+    /// 内置模板 id（`default` / `qemu-virt` / `minimal`）。
+    #[serde(default)]
+    pub template: Option<String>,
+    /// 现成的一份板描述（客户端自己攒的板）。
+    #[serde(default)]
+    pub description: Option<PlatformDescription>,
+    /// 乐观并发的期望修订号；给了且不符 ⇒ `409 + E_PLT-13`（内核判）。
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+}
+
+/// 配板（R-03）：**一会话一板**，问题在服务端翻成「哪份描述」之后就交给内核。
+///
+/// ⚠️ **模板查不到是 404**（服务端自己判，内核根本不会被问到）⇒ ⇒ 与
+/// 「无板装载 409」同码不同状态 —— 状态由发生点决定（表 9）。
+async fn set_board(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetBoardRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let description = match (req.template, req.description) {
+        (Some(template), None) => platform::builtin_description(&template)
+            .map_err(|_| ApiError::template_not_found(&template))?,
+        (None, Some(description)) => description,
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "give either `template` or `description`, not both",
+            ));
+        }
+        (None, None) => {
+            return Err(ApiError::bad_request(
+                "one of `template` or `description` is required",
+            ));
+        }
+    };
+    let body = state
+        .registry
+        .set_board(&id, description, req.expected_revision)?;
+    Ok(Json(body))
+}
+
+/// `POST …/image` 的 JSON 形态：从白名单路径读。
+#[derive(Debug, Deserialize)]
+struct ImagePathRequest {
+    /// 镜像文件路径（必须在 `--allow-image-root` 下）。
+    path: String,
+    /// 覆盖回显名（缺省取文件名）。
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// 装载镜像（R-04）：`octet-stream` 直传字节，或 JSON `{path}` 从白名单读。
+///
+/// ⚠️ **不判「有没有板」**：那是内核的事（无板 ⇒ `409 + E_PLT-22` + 中文
+/// 引导）⇒ ⇒ 服务端**不造第二条判据**。
+async fn load_image(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let (name, bytes) = if content_type.starts_with("application/json") {
+        let request: ImagePathRequest = serde_json::from_slice(&body)
+            .map_err(|err| ApiError::bad_request(format!("bad JSON body: {err}")))?;
+        let resolved = upload::whitelist_path(state.allow_image_root.as_deref(), &request.path)?;
+        // ⚠️ 读盘放 blocking 池：16 MiB 的同步读会把 async 工作线程钉住。
+        let read_from = resolved.clone();
+        let bytes = tokio::task::spawn_blocking(move || std::fs::read(&read_from))
+            .await
+            .map_err(|err| ApiError::bad_request(format!("image read task failed: {err}")))?
+            .map_err(|err| {
+                ApiError::bad_request(format!(
+                    "image path {:?} cannot be read: {err}",
+                    request.path
+                ))
+            })?;
+        let name = request
+            .name
+            .unwrap_or_else(|| upload::name_from_path(&resolved));
+        (name, bytes)
+    } else {
+        let name = headers
+            .get("x-image-name")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("image.bin")
+            .to_string();
+        (name, body.to_vec())
+    };
+
+    if bytes.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "image {name:?} is empty; there is nothing to load"
+        )));
+    }
+    if bytes.len() > state.max_image_bytes {
+        return Err(ApiError::image_too_large(state.max_image_bytes));
+    }
+    let kind = upload::kind_for(&name, &bytes)?;
+    let reply = state.registry.load_image(&id, name, kind, bytes)?;
+    Ok(Json(reply))
+}
+
+/// 板模板清单（只读元数据）。
+///
+/// ⚠️ 元数据**不在这里数**：`platform::template_infos()` 是内核与 M-24
+/// **共用的**唯一定义点（`device_count` 的口径变一次两边一起变）。
+async fn list_templates() -> Json<serde_json::Value> {
+    Json(json!({ "templates": platform::template_infos() }))
+}
+
+/// 板模板详情（完整 `PlatformDescription`）。
+async fn get_template(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let description =
+        platform::builtin_description(&id).map_err(|_| ApiError::template_not_found(&id))?;
+    Ok(Json(json!({ "id": id, "description": description })))
 }
 
 /// 暂停会话（控制面）：置位即返回，推进者在下一个窗口边界停。

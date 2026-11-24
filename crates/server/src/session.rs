@@ -29,6 +29,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, Project, ProjectVersion};
+use riscv_sim_contract::platform::PlatformDescription;
+use riscv_sim_contract::protocol::{CommandPayload, EventPayload, Message};
 use riscv_sim_contract::SCHEMA_VERSION;
 use riscv_sim_kernel::kernel_host::KernelHost;
 
@@ -38,6 +41,13 @@ use crate::error::ApiError;
 pub const CTRL_PAUSE: u8 = 1 << 0;
 /// 控制位：取消（删除 / TTL 回收 / 关进程）。置上后线程不再接新活。
 pub const CTRL_CANCEL: u8 = 1 << 1;
+
+/// 一次作业的回执上限。超了 ⇒ `504 + E_SESS-06`（R-11：不许无限等）。
+///
+/// ⚠️ 这是**作业级**的兜底，不是 `run` 的 `timeout_ms`（那个由内核的
+/// 窗口判定，见 P0-4）⇒ ⇒ 两层各管一件事：内核管「跑多久」，这里管
+/// 「回执多久没来」。
+const JOB_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 会话板的来源。**必须记下来**：同一份「板 id」可能来自启动默认或请求，
 /// 事后追「这块板从哪来」只能靠它。
@@ -88,7 +98,42 @@ enum Job {
         /// 回执通道。线程侧只发一次。
         reply: Sender<PingReply>,
     },
+    /// 配板（R-03）：内核侧的 `SetMemoryMap`，回执是「当前生效的图」。
+    SetBoard {
+        /// 板描述（**已经**由调用方从模板取好 / 从请求体验过）。
+        description: Box<PlatformDescription>,
+        /// 乐观并发的期望修订号；`None` ⇒ 不检查。
+        expected_revision: Option<u64>,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 装载镜像（R-04）：内核侧的 `LoadProject`，回执是装载回执 + 落点。
+    Load {
+        /// 镜像名（回显给客户端）。
+        name: String,
+        /// 镜像种类（契约 `ImageKind`）。
+        kind: ImageKind,
+        /// 镜像字节（**上传的**或白名单路径读出来的，此处已无来源差别）。
+        bytes: Vec<u8>,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
 }
+
+/// 内核侧失败：`EventPayload::Error { code, message }` 的搬运行李。
+///
+/// ⚠️ **状态码不在这里**：同一个码在不同发生点状态不同（`E_PLT-22` 在
+/// 「未知模板」是 404、在「无板装载」是 409）⇒ ⇒ 状态由**API 层**按
+/// 发生点给（见 `error.rs` 的模块注释）。
+struct KernelFailure {
+    /// 契约场景码。
+    code: String,
+    /// 内核给的定位信息（**原样**，不改写）。
+    message: String,
+}
+
+/// 一条作业的回执：成功是 JSON 体，失败是内核的原话。
+type JobReply = Result<serde_json::Value, KernelFailure>;
 
 /// 探活回执。
 struct PingReply {
@@ -102,10 +147,11 @@ struct PingReply {
 pub struct SessionHandle {
     /// 会话 id。
     pub id: String,
-    /// 生效的板模板 id。
-    pub board: Option<String>,
-    /// 板从哪来。
-    pub board_source: BoardSource,
+    /// 当前板模板 id。**可写**：`PUT …/board` 改了板之后，列表与详情要跟着
+    /// 说新板（否则就是第二个真相）。
+    board: Mutex<Option<String>>,
+    /// 板从哪来（同样可写：PUT 之后来源变成 `request`）。
+    board_source: Mutex<BoardSource>,
     /// 创建时刻。
     pub created: Instant,
     tx: Sender<Job>,
@@ -113,6 +159,9 @@ pub struct SessionHandle {
     busy: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     last_active: Arc<Mutex<Instant>>,
+    /// 线程把手。**不为 join 服务**（见 [`SessionHandle::join_within`]）：它的
+    /// 唯一作用是让「线程还在跑」这件事有个句柄拴着，进程退出前不被回收。
+    #[allow(dead_code)]
     join: JoinHandle<()>,
 }
 
@@ -146,23 +195,27 @@ impl SessionHandle {
     }
 
     /// 一秒钟都等不到就不等了：**删除是控制面动作**，不该被正在跑的作业卡住。
-    fn join_within(self, timeout: Duration) {
-        // `JoinHandle` 没有带超时的 join ⇒ ⇒ 用「等标志 + 短睡」实现，
-        // 超时就放弃 join 并让线程继续自生自灭（它已经看不到命令面了）。
+    ///
+    /// ⚠️ **只等标志、不 `join`**：句柄现在住在 `Arc` 里（可能被别的请求借
+    /// 着）⇒ ⇒ `JoinHandle::join` 要按值消耗，拿不到。线程自己在 `recv`
+    /// 失败后退出，句柄随 `Arc` 落地时自动 detach ⇒ ⇒ 不会留僵尸进程，
+    /// 只是回收晚一步。
+    fn join_within(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         while self.is_alive() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
-        }
-        if !self.is_alive() {
-            let _ = self.join.join();
         }
     }
 
     fn info(&self) -> SessionInfo {
         SessionInfo {
             id: self.id.clone(),
-            board: self.board.clone(),
-            board_source: self.board_source,
+            board: self.board.lock().map(|b| b.clone()).unwrap_or(None),
+            board_source: self
+                .board_source
+                .lock()
+                .map(|s| *s)
+                .unwrap_or(BoardSource::None),
             schema_version: SCHEMA_VERSION,
             age_ms: self.created.elapsed().as_millis() as u64,
             idle_ms: self.idle_for().as_millis() as u64,
@@ -188,6 +241,83 @@ impl SessionHandle {
             Err(_) => Err(ApiError::session_poisoned(&self.id)),
         }
     }
+
+    /// 投递一条作业并等回执（忙 ⇒ 409；线程没了 ⇒ 500；超时 ⇒ 504）。
+    ///
+    /// `map` 是**发生点**给的「内核码 + 原话 ⇒ `ApiError`」换算器 ——
+    /// 状态码取决于谁在调用（同一个 `E_PLT-22` 在配板是 404、在装载是 409）。
+    fn submit(
+        &self,
+        make: impl FnOnce(Sender<JobReply>) -> Job,
+        map: fn(&str, &str) -> ApiError,
+    ) -> Result<serde_json::Value, ApiError> {
+        if !self.is_alive() {
+            return Err(ApiError::session_poisoned(&self.id));
+        }
+        if self.busy.load(Ordering::Acquire) {
+            return Err(ApiError::session_busy(&self.id));
+        }
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(make(tx))
+            .map_err(|_| ApiError::session_poisoned(&self.id))?;
+        match rx.recv_timeout(JOB_TIMEOUT) {
+            Ok(Ok(body)) => Ok(body),
+            Ok(Err(failure)) => Err(map(&failure.code, &failure.message)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(ApiError::session_timeout(&self.id)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(ApiError::session_poisoned(&self.id)),
+        }
+    }
+
+    /// 记下「这个会话现在用的是哪块板」。**只在配板成功后调** ⇒ ⇒ 失败的
+    /// `PUT` 不改口径（用户的板没被接受，会话还是原来那块）。
+    fn remember_board(&self, board_id: String) {
+        if let Ok(mut board) = self.board.lock() {
+            *board = Some(board_id);
+        }
+        if let Ok(mut source) = self.board_source.lock() {
+            *source = BoardSource::Request;
+        }
+    }
+
+    /// 配板（R-03）：把板描述交给内核的 `SetMemoryMap`，回执是**当前生效
+    /// 的图**（不是请求里那份 —— 内核可能因为「已装载镜像」让它待生效）。
+    pub fn set_board(
+        &self,
+        description: PlatformDescription,
+        expected_revision: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::SetBoard {
+                description: Box::new(description),
+                expected_revision,
+                reply,
+            },
+            crate::error::board_failure,
+        )
+    }
+
+    /// 装载镜像（R-04）：把**已经拿到手的字节**包成一个单镜像工程交给内核，
+    /// 回执是那一条 `ImageLoaded` + 落点 pc。
+    ///
+    /// ⚠️ **不在这里**判「有没有板」：内核 v0.76 起对无板装载直接回
+    /// `E_PLT-22`（带中文引导）⇒ ⇒ 服务端**不造第二条判据**。
+    pub fn load_image(
+        &self,
+        name: String,
+        kind: ImageKind,
+        bytes: Vec<u8>,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Load {
+                name,
+                kind,
+                bytes,
+                reply,
+            },
+            crate::error::load_failure,
+        )
+    }
 }
 
 /// 会话表。**唯一**的可变状态是表本身；会话状态全在各自线程里。
@@ -199,7 +329,9 @@ pub struct SessionRegistry {
 
 struct Inner {
     next: u64,
-    sessions: HashMap<String, SessionHandle>,
+    /// 句柄住在 `Arc` 里 ⇒ ⇒ 「借一条会话」可以先放锁再干活（不让一次装载
+    /// 把整张表冻住）。
+    sessions: HashMap<String, Arc<SessionHandle>>,
 }
 
 impl SessionRegistry {
@@ -257,10 +389,10 @@ impl SessionRegistry {
         let alive = Arc::new(AtomicBool::new(true));
         let last_active = Arc::new(Mutex::new(Instant::now()));
 
-        let handle = SessionHandle {
+        let handle = Arc::new(SessionHandle {
             id: id.clone(),
-            board: board.clone(),
-            board_source,
+            board: Mutex::new(board.clone()),
+            board_source: Mutex::new(board_source),
             created: Instant::now(),
             tx,
             ctrl: Arc::clone(&ctrl),
@@ -268,7 +400,7 @@ impl SessionRegistry {
             alive: Arc::clone(&alive),
             last_active: Arc::clone(&last_active),
             join: spawn_worker(id.clone(), rx, ctrl, busy, alive, last_active),
-        };
+        });
         let info = handle.info();
         inner.sessions.insert(id, handle);
         Ok(info)
@@ -284,7 +416,7 @@ impl SessionRegistry {
             .sessions
             .values()
             .filter(|handle| handle.is_alive())
-            .map(SessionHandle::info)
+            .map(|handle| handle.info())
             .collect();
         infos.sort_by(|a, b| a.id.cmp(&b.id));
         (infos, self.max_sessions, inner.sessions.len())
@@ -292,14 +424,19 @@ impl SessionRegistry {
 
     /// 取一条会话（探活一次，证明不是「表里有、线程已死」）。
     pub fn probe(&self, id: &str) -> Result<(SessionInfo, u32, u64), ApiError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| ApiError::session_poisoned("registry"))?;
-        let handle = guard
-            .sessions
-            .get(id)
-            .ok_or_else(|| ApiError::session_not_found(id))?;
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| ApiError::session_poisoned("registry"))?;
+            Arc::clone(
+                guard
+                    .sessions
+                    .get(id)
+                    .ok_or_else(|| ApiError::session_not_found(id))?,
+            )
+        };
+        // ⚠️ 锁已经放了：探活要等回执（最长 2 s），握着表等会冻住所有人。
         let (pc, executed) = handle.ping()?;
         Ok((handle.info(), pc, executed))
     }
@@ -310,19 +447,77 @@ impl SessionRegistry {
     /// 等它停下是 `run` 的回执该回答的事，不是 `pause` 该等的（否则
     /// `pause` 会被一次长 `run` 卡住，正是控制器面的死角）。
     pub fn pause(&self, id: &str) -> Result<SessionInfo, ApiError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| ApiError::session_poisoned("registry"))?;
-        let handle = guard
-            .sessions
-            .get(id)
-            .ok_or_else(|| ApiError::session_not_found(id))?;
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| ApiError::session_poisoned("registry"))?;
+            Arc::clone(
+                guard
+                    .sessions
+                    .get(id)
+                    .ok_or_else(|| ApiError::session_not_found(id))?,
+            )
+        };
         if !handle.is_alive() {
             return Err(ApiError::session_poisoned(id));
         }
         handle.request_pause();
         Ok(handle.info())
+    }
+
+    /// 配板（R-03）。**借**一条会话（`Arc` + 放锁）⇒ ⇒ 一次装载/配板不会
+    /// 把整张表冻住。
+    pub fn set_board(
+        &self,
+        id: &str,
+        description: PlatformDescription,
+        expected_revision: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| ApiError::session_poisoned("registry"))?;
+            Arc::clone(
+                guard
+                    .sessions
+                    .get(id)
+                    .ok_or_else(|| ApiError::session_not_found(id))?,
+            )
+        };
+        let reply = handle.set_board(description, expected_revision)?;
+        if let Some(board_id) = reply
+            .get("board_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        {
+            handle.remember_board(board_id);
+        }
+        Ok(reply)
+    }
+
+    /// 装载镜像（R-04）。**借**一条会话，同 [`Self::set_board`]。
+    pub fn load_image(
+        &self,
+        id: &str,
+        name: String,
+        kind: ImageKind,
+        bytes: Vec<u8>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| ApiError::session_poisoned("registry"))?;
+            Arc::clone(
+                guard
+                    .sessions
+                    .get(id)
+                    .ok_or_else(|| ApiError::session_not_found(id))?,
+            )
+        };
+        handle.load_image(name, kind, bytes)
     }
 
     /// 删一条会话：置取消位 → 摘表 → 线程自行退出。
@@ -348,12 +543,12 @@ impl SessionRegistry {
 
     /// 回收空闲超过 TTL 的会话，返回回收条数。
     pub fn sweep(&self) -> usize {
-        let expired: Vec<SessionHandle> = {
+        let expired: Vec<Arc<SessionHandle>> = {
             let mut inner = match self.inner.lock() {
                 Ok(inner) => inner,
                 Err(_) => return 0,
             };
-            let mut expired: Vec<SessionHandle> = Vec::new();
+            let mut expired: Vec<Arc<SessionHandle>> = Vec::new();
             let mut reap: Vec<String> = Vec::new();
             for (id, handle) in inner.sessions.iter() {
                 if !handle.is_alive() || handle.idle_for() >= self.ttl {
@@ -377,7 +572,7 @@ impl SessionRegistry {
 
     /// 进程退出时把全部会话叫停（不留孤儿线程，R-11）。
     pub fn shutdown(&self) {
-        let all: Vec<SessionHandle> = {
+        let all: Vec<Arc<SessionHandle>> = {
             let mut inner = match self.inner.lock() {
                 Ok(inner) => inner,
                 Err(_) => return,
@@ -389,6 +584,82 @@ impl SessionRegistry {
             handle.join_within(Duration::from_millis(500));
         }
     }
+}
+
+/// 从事件流里取出内核报的第一条错误。
+fn kernel_failure(events: &[EventPayload]) -> Option<KernelFailure> {
+    events.iter().find_map(|event| match event {
+        EventPayload::Error { code, message } => Some(KernelFailure {
+            code: code.clone(),
+            message: message.clone(),
+        }),
+        _ => None,
+    })
+}
+
+/// 配板回执：`{revision, board_id, pending, loaded, regions}`。
+fn board_reply(host: &KernelHost, events: &[EventPayload]) -> JobReply {
+    if let Some(failure) = kernel_failure(events) {
+        return Err(failure);
+    }
+    let (pending, loaded, revision) = events
+        .iter()
+        .find_map(|event| match event {
+            EventPayload::MemoryMap {
+                pending,
+                loaded,
+                revision,
+                ..
+            } => Some((*pending, *loaded, *revision)),
+            _ => None,
+        })
+        .ok_or_else(|| KernelFailure {
+            code: "E_PROTO-08".to_string(),
+            message: "内核没有回 memory.map 事件（配板回执缺失）".to_string(),
+        })?;
+    let regions = host.memory_map().regions;
+    Ok(serde_json::json!({
+        "revision": revision,
+        "board_id": host.platform_id(),
+        "pending": pending,
+        "loaded": loaded,
+        "regions": regions,
+    }))
+}
+
+/// 装载回执：那一条 `ImageLoaded` + 装载后的 pc。
+///
+/// ⚠️ **没有回执就是异常**：内核 v19 起装载成功必发一条 ⇒ ⇒ 拿不到说明
+/// 「内核说成功、但没给证据」⇒ ⇒ 明确报出，不猜一个 deadline。
+fn load_reply(host: &KernelHost, events: &[EventPayload]) -> JobReply {
+    if let Some(failure) = kernel_failure(events) {
+        return Err(failure);
+    }
+    let receipt = events.iter().find_map(|event| match event {
+        EventPayload::ImageLoaded {
+            name,
+            kind,
+            entry,
+            segments,
+            elf_bits,
+            has_rvc,
+            platform_revision,
+        } => Some(serde_json::json!({
+            "name": name,
+            "kind": kind,
+            "entry": entry,
+            "segments": segments,
+            "isa": { "bits": elf_bits, "has_rvc": has_rvc },
+            "platform_revision": platform_revision,
+            "pc": host.pc(),
+            "executed": host.total_executed(),
+        })),
+        _ => None,
+    });
+    receipt.ok_or_else(|| KernelFailure {
+        code: "E_PROTO-08".to_string(),
+        message: "内核报告装载成功，却没有发 image.loaded 回执".to_string(),
+    })
 }
 
 /// 起会话线程：宿主从生到死只属于这里。
@@ -404,7 +675,7 @@ fn spawn_worker(
         .name(format!("sess-{id}"))
         .spawn(move || {
             // `KernelHost` 是 `!Send` ⇒ ⇒ 只能在这里 `new()`，不能从外面搬进来。
-            let host = KernelHost::new();
+            let mut host = KernelHost::new();
             // panic 也要把 `alive` 落下去 ⇒ ⇒ 外面才会说「中毒」而不是「忙」。
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 while let Ok(job) = rx.recv() {
@@ -418,6 +689,47 @@ fn spawn_worker(
                                 pc: host.pc(),
                                 executed: host.total_executed(),
                             });
+                        }
+                        Job::SetBoard {
+                            description,
+                            expected_revision,
+                            reply,
+                        } => {
+                            let events = host.handle_message(&Message::command(
+                                1,
+                                CommandPayload::SetMemoryMap {
+                                    description: *description,
+                                    expected_revision,
+                                },
+                            ));
+                            let _ = reply.send(board_reply(&host, &events));
+                        }
+                        Job::Load {
+                            name,
+                            kind,
+                            bytes,
+                            reply,
+                        } => {
+                            // ⚠️ 一次请求 = 一个单镜像工程。工程 id 用固定前缀
+                            //   ⇒ ⇒ 内核里「最后一个工程」只在会话线程里，不
+                            //   会跨会话串味。
+                            let project = Project {
+                                id: "m24-load".to_string(),
+                                name: name.clone(),
+                                tree: Default::default(),
+                                images: vec![ImageRef {
+                                    name,
+                                    kind,
+                                    source: ImageSource::Bytes(bytes),
+                                }],
+                                version: ProjectVersion::default(),
+                            };
+                            let events = host
+                                .handle_message(&Message::command(
+                                    1,
+                                    CommandPayload::LoadProject(project),
+                                ));
+                            let _ = reply.send(load_reply(&host, &events));
                         }
                     }
                     busy.store(false, Ordering::Release);

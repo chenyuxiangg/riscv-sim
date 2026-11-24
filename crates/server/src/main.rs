@@ -27,6 +27,7 @@ mod api;
 mod config;
 mod error;
 mod session;
+mod upload;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -47,6 +48,7 @@ usage: riscv_sim_server [options]
   --max-console <bytes>    per-session console buffer cap (default 1048576)
   --max-sessions <n>       concurrent session quota (default 8)
   --allow-image-root <dir> whitelist root for image paths (default: uploads only)
+  --max-image-bytes <n>    per-upload image byte cap (default 16777216)
   --allow-remote           allow a non-loopback bind (needs --token too)
   --token <secret>         bearer token checked in remote mode
   -h, --help               print this message
@@ -57,6 +59,10 @@ usage: riscv_sim_server [options]
   GET    /api/sessions         list + quota
   GET    /api/sessions/<id>    detail + a live probe (pc / executed)
   DELETE /api/sessions/<id>    cancel, join, unregister; a second delete is 404
+  PUT    /api/sessions/<id>/board   {template|description, expected_revision?} -> current map
+  POST   /api/sessions/<id>/image   octet-stream (+X-Image-Name) or {path} -> load receipt
+  GET    /api/board/templates       builtin template metadata
+  GET    /api/board/templates/<id>  full PlatformDescription (404 E_PLT-22 if unknown)
 ";
 
 fn main() -> ExitCode {
