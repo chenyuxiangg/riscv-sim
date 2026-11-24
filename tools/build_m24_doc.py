@@ -20,7 +20,7 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.4（2026-11-24 方案定稿；P0-1～P0-6 已落地；契约 v19 装载回执；run 停因唯一实现 run_until；osz-boot 断链已修复）· 需求基线 docs/requirements/"
+VERSION = ("HTML 版 v1.5（2026-11-25；P0-1～P0-6 与 P1 的事件流 / trace 已落地；快照与异步 run 待内核增量）· 需求基线 docs/requirements/"
            "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim feature/m24-p0-6（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
@@ -374,8 +374,11 @@ SECTIONS.append({
                 ["<code>GET …/state</code> · <code>…/memory</code> · <code>…/symbols</code> · <code>…/disasm</code>", "调试读取面", "见 §3.1 说明", "200", "P0"],
                 ["<code>/…/breakpoints</code>", "断点增删查", "<code>POST {addr|symbol}</code> · <code>DELETE /{id}</code> · <code>GET</code> + 启停开关", "200/201", "P0"],
                 ["<code>POST /api/boot</code>", "一把梭（唯一判定口径）", "<code>{path, prefix, steps, timeout_ms, write_to?}</code> → console 原始字节 + meta 头", "200/504", "P0"],
-                ["<code>GET …/events</code>（升级 WS）", "事件流", "M-07 帧原样转发", "101", "P1"],
-                ["<code>…/snapshot</code> · <code>…/restore</code> · <code>…/trace</code>", "闭环调试", "复用既有命令", "200", "P1"],
+                ["<code>GET …/events</code>（升级 <code>…/events/ws</code>）", "事件流（已落地）", "WS 一拍一帧 <code>{since,next,lost,frames[{seq,event}]}</code>；会话没了先推 <code>{closed,reason,status}</code> 再关", "101", "P1"],
+                ["<code>GET …/events?since&limit</code>", "事件流（REST 回看，已落地）", "→ <code>{frames, next, lost}</code>；<code>limit</code> 默认 256、硬上限 4096", "200", "P1"],
+                ["<code>GET …/trace?source&format&offset&limit</code>", "轨迹导出（已落地）", "<code>source=execution|waveform</code>、<code>format=csv|json|vcd</code> → <code>{chunk,next_offset,total,bytes,overflow_marked}</code>", "200/400", "P1"],
+                ["<code>PUT …/trace/enabled</code>", "轨迹开关（已落地）", "<code>{enabled}</code> → <code>{enabled,len,dropped}</code>", "200", "P1"],
+                ["<code>…/snapshot</code> · <code>…/restore</code> · 异步 run", "闭环调试（<b>未落地</b>）", "要内核先给 <code>SimState</code> 导出 / 装配与异步作业表", "—", "P1 余项"],
             ],
         }),
         ("note", "<b>读接口的语义要点：</b><code>state</code> 返回 <code>{pc, gpr[32], t_ps}</code> —— <b>pc 单独一个字段</b>，不在 <code>gpr</code> 里，且 <code>gpr[0]</code> 恒 0（需求里踩过的坑就在这）；"
@@ -477,6 +480,8 @@ SECTIONS.append({
                   "本设计把它落到 <code>E_STORE-07</code>：<b>不新造 IO 族</b>，与「同一个故障不出现两个码」同一条纪律。评审时可确认是否接受。"),
         ("h3", "sec3-6", "3.6 事件流与 M-07 帧"),
         ("p", "WS 端点直接复用前端已有的帧编解码（<code>front/lib/frame.js</code>），<code>payload</code> 就是冻结的契约消息 —— 这样 server-mode 的前端分支只需换 URL，不必改解码。"),
+        ("p", "<b>已落地的口径（v1.5）：</b>宿主是 <code>!Send</code>，事件环只能住在会话线程里 ⇒ ⇒ WS 侧是<b>服务端每 50ms 拍一次 <code>Job::Events</code></b>，不是内核主动推。环 4096 条、<code>Tick</code> 不进流（心跳会把真事件挤掉）、环满从旧端栽且续读置 <code>lost</code>。"
+              "另有一条<b>硬坑</b>：<code>LoadProject</code> 会清空内核订阅表（新工程 = 新会话）⇒ ⇒ 会话在<b>装载成功之后</b>必须重订 <code>sim.state.delta</code>，否则每个运行窗口只剩 <code>Tick</code>、事件流静默变空。"),
         ("caption", "表 11 · 帧字段与职责归属"),
         ("table", {
             "widths": ["14%", "20%", "30%", "36%"],
@@ -805,7 +810,7 @@ SECTIONS.append({
                 ["P0-4", "run / step / pause / reset + console ring（已落地：内核 <code>run_until</code> 是停因唯一实现，服务端只做请求折算与 504 包装）", "AC-01 / AC-05 / AC-07 / AC-09", "P0-3"],
                 ["P0-5", "状态 / 内存 / 符号 / 反汇编 / 断点（已落地：读面全走内核既有命令，符号类断点先 <code>ResolveSymbol</code> 再注册）", "AC-04 / AC-06", "P0-4"],
                 ["P0-6", "<code>/api/boot</code>（临时会话，跑完即删；回原始 console 字节 + <code>X-Boot-*</code> 头）；<code>osz-boot</code> 改走 <code>run_until</code> 并按优先级自动选板（CLI 与退出码不变）（已落地：<code>E_PLT-22</code> 断链已修）", "一条 curl 完成 osz 判定，与 Spike MATCH；<code>--print-memory</code> 链路保持", "P0-5"],
-                ["P1", "WS 事件流 + 快照 + trace + 异步 run", "前端 server-mode 分支可用", "P0-6"],
+                ["P1", "事件流（WS + REST）与 trace 导出 / 开关（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；快照 <code>snapshot/restore</code> 与异步 run 需要内核增量（<code>SimState</code> 导出 / 装配 + 异步作业表）⇒ ⇒ 暂列为 P1 余项", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
             ],
         }),
         ("h3", "sec9-2", "9.2 五项决策与落地取舍"),
