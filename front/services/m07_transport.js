@@ -4,9 +4,10 @@
 //   - browser-mode : postMessage to a Web Worker hosting the kernel
 //                    (`front/kernel-worker.js` — the WASM kernel from
 //                    `crates/kernel`, stage 1).
-//   - server-mode  : WebSocket to `riscv_sim_server`'s event stream
-//                    (`GET /api/sessions/{id}/events/ws`). 服务端**只往外推**
-//                    M-07 帧（R-13）⇒ ⇒ 这条通道是**事件通道**；命令走 REST。
+//   - server-mode  : **两条通道** —— 事件走 WebSocket
+//                    (`GET /api/sessions/{id}/events/ws`，服务端只往外推，R-13)；
+//                    命令走 `POST /api/sessions/{id}/command`（整条契约消息
+//                    进出，回体是应答帧，v1.11）。
 //                    给 `url`，或给 `serverUrl + sessionId` 让它自己推地址。
 //
 // Both carry the **frozen** `riscv_sim_contract::protocol::Message`
@@ -27,7 +28,13 @@
 // kernel connects).
 
 import { encodeFrame, decodeFrame, FRAME_TYPE } from "../lib/frame.js";
-import { FRONT_ERROR_CODES } from "../lib/message.js";
+import {
+    Event,
+    eventMessage,
+    FRONT_ERROR_CODES,
+    MIRRORED_ERROR_CODES,
+} from "../lib/message.js";
+import { postCommand } from "./m07_servercommand.js";
 
 /**
  * @typedef {object} TransportStatus
@@ -316,11 +323,19 @@ export function summarizeResume(payload) {
 /**
  * Server-mode adapter: WebSocket to `riscv_sim_server`'s event stream (R-13).
  *
- * ⚠️ 这条通道**只往外推**（服务端不接受入向命令）：命令走 REST
- * （`POST …/run` / `…/step` / `…/reset` …）⇒ ⇒ 这里 `send` 直接报错，
- * 不做「发出去没人看」的静默失败。
+ * 两条通道，一件事：
+ *   - **事件**走 WebSocket（服务端只往外推，帧形就是 M-07）；
+ *   - **命令**走 `POST /api/sessions/{id}/command`（契约命令端点，v1.11）
+ *     —— 请求体是 M-05 发的那条契约消息原样 + 帧的 `reqId`，回体是这条
+ *     命令的**应答帧**（带 `reqId`）⇒ ⇒ 喂进同一条 `emitFrame`，M-05 的
+ *     配对 / 超时 / 错误分派一个字不用改。
  *
- * @param {{url?: string|null, serverUrl?: string|null, sessionId?: string|null}} options
+ * ⚠️ 只给了 `url`（裸事件通道地址）而没有 `serverUrl + sessionId` 时，
+ *    命令**无处可发** ⇒ ⇒ `send` 明确报 `E_TRX-03`，不做「发出去没人看」的
+ *    静默失败。
+ *
+ * @param {{url?: string|null, serverUrl?: string|null, sessionId?: string|null,
+ *         token?: string|null, fetchImpl?: typeof fetch}} options
  * @returns {{ok: true, adapter: object, ready: boolean}|{ok: false, error: string}}
  */
 function createWebSocketAdapter(options) {
@@ -375,18 +390,47 @@ function createWebSocketAdapter(options) {
         }
         emitFrame(frame);
     };
+    // 命令面要有 REST 基址：裸 `url` 只够订阅事件 ⇒ ⇒ 这里一次算好，
+    // 每次发命令不再重复拼。
+    const commandBase = options.serverUrl && options.sessionId
+        ? {
+            serverUrl: options.serverUrl,
+            sessionId: options.sessionId,
+            token: options.token ?? null,
+            fetchImpl: options.fetchImpl,
+        }
+        : null;
     return {
         ok: true,
         // A WebSocket is only up after the handshake — the adapter
         // drives the status from its `onopen` / `onclose` callbacks.
         ready: false,
         adapter: {
-            pushOnly: true,
-            send() {
-                throw transportError(
-                    FRONT_ERROR_CODES["E_TRX-03"],
-                    "server 事件通道只往外推；命令走 REST（POST …/run、…/step 等）",
-                );
+            send(frame) {
+                if (!commandBase) {
+                    throw transportError(
+                        FRONT_ERROR_CODES["E_TRX-03"],
+                        "只配了事件通道地址（url）：命令无处可发（给 serverUrl + sessionId 走契约命令端点）",
+                    );
+                }
+                // ⚠️ 异步失败也必须回成一条 **Error 事件帧**：M-05 按帧的
+                //    `reqId` 配对，`throw` 只对同步路径有效 ⇒ ⇒ 不回帧就是
+                //    让命令白等 500 ms 再报「超时」（把真因藏起来）。
+                void postCommand({
+                    ...commandBase,
+                    message: frame.payload,
+                    reqId: frame.reqId ?? null,
+                })
+                    .then((frames) => {
+                        for (const raw of frames) {
+                            try {
+                                emitFrame(decodeFrame(raw));
+                            } catch (err) {
+                                setStatus({ lastError: err?.message ?? String(err) });
+                            }
+                        }
+                    })
+                    .catch((err) => emitSyntheticError(frame, err));
             },
             close() {
                 try {
@@ -397,6 +441,38 @@ function createWebSocketAdapter(options) {
             },
         },
     };
+}
+
+/**
+ * 合成帧的号段（负数）。
+ *
+ * ⚠️ 这些帧**不上线**，只在本页的路由里走一遭（把异步失败变成一条
+ *    `Error` 事件，让 M-05 拒掉对应命令）；用负数是为了让人一眼看出
+ *    「它不是服务端发来的帧」，也保证不会与事件流的 seq 撞号。
+ */
+let syntheticSeq = 0;
+
+/**
+ * 把一次命令失败回成一条 `Error` 事件帧（保留原命令的 `reqId`）。
+ *
+ * @param {{sessionId?: string|null, role?: string|null, reqId?: number|null}} frame
+ * @param {unknown} err
+ */
+function emitSyntheticError(frame, err) {
+    syntheticSeq -= 1;
+    const code = /** @type {any} */ (err)?.code ?? MIRRORED_ERROR_CODES["E_CTX-05"];
+    emitFrame({
+        type: FRAME_TYPE.Event,
+        seq: syntheticSeq,
+        sessionId: frame?.sessionId ?? null,
+        role: frame?.role ?? null,
+        reqId: frame?.reqId ?? null,
+        crc: null,
+        payload: eventMessage(
+            syntheticSeq,
+            Event.error(code, /** @type {any} */ (err)?.message ?? String(err)),
+        ),
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +520,8 @@ export async function mountTransport(options = {}) {
             url: options.url ?? null,
             serverUrl: options.serverUrl ?? null,
             sessionId: options.sessionId ?? null,
+            token: options.token ?? null,
+            fetchImpl: options.fetchImpl,
         })
         : createWorkerAdapter({
             workerUrl: options.workerUrl ?? "./kernel-worker.js",

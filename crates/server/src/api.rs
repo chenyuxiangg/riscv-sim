@@ -22,7 +22,9 @@ use riscv_sim_contract::model::{
     Breakpoint, BreakpointKind, TraceFormat, TraceSource, WatchAccess, Watchpoint, WriteSize,
 };
 use riscv_sim_contract::platform::PlatformDescription;
-use riscv_sim_contract::protocol::CommandPayload;
+// ⚠️ axum 的 WS 类型也叫 `Message` ⇒ ⇒ 契约的这条用别名进这一层，不做
+//    `use ... as _` 的隐式覆盖（两个 `Message` 混用一次就是一条难查的错）。
+use riscv_sim_contract::protocol::{CommandPayload, Direction, Message as ContractMessage};
 use riscv_sim_contract::session::{CheckpointMetaDto, SessionSnapshotDto};
 use riscv_sim_kernel::kernel_host::platform;
 use serde::{Deserialize, Serialize};
@@ -222,6 +224,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/image", post(load_image))
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/step", post(step_session))
+        .route("/api/sessions/{id}/command", post(contract_command))
         .route("/api/sessions/{id}/console", get(read_console))
         .route("/api/sessions/{id}/events", get(read_events))
         .route("/api/sessions/{id}/events/ws", get(events_ws))
@@ -652,6 +655,49 @@ async fn step_session(
         },
     )?;
     Ok(Json(report))
+}
+
+/// `POST …/command` 的请求体（v1.11）：整条契约消息 + M-07 帧的配对号。
+#[derive(Debug, Deserialize)]
+pub struct ContractCommandRequest {
+    /// 冻结的契约 `Message`（`direction` 必须是 `Command`）。
+    pub message: ContractMessage,
+    /// M-07 帧的 `reqId`：服务端回贴到**第一条**应答帧上。
+    #[serde(default, rename = "reqId")]
+    pub req_id: Option<u64>,
+}
+
+/// 命令面只接受命令：方向不是 `Command` 就 400。
+fn ensure_command_direction(message: &ContractMessage) -> Result<(), ApiError> {
+    if message.direction != Direction::Command {
+        return Err(ApiError::bad_request(
+            "field `message.direction` must be `Command`（这条通道是命令面）",
+        ));
+    }
+    Ok(())
+}
+
+/// 契约命令（v1.11）：整条消息进会话线程，回体是这条命令的**应答帧**。
+///
+/// 回体 = `{"frames": [<首条应答帧，带 reqId>]}`：正是前端 M-05 要的那一颗
+/// 「配对用的响应」；这条命令引发的其余事件（状态增量 / console / 波形）
+/// 照旧进事件流，谁在看都能看见，但**不会**在回体里再给一份。
+///
+/// ⚠️ 这条通道**不翻译**命令：前端 M-05 发什么，内核 `handle_message` 就收
+///    什么 ⇒ ⇒ 不存在「契约命令 → REST 端点」的第二张映射表。
+/// ⚠️ 内核的业务错误（`E_PLT-22` / `E_DBG-02` …）**不**转 HTTP 错误：它们
+///    以 `Error` 事件当应答进回体（带 `reqId`），由前端 M-05 拒掉对应命令
+///    ⇒ ⇒ 同一个判据只有一个落点。
+async fn contract_command(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ContractCommandRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_command_direction(&request.message)?;
+    let body = state
+        .registry
+        .contract(&id, request.message, request.req_id)?;
+    Ok(Json(body))
 }
 
 /// `GET …/console` 的查询串。
@@ -2375,5 +2421,23 @@ mod tests {
             WatchAccess::Either
         );
         assert!(parse_watch_access(Some("execute")).is_err());
+    }
+
+    /// 契约命令面只收命令：事件方向的消息必须 400（否则「事件上送」会静默
+    /// 变成一条命令，命令面就成了双向糊在一起的通道）。
+    #[test]
+    fn contract_command_refuses_event_direction() {
+        let command = ContractMessage::command(0, CommandPayload::Nop);
+        assert!(ensure_command_direction(&command).is_ok());
+
+        let event = ContractMessage::event(
+            0,
+            riscv_sim_contract::protocol::EventPayload::Tick {
+                elapsed_ps: 0,
+                pc: 0,
+            },
+        );
+        let err = ensure_command_direction(&event).expect_err("事件方向必须拒");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 }

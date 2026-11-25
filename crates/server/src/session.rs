@@ -132,7 +132,21 @@ struct EventRing {
     cap: usize,
     /// 这些帧属于哪条会话（M-07 帧的 `sessionId`）。
     session_id: String,
+    /// **不进环**的应答帧（`Tick`）用哪下一个号。
+    ///
+    /// ⚠️ 与环的 seq **分两个号段**：环从 0 起，这里从
+    ///    [`UNRINGED_SEQ_BASE`] 起 ⇒ ⇒ 永远不会与环里的帧撞号。撞号的后
+    ///    果不是「显示错一个数字」：前端按「同会话同一 seq 只应用一次」去重
+    ///    （契约命令的 HTTP 回体与 WS 推流是同一份事件的**两条路**）⇒ ⇒
+    ///    撞号会把一条真事件当成重复丢掉。
+    unringed_next: u64,
 }
+
+/// 不进环的应答帧的 seq 起点（2^40）。
+///
+/// 环的 seq 是 `u64` 自增，实际用量远达不到 2^40；而 JS 的 `Number` 到
+/// 2^53 还是精确的 ⇒ ⇒ 这个号段既不会撞号，也不会在前端丢精度。
+const UNRINGED_SEQ_BASE: u64 = 1 << 40;
 
 impl EventRing {
     fn new(cap: usize, session_id: &str) -> Self {
@@ -141,6 +155,7 @@ impl EventRing {
             next: 0,
             cap: cap.max(1),
             session_id: session_id.to_string(),
+            unringed_next: UNRINGED_SEQ_BASE,
         }
     }
 
@@ -152,21 +167,82 @@ impl EventRing {
     ///   direction, seq, payload}`）——前端 `decodeMessage` 认的是这一层。
     fn push(&mut self, events: &[EventPayload]) {
         for event in events {
-            // ⚠️ `Tick` 是心跳，**不进流**：它每个窗口一条，对客户端没有信息量，
-            //   却会把环里的真事件挤掉。
-            if matches!(event, EventPayload::Tick { .. }) {
-                continue;
-            }
-            let message = Message::event(self.next, event.clone());
-            let Ok(value) = serde_json::to_value(&message) else {
-                continue;
-            };
-            self.frames.push_back((self.next, value));
-            self.next += 1;
-            while self.frames.len() > self.cap {
-                self.frames.pop_front();
+            self.store(event);
+        }
+    }
+
+    /// 存一条事件进环；`Tick`（心跳）不存 ⇒ 返回 `None`。
+    fn store(&mut self, event: &EventPayload) -> Option<(u64, serde_json::Value)> {
+        // ⚠️ `Tick` 是心跳，**不进流**：它每个窗口一条，对客户端没有信息量，
+        //   却会把环里的真事件挤掉。
+        if matches!(event, EventPayload::Tick { .. }) {
+            return None;
+        }
+        let seq = self.next;
+        let message = Message::event(seq, event.clone());
+        let Ok(value) = serde_json::to_value(&message) else {
+            return None;
+        };
+        self.frames.push_back((seq, value.clone()));
+        self.next += 1;
+        while self.frames.len() > self.cap {
+            self.frames.pop_front();
+        }
+        Some((seq, value))
+    }
+
+    /// 契约命令（v1.11）的**应答帧**：只有**第一条**事件是应答（与前端
+    /// Worker 通道逐字相同：`front/kernel-worker.js` 的 "the first event
+    /// answers the command (M-05 matches it by reqId)"）。
+    ///
+    /// ⚠️ 应答帧**不进环**：调用方从 HTTP 回体拿它，观察者从事件流拿**其余**
+    ///    事件 ⇒ ⇒ 同一份事件只有**一条**路，前端不需要去重（M-05 一个字
+    ///    不动）。
+    ///
+    /// 为什么敢把应答排除在环外：内核每条命令的第一个事件是 `Tick`（心跳）
+    /// 或 `Error`（本命令的失败）；真正对观察者有意义的状态增量 / console /
+    /// 波形都在**后面**，它们照旧进环 ⇒ ⇒ 观察端不会瞎。
+    fn push_answer(
+        &mut self,
+        events: &[EventPayload],
+        req_id: Option<u64>,
+    ) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for (index, event) in events.iter().enumerate() {
+            if index == 0 {
+                out.push(self.answer_frame(event, req_id));
+            } else {
+                self.store(event);
             }
         }
+        out
+    }
+
+    /// 一条 M-07 传输帧的**唯一**构造点。
+    fn frame(
+        &self,
+        seq: u64,
+        message: &serde_json::Value,
+        req_id: Option<u64>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "type": "event",
+            "seq": seq,
+            "sessionId": self.session_id,
+            "role": serde_json::Value::Null,
+            "reqId": req_id,
+            "payload": message,
+        })
+    }
+
+    /// 不进环的**应答帧**：号取自保留段（[`UNRINGED_SEQ_BASE`] 起）⇒ ⇒
+    /// 一眼能看出「这不是事件流里的那一条」。
+    fn answer_frame(&mut self, event: &EventPayload, req_id: Option<u64>) -> serde_json::Value {
+        let seq = self.unringed_next;
+        self.unringed_next += 1;
+        let message = serde_json::to_value(Message::event(seq, event.clone()))
+            .unwrap_or(serde_json::Value::Null);
+        self.frame(seq, &message, req_id)
     }
 
     /// 取 `seq >= since` 的帧（最多 `limit` 条）⇒ `(frames, next, lost)`。
@@ -197,15 +273,7 @@ impl EventRing {
                 // 契约信封拆掉 ⇒ ⇒ 前端每一帧都解不开、全部落成
                 // `E_PROTO-08`，而 Node 侧只看「帧类型 + 内层键」的冒烟**照样
                 // 绿**（假绿）。真浏览器一开就发现寄存器 / console 都是空的。
-                let payload = message.clone();
-                serde_json::json!({
-                    "type": "event",
-                    "seq": seq,
-                    "sessionId": self.session_id,
-                    "role": serde_json::Value::Null,
-                    "reqId": serde_json::Value::Null,
-                    "payload": payload,
-                })
+                self.frame(*seq, message, None)
             })
             .collect();
         (frames, self.next, lost)
@@ -375,6 +443,24 @@ enum Job {
     ClearWatchpoint {
         /// 观察点 id。
         id: u32,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 契约命令（v1.11）：**整条**契约 `Message` 原样交给内核
+    /// `handle_message`，回体是这条命令产生的全部事件（M-07 帧）。
+    ///
+    /// ⚠️ 与 [`Job::Debug`] 的差别只有「输入是整条消息、输出是帧数组」：
+    ///    执行体是**同一个**会话线程、同一条作业队列 ⇒ ⇒ 不存在第二套执行
+    ///    路径，也不许有第二份判据（错误仍由内核的 `Error` 事件表达）。
+    ///
+    /// ⚠️ 契约路径**不代订**任何 topic：`LoadProject` 会清空内核订阅，页面
+    ///    自己按本地模式的习惯重订。REST 装载路径的「代订
+    ///    `sim.state.delta`」是给不认识契约的客户端用的，两条不混。
+    Contract {
+        /// 冻结的契约消息（`direction` 已由 API 层验过是 `Command`）。
+        message: Box<Message>,
+        /// M-07 帧的配对号：回贴到**第一条**应答帧上。
+        req_id: Option<u64>,
         /// 回执通道。
         reply: Sender<JobReply>,
     },
@@ -903,6 +989,27 @@ impl SessionHandle {
         )
     }
 
+    /// 契约命令（v1.11）：整条契约 `Message` 进会话线程，回体是这条命令产生
+    /// 的全部事件（M-07 帧，首帧带 `req_id`）。
+    ///
+    /// ⚠️ 失败映射用 `debug_failure`：这条通道**只**在「线程没了 / 忙 / 超时」
+    ///    这类传输级故障上返回 HTTP 错误；内核的业务判据（`E_PLT-22` /
+    ///    `E_DBG-02` …）仍然以 `Error` 事件进回体 ⇒ ⇒ 一个判据只有一个落点。
+    pub fn contract(
+        &self,
+        message: Message,
+        req_id: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Contract {
+                message: Box::new(message),
+                req_id,
+                reply,
+            },
+            crate::error::debug_failure,
+        )
+    }
+
     /// 装载镜像（R-04）：把**已经拿到手的字节**包成一个单镜像工程交给内核，
     /// 回执是那一条 `ImageLoaded` + 落点 pc。
     ///
@@ -1280,6 +1387,17 @@ impl SessionRegistry {
     pub fn debug(&self, id: &str, command: CommandPayload) -> Result<serde_json::Value, ApiError> {
         let handle = self.handle_for(id)?;
         handle.debug(command)
+    }
+
+    /// 契约命令（v1.11）：见 [`SessionHandle::contract`]。
+    pub fn contract(
+        &self,
+        id: &str,
+        message: Message,
+        req_id: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.contract(message, req_id)
     }
 
     /// 装载镜像（R-04）。**借**一条会话，同 [`Self::set_board`]。
@@ -1994,6 +2112,18 @@ fn spawn_worker(
                             let _ =
                                 reply.send(debug_reply(&command, &host, &events, table.as_deref()));
                         }
+                        Job::Contract {
+                            message,
+                            req_id,
+                            reply,
+                        } => {
+                            // ⚠️ 整条消息原样进内核：`handle_message` 自己判
+                            //   `schema_version` / 命令变体 ⇒ ⇒ 服务端不造
+                            //   第二条判据（错也是内核的一条 `Error` 事件）。
+                            let events = host.handle_message(&message);
+                            let frames = events_ring.push_answer(&events, req_id);
+                            let _ = reply.send(Ok(serde_json::json!({ "frames": frames })));
+                        }
                         Job::SetBoard {
                             description,
                             expected_revision,
@@ -2164,6 +2294,8 @@ fn spawn_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ⚠️ 与 `RunUntil::Breakpoint` 同名但不同物：这里要的是契约的断点结构。
+    use riscv_sim_contract::model::Breakpoint as ContractBreakpoint;
 
     fn registry() -> SessionRegistry {
         SessionRegistry::new(2, Duration::from_millis(50), 1024)
@@ -2581,5 +2713,244 @@ mod tests {
                 .is_some(),
             "信封里面才是 `{{\"Event\":…}}`：{payload}"
         );
+    }
+
+    /// 契约命令（v1.11）：回体必须是前端 `handleFrame` 能直接解的那种帧。
+    ///
+    /// 判据按前端写：`decodeFrame` 要 `type` / `seq` / `payload`，`decodeMessage`
+    /// 要 `schema_version`，M-05 认**第一条**帧的 `reqId`。
+    #[test]
+    fn contract_command_answers_with_frames_the_front_end_can_decode() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        registry
+            .load_image(
+                &id,
+                "spin.bin".to_string(),
+                ImageKind::RawHex,
+                vec![0x6f, 0, 0, 0],
+            )
+            .expect("装载自跳镜像");
+
+        let body = registry
+            .contract(
+                &id,
+                Message::command(0, CommandPayload::StepN { n: 1 }),
+                Some(7),
+            )
+            .expect("契约命令必须成功");
+        let frames = body
+            .get("frames")
+            .and_then(|value| value.as_array())
+            .expect("回体必须是 frames 数组");
+        assert!(!frames.is_empty(), "一条命令至少要有一条事件");
+
+        let first = &frames[0];
+        assert_eq!(first.get("type").and_then(|v| v.as_str()), Some("event"));
+        assert_eq!(
+            first.get("reqId").and_then(|v| v.as_u64()),
+            Some(7),
+            "首帧必须回贴配对号（M-05 按它配对）"
+        );
+        assert_eq!(
+            first.get("sessionId").and_then(|v| v.as_str()),
+            Some(id.as_str())
+        );
+        assert!(first.get("seq").and_then(|v| v.as_u64()).is_some());
+        let payload = first.get("payload").expect("payload 必须在");
+        assert_eq!(
+            payload.get("schema_version").and_then(|v| v.as_u64()),
+            Some(riscv_sim_contract::SCHEMA_VERSION as u64),
+            "完整信封：前端 decodeMessage 先读 schema_version"
+        );
+        assert_eq!(
+            payload.get("direction").and_then(|v| v.as_str()),
+            Some("Event")
+        );
+        assert!(
+            payload
+                .get("payload")
+                .and_then(|inner| inner.get("Event"))
+                .is_some(),
+            "信封里面才是 `{{\"Event\":…}}`：{payload}"
+        );
+        assert_eq!(
+            frames.len(),
+            1,
+            "回体只有**应答**那一帧；其余事件走事件流（不重复投递）"
+        );
+    }
+
+    /// 契约命令的心跳应答（`Tick`）**不进环**，但必须回得去：它的帧用保留
+    /// 号段（[`UNRINGED_SEQ_BASE`] 起）⇒ ⇒ 与环里的 seq 不撞号，前端的
+    /// 「同会话同一 seq 只应用一次」不会误删真事件。
+    #[test]
+    fn contract_tick_answer_uses_the_unringed_seq_band() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+
+        let body = registry
+            .contract(
+                &id,
+                Message::command(
+                    0,
+                    CommandPayload::SetBreakpoint(ContractBreakpoint {
+                        id: 0x4,
+                        addr: 0x4,
+                        ..ContractBreakpoint::default()
+                    }),
+                ),
+                Some(9),
+            )
+            .expect("下断点必须成功");
+        let frames = body
+            .get("frames")
+            .and_then(|value| value.as_array())
+            .expect("回体必须是 frames 数组");
+        assert_eq!(frames.len(), 1, "SetBreakpoint 的即时应答只有 Tick");
+        assert_eq!(frames[0].get("reqId").and_then(|v| v.as_u64()), Some(9));
+        let seq = frames[0]
+            .get("seq")
+            .and_then(|v| v.as_u64())
+            .expect("帧 seq 必须在");
+        assert!(
+            seq >= UNRINGED_SEQ_BASE,
+            "Tick 应答必须走保留号段（{seq} < {UNRINGED_SEQ_BASE}）"
+        );
+    }
+
+    /// 应答帧**不进**事件流：一条命令产生的事件只有一条路到页面 ⇒ ⇒
+    /// 前端不需要去重，「同一条状态增量算两遍」不可能发生；同时其余事件
+    /// （状态增量 / console / 波形）照旧进环 ⇒ ⇒ 观察端不会瞎。
+    #[test]
+    fn contract_answer_is_not_duplicated_in_the_event_stream() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        registry
+            .load_image(
+                &id,
+                "addi.bin".to_string(),
+                ImageKind::RawHex,
+                // `addi x5, x0, 1`（pc 会从 0 走到 4 ⇒ 一定产生状态增量）
+                vec![0x93, 0x02, 0x10, 0x00],
+            )
+            .expect("装载一条 addi");
+
+        let before_next = registry.events(&id, 0, 64).unwrap()["next"]
+            .as_u64()
+            .expect("next");
+        let body = registry
+            .contract(
+                &id,
+                Message::command(0, CommandPayload::StepN { n: 1 }),
+                Some(11),
+            )
+            .expect("契约命令必须成功");
+        let frames = body["frames"].as_array().expect("frames 数组").clone();
+        assert_eq!(frames.len(), 1);
+        let answer_seq = frames[0]["seq"].as_u64().expect("应答帧 seq");
+
+        let tail = registry.events(&id, before_next, 64).expect("读事件流");
+        let stream = tail["frames"].as_array().expect("事件流的 frames");
+        assert!(
+            !stream
+                .iter()
+                .any(|frame| frame["seq"].as_u64() == Some(answer_seq)),
+            "应答帧不许在事件流里出现第二份：{tail}"
+        );
+        assert!(
+            stream
+                .iter()
+                .any(|frame| frame["payload"]["payload"]["Event"]
+                    .get("SimStateDelta")
+                    .is_some()),
+            "真正对观察者有意义的状态增量必须留在事件流里：{tail}"
+        );
+        for frame in stream {
+            assert!(
+                frame.get("reqId").map(|v| v.is_null()).unwrap_or(false),
+                "事件流里的帧不带任何人的配对号：{frame}"
+            );
+        }
+    }
+
+    /// 契约路径的 `LoadProject` **不代订** topic：内核装载会清空订阅，重订是
+    /// 客户端的事（与本地 Worker 模式同一条口径）。REST 装载路径的
+    /// 「代订 `sim.state.delta`」只服务不认识契约的客户端。
+    #[test]
+    fn contract_load_project_leaves_resubscription_to_the_client() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        let before_next = registry.events(&id, 0, 64).unwrap()["next"]
+            .as_u64()
+            .expect("next");
+
+        let project = Project {
+            id: "m24-contract".to_string(),
+            name: "spin.bin".to_string(),
+            tree: Default::default(),
+            images: vec![ImageRef {
+                name: "spin.bin".to_string(),
+                kind: ImageKind::RawHex,
+                source: ImageSource::Bytes(vec![0x6f, 0, 0, 0]),
+            }],
+            version: ProjectVersion::default(),
+        };
+        registry
+            .contract(
+                &id,
+                Message::command(0, CommandPayload::LoadProject(project)),
+                Some(3),
+            )
+            .expect("契约装载必须成功");
+
+        let tail = registry.events(&id, before_next, 64).expect("读事件流");
+        for frame in tail["frames"].as_array().unwrap() {
+            let event = &frame["payload"]["payload"]["Event"];
+            assert!(
+                event.get("Subscribed").is_none(),
+                "契约路径不许代订任何 topic：{frame}"
+            );
+        }
+
+        // 内核的订阅已被 `LoadProject` 清空 ⇒ ⇒ 再走一步**没有**状态增量
+        // （事件流里只剩心跳应答之外的东西）。这一条就是「页面必须自己重订」
+        // 的证据。
+        let step_next = registry.events(&id, 0, 64).unwrap()["next"]
+            .as_u64()
+            .expect("next");
+        registry
+            .contract(
+                &id,
+                Message::command(1, CommandPayload::StepN { n: 1 }),
+                Some(4),
+            )
+            .expect("契约步进必须成功");
+        let after_step = registry.events(&id, step_next, 64).expect("读事件流");
+        let stream = after_step["frames"].as_array().unwrap();
+        assert!(
+            stream.is_empty(),
+            "没订阅 ⇒ 这一步只会有心跳应答（不进环）：{after_step}"
+        );
+        for frame in stream {
+            assert!(
+                frame["payload"]["payload"]["Event"]
+                    .get("SimStateDelta")
+                    .is_none(),
+                "没订阅就不该有增量：{frame}"
+            );
+        }
     }
 }

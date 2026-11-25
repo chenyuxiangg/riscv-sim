@@ -20,8 +20,9 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.10（2026-11-25；R-13 接到<b>页面</b>：前端 <code>?server=</code> 入口 + 服务端 CORS 闸门 · 事件帧 <code>payload</code> 订正为"
-           "<b>完整</b>契约 <code>Message</code> 信封（此前只发内层 <code>{&quot;Event&quot;:…}</code>，前端一帧也解不开））· 需求基线 docs/requirements/"
+VERSION = ("HTML 版 v1.11（2026-11-25；R-13 收成<b>双向</b>：页面在 server-mode 也能下令 —— 新增契约命令端点 "
+           "<code>POST /api/sessions/{id}/command</code>（整条契约 <code>Message</code> 进出，回体是应答帧），前端只换 "
+           "<code>m07_transport</code> 的 <code>send</code> 实现，M-05 一行未动）· 需求基线 docs/requirements/"
            "Sim_Agent_API_Requirements_v0.1.html · 代码基线 main（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
@@ -245,13 +246,13 @@ SECTIONS.append({
                 ["R-10", "确定性：同输入同输出", "预算按指令条数；量子常量随响应回显；不许随机初值、不许墙钟参与结果", "§5.2", "P0"],
                 ["R-11", "超时与熔断", "每窗口查 deadline；到点停下并回 504；会话仍可 <code>reset</code> 后再用", "§5.4", "P0"],
                 ["R-12", "CI / 脚本友好", "<code>POST /api/boot</code> 是<b>唯一</b>判定口径；<code>osz-boot</code> 改为该端点的<b>客户端</b>（离线 runner 已移除，<code>--print-memory</code> 取回执头 <code>x-boot-ram-window</code>）", "§3.2 §5.2 附录 A", "P0"],
-                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧，<code>payload</code> = <b>完整</b>契约 <code>Message</code> 信封；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点；<b>v1.10 起页面地址带 <code>?server=</code> 就能直接用</b>（REST 建/验会话 + 状态水合 + 只读事件流）", "§3.6", "P1"],
+                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧，<code>payload</code> = <b>完整</b>契约 <code>Message</code> 信封；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点；<b>v1.10 起页面地址带 <code>?server=</code> 就能直接用</b>（REST 建/验会话 + 状态水合）；<b>v1.11 起页面在 server-mode 也能下令</b>（<code>POST …/command</code> 吃整条契约消息，回体是应答帧 ⇒ 事件流仍只往外推）", "§3.6", "P1"],
                 ["R-14", "快照 / 复位 / trace", "复用 <code>Snapshot</code>/<code>Restore</code>/<code>SetTraceEnabled</code>/<code>ExportTrace</code>；复位的实现是重发 <code>LoadProject</code>", "§5.5", "P1"],
                 ["R-15", "安全边界", "默认只绑回环；镜像路径白名单 + 规范化；非回环需显式开关与 token", "§3.4 §5.4", "P0"],
             ],
         }),
         ("callout", "约束", "R-03 的「不得回退到 v0.76 之前的自动选档」是一条<b>结构约束</b>：M-24 的配板动作必须是客户端可见的一次命令，"
-                  "服务启动参数 <code>--board</code> 也只能在<b>建会话时显式执行一次</code>，并在会话元数据里记下 <code>board_source=startup-default</code>，"
+                  "服务启动参数 <code>--board</code> 也只能在<b>建会话时显式执行一次</b>，并在会话元数据里记下 <code>board_source=startup-default</code>，"
                   "使「这块板从哪来」可追溯 —— 而不是在装载路径里偷偷补一块。"),
         ("h3", "sec1-3", "1.3 范围、优先级与不做"),
         ("caption", "表 2 · 范围与优先级"),
@@ -370,6 +371,7 @@ SECTIONS.append({
                 ["<code>POST …/image</code>", "装载 ELF/BIN", "<code>octet-stream</code> 或 <code>{path,kind}</code> → <code>{entry, segments, isa, sha256}</code>", "200", "P0"],
                 ["<code>POST …/run</code>", "跑到停点", "<code>{steps|timeout_ms, prefix?, until?}</code> → <code>{stop_reason, executed, pc, t_ps, console, breakpoint?}</code>", "200/504", "P0"],
                 ["<code>POST …/step</code>", "精确 n 条", "<code>{n}</code> → <code>{pc, executed}</code>", "200", "P0"],
+                ["<code>POST …/command</code>", "契约命令（<b>v1.11</b>：页面在 server-mode 的写通道）", "体 = <code>{message: &lt;完整契约 Message&gt;, reqId?}</code> → <code>{frames: [应答帧]}</code>；<b>首帧</b>带 <code>reqId</code>，其余事件走事件流（同一份事件只有一条路）", "200/400/404/409/504", "P1"],
                 ["<code>POST …/pause</code> · <code>…/reset</code>", "暂停 / 复位", "→ <code>{state}</code>；复位 = 用会话记下的<b>最后一次成功装载</b>的镜像重装（pc 回 entry、计数归零、console 环不裁）", "200/202/409", "P0"],
                 ["<code>GET …/console</code>", "取 console 字节", "<code>?offset&limit</code> → 原始字节 + <code>X-Console-Total</code>", "200", "P0"],
                 ["<code>GET …/state</code> · <code>…/memory</code> · <code>…/symbols</code> · <code>…/disasm</code>", "调试读取面", "<code>state</code> 含 <code>t_ps</code>；<code>memory</code> 可选 <code>format=u32|asc</code>（追加 <code>u32[]</code> / <code>asc</code> 视图，原始字节照旧）", "200", "P0"],
@@ -399,7 +401,7 @@ SECTIONS.append({
         ("note", "<b>需求收口的落地口径（v1.8）：</b>① <b>复位</b>用会话自己记下的「最后一次成功装载」镜像（name / kind / bytes）重装 —— 同一块板、同一订阅；"
               "<code>pc</code> 回 entry、<code>executed</code> 归零（<code>LoadProject</code> 重置计数）；console 环<b>不裁</b>（R-06 只追加），回执带 <code>{base,total}</code> 让客户端对齐；没装过镜像 ⇒ <b>409</b> <code>E_SESS-02</code>。"
               "② <b>前缀</b>：服务端按 <b>1 000 条</b>小窗口推进并逐窗扫 console 字节（内核对 console 内容一无所知）⇒ <code>stop_reason=prefix</code>；"
-              "<b>明口径</b>：<code>executed</code> 相对真实停点最多<b>多算一个窗口</code>；没给 <code>steps</code> 时默认预算 1e6。"
+              "<b>明口径</b>：<code>executed</code> 相对真实停点最多<b>多算一个窗口</b>；没给 <code>steps</code> 时默认预算 1e6。"
               "③ <b>until</b>：<code>breakpoint</code> / <code>halt</code>；前者把观察点 / 单步这类「停一下不该收工」的停点跳过，连续跳过 64 次兜底收工。"
               "④ <b>断点命中</b>：内核 <code>Halted</code> 只带 pc ⇒ 服务端用 <code>ListBreakpoints</code> 的权威表按 pc 找回 <code>{id, addr, kind}</code>（不猜、不另造停因）。"
               "⑤ <b>观察点</b>：契约<b>没有</b> List 命令（Set / Clear 的回执只有 Tick）⇒ 宿主新增只读访问器 <code>list_watchpoints</code>；<code>POST</code> 缺省 id = 现有最大 + 1，显式给 id 则覆盖（内核语义）。"
@@ -418,7 +420,8 @@ SECTIONS.append({
               "<code>ws://…/api/sessions/{id}/events/ws</code>；帧解包仍是 <code>front/lib/frame.js</code> 那一个 <code>decodeFrame</code> ⇒ ⇒ "
               "<code>decodeFrame</code> 放行 <code>FRAME_TYPE.Resume</code>（此前只放行 command/event ⇒ ⇒ 服务端的 <code>resume</code> 会被当畸形帧<b>丢掉</b>，正是 R-13 禁止的「静默断流」）；"
               "<code>resume</code> 帧进状态 <code>lastResume</code>（丢帧、console 丢窗口、通道关闭三种都说成人话）并照常交给订阅者。"
-              "⑤ <b>server-mode 是事件通道、不是命令通道</b>：该 socket 只往外推 ⇒ <code>sendCommand</code> 在 server-mode 直接报 <code>E_TRX-03</code>（命令走 REST），不做「发出去没人看」的静默失败。"),
+              "⑤ <b>server-mode 是事件通道、不是命令通道</b>：该 socket 只往外推 ⇒ <code>sendCommand</code> 在 server-mode 直接报 <code>E_TRX-03</code>（命令走 REST），不做「发出去没人看」的静默失败。"
+              "<b>（v1.11 起作废）</b>：命令另开契约命令端点，见下方 v1.11 note —— 事件通道仍然只往外推，这一点没变。"),
         ("note", "<b>浏览器入口与帧信封（v1.10）：</b>① <b>帧信封订正</b>：v1.9 的 <code>payload</code> 只发内层 "
               "<code>{\"Event\":…}</code>，而前端 <code>decodeMessage</code> 第一件事就是读 <code>schema_version</code> ⇒ ⇒ "
               "<b>每一帧都落成 <code>E_PROTO-08</code></b>：页面显示「已连接」，但寄存器 / 终端一个字也没有。"
@@ -436,6 +439,29 @@ SECTIONS.append({
               "服务端模式下<b>不跑</b> <code>loadProjectIntoKernel</code> 与 <code>Nop</code> 往返（那是本地内核的命令面，服务端会话早有自己的镜像）。"
               "④ <b>范围</b>：本轮接通的是<b>观察面</b>（事件流 + console 推送 + 状态水合）；界面上「运行 / 单步 / 断点」等按钮仍走 M-05 → M-07 的写通道，"
               "在 server-mode 会<b>显式</b>报 <code>E_TRX-03</code>（命令走 REST）—— 不伪装成能用。"),
+
+        ("note", "<b>契约命令端点：页面在 server-mode 也能下令（v1.11）：</b>① <b>为什么不是映射表</b>：把 M-05 的 "
+              "<code>dispatch</code> 逐条翻译成 REST 端点（run / step / reset / 断点 / 读内存 …）至少要写二十来条映射，每条还要做字段形状转换 —— "
+              "那是<b>第二份真相</b>。内核的入口本来就是 <code>host.handle_message(&amp;Message) -&gt; Vec&lt;EventPayload&gt;</code> ⇒ ⇒ "
+              "让它<b>直接吃</b>前端发的那条契约消息，一张表都不用。"
+              "② <b>端点形状</b>：<code>POST /api/sessions/{id}/command</code>，体 <code>{message: &lt;完整契约 Message&gt;, reqId?: number}</code>，"
+              "回 <code>{frames: [ &lt;M-07 事件帧&gt; ]}</code>。方向必须是 <code>Command</code>（否则 400，别让「事件上送」静默变成一条命令）。"
+              "③ <b>执行体只有一个</b>：新作业 <code>Job::Contract</code> 投进<b>现有</b>会话线程与<b>唯一的作业队列</b>，执行 "
+              "<code>host.handle_message</code> ⇒ ⇒ 与 REST 的 <code>Job::Debug</code> 共用同一条执行路径，不存在第二套；"
+              "内核的业务错误（<code>E_PLT-22</code> / <code>E_DBG-02</code> …）<b>不</b>转 HTTP 错误，仍以 <code>Error</code> 事件当应答 ⇒ ⇒ 一个判据只有一个落点。"
+              "④ <b>应答与推事件分开</b>：约定与 Worker 通道<b>逐字相同</b>（<code>front/kernel-worker.js</code>：&quot;the first event answers the command … the rest are pushed events&quot;）"
+              "⇒ 回体只给<b>应答</b>那一帧（带 <code>reqId</code>），它<b>不进事件环</b>；其余事件（状态增量 / console / 波形）照旧进环 ⇒ ⇒ "
+              "同一份事件只有<b>一条</b>路到页面（前端不需要去重，「同一条增量算两遍」不可能发生），而观察端仍然看得见运行现场。"
+              "应答帧的 <code>seq</code> 取自保留号段（2^40 起）⇒ 一眼能看出「它不是事件流里的那一条」，也不会与环的 seq 撞号。"
+              "⑤ <b>前端只换一个实现</b>：<code>m07_transport</code> 的 server-mode 适配器把 <code>send</code> 从抛 "
+              "<code>E_TRX-03</code> 改成 POST 契约端点，回体帧喂同一条 <code>emitFrame</code> ⇒ ⇒ M-05 的 <code>dispatchCommand</code> / "
+              "<code>handleFrame</code> / 500 ms 超时 / <code>Error</code> 分派<b>一行未动</b>。POST 失败时合成一条<b>带同一个 reqId</b> 的 "
+              "<code>Error</code> 帧（不回帧就等于让命令白等 500 ms 再报超时，把真因藏起来）；只给了裸 <code>url</code>（没有 REST 基址）时仍明确报 <code>E_TRX-03</code>。"
+              "⑥ <b>订阅归属</b>：契约路径<b>不代订</b>任何 topic —— <code>LoadProject</code> 会清空内核订阅，页面自己按本地模式的习惯重订（"
+              "<code>contract_load_project_leaves_resubscription_to_the_client</code> 就是这条判据）；REST 装载路径的「代订 <code>sim.state.delta</code>」只服务不认识契约的客户端。"
+              "⑦ <b>证据</b>：服务端 <b>56</b> 项（+5：解码形状 / Tick 应答号段 / 应答不进流 / 契约装载不代订 / 方向闸门）、前端 <b>828</b> 项（+9：地址、请求体、错误体、回体校验、适配器接线）；"
+              "真 Chrome 点两次「单步」⇒ 页面 <code>x5</code> 0 → 2、<code>pc</code> 0 → 8，同时服务端 <code>GET …/state</code> 的 <code>executed</code> 0 → 2 —— "
+              "驱动的是<b>原生内核</b>，且计数没有翻倍。"),
 
         ("note", "<b>读接口的语义要点：</b><code>state</code> 返回 <code>{pc, gpr[32], t_ps}</code> —— <b>pc 单独一个字段</b>，不在 <code>gpr</code> 里，且 <code>gpr[0]</code> 恒 0（需求里踩过的坑就在这）；"
               "<code>memory</code> 的 <code>len ≤ 4096</code>（契约 <code>DUMP_MAX_BYTES</code>），越界原样拒；<code>format=u32|asc</code> 只<b>追加</b>视图（原始字节仍在 <code>bytes</code> 里，两个消费者不必二选一）；<code>symbols</code> 精确命中与候选并存（候选上限 16）；"
@@ -511,7 +537,7 @@ SECTIONS.append({
         ("h3", "sec3-5", "3.5 契约增量（只增不改）"),
         ("p", "全量核对过契约 v18：装载 / 运行 / 步进 / 断点 / 观察点 / 寄存器 / 内存转储 / 符号 / 反汇编 / 快照 / trace / 模板 / 板图 —— "
               "<b>本需求需要的命令一条不缺</b>。因此契约层<b>不动任何命令</b>：只加一个错误族，外加一个事件变体（装载回执）。"
-              "回执是<b>用户拍板</b>加的：没有它，客户端只能从 <code>MemoryMap.loaded</code> 这个<b>状态位</code>推断「装载发生过」，"
+              "回执是<b>用户拍板</b>加的：没有它，客户端只能从 <code>MemoryMap.loaded</code> 这个<b>状态位</b>推断「装载发生过」，"
               "而段/入口/ISA 事实要么再查一次、要么在宿主侧重解析一遍 —— <b>报告与事实就有两个来源</b>。"),
         ("caption", "表 10 · 契约层与镜像代码的增量清单"),
         ("table", {
@@ -519,7 +545,7 @@ SECTIONS.append({
             "head": ["变更项", "位置", "改动量", "理由（判据 D-132 · C）", "版本影响"],
             "rows": [
                 ["新增 <code>ErrorFamily::Session = \"SESS\"</code>", "contract/error.rs 的 <code>error_families!</code>", "1 行", "会话不存在 / 忙 / 中毒 / 窗口丢失 / 额度 / 超时 —— 这些码<b>前端 server-mode 要按码分派</b>（判据②成立）", "族清单 +1；<code>SCHEMA_VERSION</code> 随之 18 → 19（与下一行同批）"],
-                ["新增 <code>EventPayload::ImageLoaded</code>", "contract/protocol.rs 的 <code>EventPayload</code>", "1 变体（7 字段）", "R-04 要在装载回执里给 entry / segments / isa —— 由<b>内核</b>在装载路径末尾发（与真正 <code>load_bytes</code> 的那份解析同源）⇒ 报告即事实", "线上<b>多一个事件变体</code> ⇒ <code>SCHEMA_VERSION</code> 18 → 19"],
+                ["新增 <code>EventPayload::ImageLoaded</code>", "contract/protocol.rs 的 <code>EventPayload</code>", "1 变体（7 字段）", "R-04 要在装载回执里给 entry / segments / isa —— 由<b>内核</b>在装载路径末尾发（与真正 <code>load_bytes</code> 的那份解析同源）⇒ 报告即事实", "线上<b>多一个事件变体</b> ⇒ <code>SCHEMA_VERSION</code> 18 → 19"],
                 ["新增 <code>model::ImageSegment</code>", "contract/model.rs", "1 DTO（base / size）", "只报段<b>形状</b>，不重复传字节（字节仍是 <code>MemoryDump</code> 的事）", "随 v19"],
                 ["<code>E_SESS-01</code> 会话不存在", "同上", "1 常量", "R-02 / R-09 明确要求", "前端 <code>RUST_ERROR_CODE_REFS</code> +1"],
                 ["<code>E_SESS-02</code> 会话忙", "同上", "1 常量", "「忙」必须与「不存在」分开，否则客户端无法决定重试还是重建", "+1"],
@@ -528,7 +554,7 @@ SECTIONS.append({
                 ["<code>E_SESS-05 / 06</code> 额度 / 超时", "同上（P0 内实现）", "2 常量", "R-11 的 429 与 504 需要可判别的码", "+2"],
                 ["<code>E_SESS-07</code> 未授权", "同上", "1 常量", "<code>--allow-remote</code> 下缺 token（P2 前的最小闸门）", "+1"],
                 ["<code>E_STORE-07</code> 路径越出白名单", "<b>server crate</b> 内部常量", "1 常量", "不跨 crate 共享、前端不分派 ⇒ 按判据 C <b>住模块内</b>", "契约不变"],
-                ["<code>KernelHost::on_load_project</code> 末尾", "kernel/kernel_host/project.rs", "1 段（发回执）", "回执必须在<b>全部步骤成功之后</b>发；段与第五步 <code>load_bytes</code> 用<b>同一份</code> <code>parsed</code>", "内核语义不变：多一条事件，不改既有行为"],
+                ["<code>KernelHost::on_load_project</code> 末尾", "kernel/kernel_host/project.rs", "1 段（发回执）", "回执必须在<b>全部步骤成功之后</b>发；段与第五步 <code>load_bytes</code> 用<b>同一份</b> <code>parsed</code>", "内核语义不变：多一条事件，不改既有行为"],
                 ["<code>platform::template_infos()</code>", "kernel/kernel_host/platform.rs", "1 公开纯函数", "模板清单元数据（<code>device_count</code> 口径）只留<b>一个定义点</b>：内核事件与 <code>GET /api/board/templates</code> 共用", "无"],
             ],
         }),
@@ -587,7 +613,7 @@ SECTIONS.append({
         }),
         ("p", "两个函数值得单独说。其一 <code>judge_stop</code>：它把「六种停因」收敛成一个纯函数，输入是一份只读观测（内核事件、ctrl 位、deadline 判定、前缀命中、指令计数），"
               "输出是唯一停因 —— 这样「先停哪个」这件事只有一个落点，不会在循环里散成五处 <code>break</code>。"
-              "其二 <code>error_to_response</code>：它是<b>纯映射表</code></b>，唯一允许的「加工」是补 HTTP 状态与 <code>request_id</code>。"),
+              "其二 <code>error_to_response</code>：它是<b>纯映射表</b>，唯一允许的「加工」是补 HTTP 状态与 <code>request_id</code>。"),
     ],
 })
 
@@ -870,12 +896,13 @@ SECTIONS.append({
                 ["P1-2", "需求收口：复位 / run 的 <code>prefix</code>+<code>until</code>+<code>t_ps</code>+断点命中 / <code>memory</code> 视图 / 观察点 / M-07 帧 / console 推送 / <code>POST …/trace</code>（<b>已落地</b>，46 项服务端测试通过，HTTP 冒烟全绿）", "R-05 / R-07 / R-08 / R-06 推送面 / R-13 帧形 / R-14 复位逐条兑现", "P1"],
                 ["P1-3", "R-12 收成单通道（<code>osz-boot</code> 变客户端、<code>x-boot-ram-window</code>、<code>/healthz.max_run_ms</code>）+ R-13 前端 server-mode（URL 推导 / <code>resume</code> 帧 / 只推通道）（<b>已落地</b>，前端 20 项 transport 用例通过，真实端点冒烟收到 M-07 帧）", "R-12 / R-13 的验收两句逐条兑现", "P1"],
                 ["P1-4", "浏览器直连服务端（<code>?server=</code> + CORS 闸门 + 帧信封订正）（<b>已落地</b>，真 Chrome 冒烟：状态栏 <code>已连接 · server websocket</code>、寄存器 <code>x5=0x10000000</code>、终端出现 console 的 <code>A</code>、无 console 报错；前端 819 项、服务端 51 项全绿）", "R-13「指到那就能用」在<b>页面</b>上成立；命令面仍走 REST（未接）", "P1"],
+                ["P1-5", "契约命令端点（<code>POST …/command</code>）：整条契约消息进<b>同一个</b>会话线程，回体是应答帧（首帧带 <code>reqId</code>），其余事件走事件流；前端只换 <code>send</code> 实现（<b>已落地</b>，真 Chrome 点两次「单步」：页面 <code>x5</code> 0 → 2 / <code>pc</code> 0 → 8，服务端 <code>GET …/state</code> 的 <code>executed</code> 0 → 2 同步；前端 828 项、服务端 56 项全绿）", "R-13 双向：页面在 server-mode 能看也能点；无映射表、无第二套执行路径", "P1"],
                 ["P1", "事件流（WS + REST）、trace 导出 / 开关、快照采集 / 还原（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；异步 run（作业表 + 结果槽）<b>已落地</b>", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
             ],
         }),
         ("h3", "sec9-2", "9.2 五项决策与落地取舍"),
         ("p", "需求文档 §08 的五项会改变实现形态，五项<b>已全部拍板</b>；实施期又追加一项（D6 装载回执，见表 22）。其中 D1–D4 按本设计的建议通过；"
-              "D5 原先把 <code>osz-boot</code> 留作<b>离线</code> runner，<b>v1.9 按 R-12 的「仓内只保留一份判定口径」改为把它变成 <code>/api/boot</code> 的客户端</b>"
+              "D5 原先把 <code>osz-boot</code> 留作<b>离线</b> runner，<b>v1.9 按 R-12 的「仓内只保留一份判定口径」改为把它变成 <code>/api/boot</code> 的客户端</b>"
               "（离线执行路径删除）⇒ 代价是「对拍要先起服务」，收益是板的选择与停因<b>不可能</b>再有第二份实现。"),
         ("caption", "表 22 · 决策点与裁决"),
         ("table", {

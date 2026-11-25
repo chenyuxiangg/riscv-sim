@@ -1090,14 +1090,18 @@ export async function handleCommand(detail, services) {
 
 
 /**
- * 服务端模式的**观察面**启动：绑定会话 + 取一次状态 + 把状态推给视图。
+ * 服务端模式的启动：绑定会话 + 取一次状态 + 把状态推给视图。
  *
- * ⚠️ 与本地 `startSession()` 的差别是**刻意的**：
- *   - 不装载工程（`LoadProject` 是本地内核的命令面，服务端模式下那条写通道
- *     不存在 —— 服务端的会话早就有自己的镜像了）；
- *   - 不做 `Nop` 往返（同上：命令走 REST，而这里没有写通道）；
- *   - 只发**事件**（`sim.state.delta` / `tick`），因为 `m10` 与视图只吃事件
- *     ⇒ ⇒ 不编造「命令成功」这种前端自己给自己回的假回执。
+ * ⚠️ 命令面（v1.11 起）已经可用：M-05 → M-07 的写通道走
+ *    `POST /api/sessions/{id}/command`（整条契约消息进出）⇒ ⇒ 界面上的
+ *    运行 / 单步 / 断点 / 读内存与本地模式同一条路径。
+ *
+ * ⚠️ 与本地 `startSession()` 仍然**刻意不同**的只有两件：
+ *   - 不装载工程：服务端的会话有自己的镜像，页面开起来不该替它 `LoadProject`
+ *     （那会把别人的会话清空重来）；
+ *   - 不做 `Nop` 往返：没有「刚装载完」这个时刻，也就没有可验证的写通道。
+ *     水合只发**事件**（`sim.state.delta` / `tick`）—— 用一次 `GET …/state`
+ *     的真实读数，不编造「命令成功」这种前端自己给自己回的假回执。
  *
  * 会话被回收（404）时 `ensureSession` 会重建一条 ⇒ ⇒ 这里照常接，
  * 但页脚要写明「重建了一条」，不假装还是原来那条。
@@ -1142,7 +1146,7 @@ async function startServerMirror({ session, commandRouter, params, binding, fail
         }
         const board = binding.board ? ` · 板 ${binding.board}` : "";
         const recycled = binding.restarted ? " · 原会话已回收，重建了一条" : "";
-        setNote(`服务端模式：${binding.sessionId}${board}${recycled}（事件流只读；命令走 REST）`);
+        setNote(`服务端模式：${binding.sessionId}${board}${recycled}（事件走事件流；命令走契约命令端点）`);
     } catch (err) {
         setNote(`服务端模式没起来：${err?.message ?? err}`);
     }
@@ -1205,6 +1209,9 @@ async function bootstrap() {
                 serverUrl: serverParams.serverUrl,
                 sessionId: serverBinding?.sessionId ?? serverParams.sessionId ?? null,
                 role: "host",
+                // ⚠️ 命令走 `POST /api/sessions/{id}/command`（v1.11）⇒ ⇒ 令牌
+                //    必须跟到传输层（服务端的 `require_token` 只认这个头）。
+                token: serverParams.token,
             }
             : { mode: "worker", workerUrl: KERNEL_WORKER_URL },
     );

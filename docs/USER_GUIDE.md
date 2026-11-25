@@ -553,15 +553,42 @@ python3 tools/serve-front.py --port 8090
 WebSocket 挂到 `/api/sessions/{id}/events/ws` 收后续的事件与 console 字节。状态栏显示「已连接 · server websocket」，
 页脚显示会话 id 与板；服务端发来 `resume`（丢帧 / console 丢窗口 / 通道关闭）时，那句话说在状态栏里，不静默。
 
-⚠️ **这一批只接观察面**：查看状态、看 console 现场增长、看事件流。界面上「运行 / 单步 / 断点」那些按钮走的是前端的写通道，
-服务端的事件 socket **只往外推** ⇒ ⇒ 点了会**显式**报 `E_TRX-03`（命令走 REST），**不会**假装执行成功。
-要驱动一次运行，用 REST（`POST /api/sessions/{id}/run`）或 `tools/boot-osz.sh`。
+⚠️ **页面在服务端模式下也能「点」（v1.11 起）**：运行 / 单步 / 步过 / 断点 / 读内存这些按钮走前端原有的命令路径，
+落到 `POST /api/sessions/{id}/command`（请求体是前端那条契约消息原样，回体是这条命令的**应答**）。服务的仍是**同一个会话线程**，
+与 REST 的 `/run`、`/step` 共用同一条作业队列 —— 不是第二套实现，也没有「契约命令 → REST 端点」的映射表。
+
+⚠️ 命令引发的其余事件（状态增量 / console / 波形）走**事件流**，回体只给应答那一帧 ⇒ ⇒ 同一件事不会被算两遍；
+别的页面挂同一条会话看现场，也照旧看得见。
 
 ⚠️ **跨域**：页面与 `:9876` 是两个 origin ⇒ ⇒ 服务端带 CORS 中间件，**回环 origin 默认放行**
 （`http://127.0.0.1:任意端口` / `http://localhost:任意端口`），且**不接受通配**。前端换了主机名或放到别的机器上时，
 起服务要显式给：`--cors-origins http://host:8090,https://sim.example.com`。
 
 ⚠️ **不给 `?server=` 就是原来那条路**：本地 Worker + WASM 内核，一个字都不改。
+
+---
+
+### 5.6 用契约消息下命令（`POST …/command`）
+
+不想走 REST 那组专用端点、手里正好是前端那条契约消息时（脚本、Agent 侧、复现问题时最省事），可以直接发：
+
+```bash
+curl -s -X POST http://127.0.0.1:9876/api/sessions/sess-000003/command \
+  -H 'content-type: application/json' \
+  -d '{"message":{"schema_version":19,"direction":"Command","seq":1,
+        "payload":{"Command":{"StepN":{"n":1}}}},"reqId":7}'
+```
+
+回体是 `{"frames":[<应答帧>]}`：首帧带 `reqId`（就是你传的那个），帧形与事件流完全一致
+（`{type,seq,sessionId,role,reqId,payload}`，`payload` 是完整的契约 `Message`）。这条命令引发的**其余**事件
+（状态增量 / console / 波形）照旧去 `GET …/events` 或 WS 读 —— 回体只给应答，同一件事只有一条路。
+
+几条口径：
+
+- `message.direction` 必须是 `Command`（否则 400）。
+- 内核的业务错误（`E_PLT-22` / `E_DBG-02` …）**不**变成 HTTP 错误，而是当应答的 `Error` 事件进回体 ⇒ ⇒ 按 `code` 判。
+- POST 失败（会话没了 404、忙 409、超时 504）才是 HTTP 错误，回体仍是 `{code, detail, status}`。
+- 用 `LoadProject` 装载工程时，**订阅要自己重订**（契约装载会清空内核订阅，服务端不代订）；走 `POST …/image` 的 REST 路径才会代订。
 
 ---
 

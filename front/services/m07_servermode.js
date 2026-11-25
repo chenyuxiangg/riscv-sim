@@ -14,9 +14,9 @@
 //    回环 origin 默认放行；前端不在本机时，起服务的人要给
 //    `--cors-origins http://host:port`。
 //
-// ⚠️ 这一层**只做观察面**：服务端事件通道**只往外推**，命令走 REST。
-//    界面上「运行 / 单步 / 断点」那些按钮在 server 模式下仍会报
-//    `E_TRX-03`（那是 M-05 → M-07 的写通道），本轮不伪装成能用。
+// ⚠️ 这一层只做**会话入口**（解析参数 / 建会话 / 验活 / 水合一次状态）。
+//    通道与判据都在别处：事件走 `m07_transport.js` 的 server-mode 适配器，
+//    命令走 `m07_servercommand.js`（契约命令端点，v1.11）。
 
 import { FRONT_ERROR_CODES } from "../lib/message.js";
 
