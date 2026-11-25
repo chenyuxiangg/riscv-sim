@@ -201,6 +201,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/events/ws", get(events_ws))
         .route("/api/sessions/{id}/trace", get(read_trace))
         .route("/api/sessions/{id}/trace/enabled", put(set_trace_enabled))
+        .route("/api/sessions/{id}/jobs/{job}", get(get_job))
         .route("/api/sessions/{id}/snapshot", post(take_snapshot))
         .route("/api/sessions/{id}/restore", post(restore_snapshot))
         .route("/api/sessions/{id}/state", get(session_state))
@@ -439,6 +440,10 @@ pub struct RunRequest {
     /// 墙钟上限（毫秒）；不给 ⇒ 用 `--max-run-ms`。
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// `true` ⇒ **异步**：立刻回 `202 {job_id, poll}`，结果由
+    /// `GET …/jobs/{job_id}` 轮询（P1）。
+    #[serde(default, rename = "async")]
+    pub run_async: bool,
 }
 
 /// 把请求折成 `run_until` 的两个参数（**纯函数** ⇒ ⇒ 三条校验可单测）。
@@ -487,7 +492,14 @@ async fn run_session(
     body: Option<Json<RunRequest>>,
 ) -> Result<Response, ApiError> {
     let request = body.map(|Json(request)| request).unwrap_or_default();
+    // ⚠️ 先记下 `async`：`plan_run` 吃的是**同一份**折算规则（steps 与
+    //    timeout_ms 互斥、0 与超上限都拒），异步与同步不能各判一套。
+    let run_async = request.run_async;
     let (steps, timeout_ms) = plan_run(request, state.max_run_ms)?;
+    if run_async {
+        let submitted = state.registry.run_async(&id, steps, timeout_ms)?;
+        return Ok((StatusCode::ACCEPTED, Json(submitted)).into_response());
+    }
     let report = state.registry.run(&id, steps, timeout_ms)?;
     if report.get("stop_reason").and_then(|value| value.as_str()) == Some("timeout") {
         let mut timeout_body = report;
@@ -503,6 +515,15 @@ async fn run_session(
         return Ok((StatusCode::GATEWAY_TIMEOUT, Json(timeout_body)).into_response());
     }
     Ok(Json(report).into_response())
+}
+
+/// `GET …/jobs/{job}` —— 读一条异步作业（P1）。
+async fn get_job(
+    State(state): State<AppState>,
+    Path((id, job)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let body = state.registry.job(&id, &job)?;
+    Ok(Json(body))
 }
 
 /// `POST …/step` 的请求体。
@@ -1504,6 +1525,7 @@ mod tests {
             RunRequest {
                 steps: Some(3),
                 timeout_ms: Some(100),
+                run_async: false,
             },
             5_000,
         )
@@ -1514,6 +1536,7 @@ mod tests {
             RunRequest {
                 steps: Some(0),
                 timeout_ms: None,
+                run_async: false,
             },
             5_000,
         )
@@ -1524,6 +1547,7 @@ mod tests {
             RunRequest {
                 steps: None,
                 timeout_ms: Some(30_000),
+                run_async: false,
             },
             5_000,
         )
@@ -1542,7 +1566,8 @@ mod tests {
             plan_run(
                 RunRequest {
                     steps: Some(7),
-                    timeout_ms: None
+                    timeout_ms: None,
+                    run_async: false,
                 },
                 5_000
             )

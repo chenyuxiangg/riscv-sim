@@ -240,6 +240,15 @@ enum Job {
         /// 回执通道。
         reply: Sender<JobReply>,
     },
+    /// 异步 run（P1）：跑完把结果写进 `slot`，**没有**回执通道。
+    RunAsync {
+        /// 指令上限。
+        steps: Option<u32>,
+        /// 墙钟上限（毫秒）。
+        timeout_ms: Option<u64>,
+        /// 结果落点（HTTP 侧拿 `job_id` 轮询它）。
+        slot: Arc<AsyncSlot>,
+    },
     /// 读事件流（P1）：`seq >= since` 的帧。
     Events {
         /// 起始序号。
@@ -314,6 +323,7 @@ enum Job {
 /// ⚠️ **状态码不在这里**：同一个码在不同发生点状态不同（`E_PLT-22` 在
 /// 「未知模板」是 404、在「无板装载」是 409）⇒ ⇒ 状态由**API 层**按
 /// 发生点给（见 `error.rs` 的模块注释）。
+#[derive(Debug, Clone)]
 struct KernelFailure {
     /// 契约场景码。
     code: String,
@@ -323,6 +333,92 @@ struct KernelFailure {
 
 /// 一条作业的回执：成功是 JSON 体，失败是内核的原话。
 type JobReply = Result<serde_json::Value, KernelFailure>;
+
+/// 一条**异步**作业的落点（P1：`run?async`）。
+///
+/// 为什么会存在：`run` 可能要跑几秒到十几秒，把 HTTP 连接一直占着对
+/// Agent / CI 都不友好 ⇒ ⇒ 提交后立刻回 `job_id`，由调用方轮询。
+///
+/// ⚠️ 结果**只能**由会话线程写（宿主 `!Send`）⇒ ⇒ 这里是一个
+/// `Arc<Mutex<_>>` 的中转格，HTTP 只读不写。
+#[derive(Debug)]
+struct AsyncSlot {
+    /// 这套记录的可读状态与结果。
+    inner: Mutex<AsyncState>,
+}
+
+/// 异步作业的对外状态。
+#[derive(Debug, Clone)]
+struct AsyncState {
+    /// `run`（未来可能有 `boot` 等）。
+    kind: &'static str,
+    /// 什么时候结束的（毫秒，相对提交）；`None` ⇒ 还在跑。
+    elapsed_ms: Option<u64>,
+    /// 结果或失败（与同步 `run` 的回执同形）。
+    outcome: Option<JobReply>,
+}
+
+impl AsyncSlot {
+    fn new(kind: &'static str) -> Self {
+        Self {
+            inner: Mutex::new(AsyncState {
+                kind,
+                elapsed_ms: None,
+                outcome: None,
+            }),
+        }
+    }
+
+    /// 会话线程侧：写结果。**只写一次**（重复写不会覆盖，避免两个值两个真相）。
+    fn finish(&self, outcome: JobReply, elapsed_ms: u64) {
+        if let Ok(mut state) = self.inner.lock() {
+            if state.outcome.is_none() {
+                state.elapsed_ms = Some(elapsed_ms);
+                state.outcome = Some(outcome);
+            }
+        }
+    }
+
+    /// HTTP 侧：读一份快照。
+    fn read(&self, id: &str) -> serde_json::Value {
+        let Ok(state) = self.inner.lock() else {
+            return serde_json::json!({ "job_id": id, "state": "unreadable" });
+        };
+        match &state.outcome {
+            None => serde_json::json!({
+                "job_id": id,
+                "kind": state.kind,
+                "state": "running",
+            }),
+            Some(Ok(body)) => serde_json::json!({
+                "job_id": id,
+                "kind": state.kind,
+                "state": "done",
+                "elapsed_ms": state.elapsed_ms,
+                "report": body,
+            }),
+            Some(Err(failure)) => serde_json::json!({
+                "job_id": id,
+                "kind": state.kind,
+                "state": "failed",
+                "elapsed_ms": state.elapsed_ms,
+                "code": failure.code,
+                "detail": failure.message,
+            }),
+        }
+    }
+}
+
+/// 一条会话的作业表。上限 [`ASYNC_JOB_CAP`]：满了就丢**最旧的已结束**作业。
+#[derive(Debug, Default)]
+struct JobTable {
+    next: u64,
+    order: Vec<String>,
+    map: HashMap<String, Arc<AsyncSlot>>,
+}
+
+/// 每会话保留的异步作业条数。
+const ASYNC_JOB_CAP: usize = 32;
 
 /// 探活回执。
 struct PingReply {
@@ -348,6 +444,8 @@ pub struct SessionHandle {
     busy: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     last_active: Arc<Mutex<Instant>>,
+    /// 异步作业表（`run?async`）。
+    jobs: Arc<Mutex<JobTable>>,
     /// 线程把手。**不为 join 服务**（见 [`SessionHandle::join_within`]）：它的
     /// 唯一作用是让「线程还在跑」这件事有个句柄拴着，进程退出前不被回收。
     #[allow(dead_code)]
@@ -540,6 +638,74 @@ impl SessionHandle {
         )
     }
 
+    /// 提交一条异步 `run`（P1）：立刻回 `job_id`，结果写进槽后由
+    /// [`Self::job`] 读。
+    pub fn run_async(
+        &self,
+        steps: Option<u32>,
+        timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        if !self.is_alive() {
+            return Err(ApiError::session_poisoned(&self.id));
+        }
+        if self.busy.load(Ordering::Acquire) {
+            return Err(ApiError::session_busy(&self.id));
+        }
+        let slot = Arc::new(AsyncSlot::new("run"));
+        let job_id = {
+            let mut table = self
+                .jobs
+                .lock()
+                .map_err(|_| ApiError::session_poisoned(&self.id))?;
+            let id = format!("job-{:04}", table.next);
+            table.next += 1;
+            table.map.insert(id.clone(), Arc::clone(&slot));
+            table.order.push(id.clone());
+            // 环满：丢**最旧的已结束**作业；全是 running 就压最旧那条
+            // （它一定已经结束——单线程会话一次只跑一件）。
+            while table.order.len() > ASYNC_JOB_CAP {
+                let oldest = table.order.remove(0);
+                table.map.remove(&oldest);
+            }
+            id
+        };
+        self.tx
+            .send(Job::RunAsync {
+                steps,
+                timeout_ms,
+                slot,
+            })
+            .map_err(|_| ApiError::session_poisoned(&self.id))?;
+        Ok(serde_json::json!({
+            "job_id": job_id,
+            "kind": "run",
+            "state": "running",
+            "poll": format!("/api/sessions/{}/jobs/{}", self.id, job_id),
+        }))
+    }
+
+    /// 读一条异步作业（P1）。
+    pub fn job(&self, job_id: &str) -> Result<serde_json::Value, ApiError> {
+        let slot = {
+            let table = self
+                .jobs
+                .lock()
+                .map_err(|_| ApiError::session_poisoned(&self.id))?;
+            table.map.get(job_id).cloned()
+        };
+        match slot {
+            Some(slot) => Ok(slot.read(job_id)),
+            None => Err(ApiError::new(
+                axum::http::StatusCode::NOT_FOUND,
+                "E_SESS-01",
+                format!(
+                    "job {job_id} does not exist in session {} (jobs are capped at {ASYNC_JOB_CAP})",
+                    self.id
+                ),
+            )),
+        }
+    }
+
     /// 读事件流（P1）。
     pub fn events(&self, since: u64, limit: usize) -> Result<serde_json::Value, ApiError> {
         self.submit(
@@ -690,6 +856,7 @@ impl SessionRegistry {
             busy: Arc::clone(&busy),
             alive: Arc::clone(&alive),
             last_active: Arc::clone(&last_active),
+            jobs: Arc::new(Mutex::new(JobTable::default())),
             join: spawn_worker(
                 id.clone(),
                 rx,
@@ -869,6 +1036,23 @@ impl SessionRegistry {
     ) -> Result<serde_json::Value, ApiError> {
         let handle = self.handle_for(id)?;
         handle.export_trace(command)
+    }
+
+    /// 提交异步 `run`（P1）。
+    pub fn run_async(
+        &self,
+        id: &str,
+        steps: Option<u32>,
+        timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.run_async(steps, timeout_ms)
+    }
+
+    /// 读一条异步作业（P1）。
+    pub fn job(&self, id: &str, job_id: &str) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.job(job_id)
     }
 
     /// 采集会话快照（P1）。
@@ -1379,6 +1563,34 @@ fn spawn_worker(
                                 }),
                             });
                         }
+                        Job::RunAsync {
+                            steps,
+                            timeout_ms,
+                            slot,
+                        } => {
+                            let started = Instant::now();
+                            let pause_flag = Arc::clone(&ctrl);
+                            let report = host.run_until(steps, timeout_ms, &|| {
+                                pause_flag.load(Ordering::Acquire) & CTRL_PAUSE != 0
+                            });
+                            events_ring.push(&host.take_pending_events());
+                            let drained = host.drain_console();
+                            let run_base = console.total;
+                            console.push(&drained);
+                            let outcome = Ok(serde_json::json!({
+                                "stop_reason": stop_label(report.stop),
+                                "executed": report.executed,
+                                "pc": report.pc,
+                                "total_executed": host.total_executed(),
+                                "console": {
+                                    "base": run_base,
+                                    "bytes": drained,
+                                    "total": console.total,
+                                },
+                            }));
+                            let elapsed_ms = started.elapsed().as_millis() as u64;
+                            slot.finish(outcome, elapsed_ms);
+                        }
                         Job::Snapshot { meta, reply } => {
                             let payload = host.capture_session(meta);
                             let bytes = serde_json::to_vec(&payload)
@@ -1536,6 +1748,61 @@ mod tests {
             pc: Some(0),
             t_ps: 0,
         }
+    }
+
+    #[test]
+    fn async_run_reports_through_a_job_slot() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        // ⚠️ 必须先装一个**真的会跑**的镜像：空工程跑 1 条就 `end-of-execution`
+        //    ⇒ ⇒ 「恰好 n 条」这条断言会假红。这里用 4 字节自跳
+        //    （`jal x0, 0` = `6f 00 00 00`）。
+        registry
+            .load_image(
+                &id,
+                "spin.bin".to_string(),
+                ImageKind::RawHex,
+                vec![0x6f, 0, 0, 0],
+            )
+            .expect("装载自跳镜像");
+        let submitted = registry
+            .run_async(&id, Some(2), None)
+            .expect("空闲会话必须能提交异步 run");
+        let job_id = submitted
+            .get("job_id")
+            .and_then(|value| value.as_str())
+            .expect("回执必须带 job_id")
+            .to_string();
+
+        // 轮询到结束（上限给 2 s，正常是毫秒级）。
+        let mut state = String::new();
+        for _ in 0..100 {
+            let body = registry.job(&id, &job_id).expect("刚提交的作业必须查得到");
+            state = body
+                .get("state")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if state != "running" {
+                assert_eq!(state, "done", "作业只能 running → done/failed");
+                assert_eq!(
+                    body.get("report")
+                        .and_then(|report| report.get("executed"))
+                        .and_then(|value| value.as_u64()),
+                    Some(2),
+                    "StepN 语义是「恰好 n 条」"
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(state, "done", "异步作业 2 s 内必须跑完");
+
+        // 不存在的作业 ⇒ 404（`E_SESS-01`），不是空 200。
+        assert!(registry.job(&id, "job-9999").is_err());
     }
 
     #[test]

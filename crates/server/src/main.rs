@@ -66,7 +66,9 @@ usage: riscv_sim_server [options]
   POST   /api/boot                  {path, prefix?, steps?, timeout_ms?, write_to?} -> console bytes + X-Boot-*
   GET    /api/board/templates       builtin template metadata
   GET    /api/board/templates/<id>  full PlatformDescription (404 E_PLT-22 if unknown)
-  POST   /api/sessions/<id>/run     {steps|timeout_ms}? -> stop_reason / executed / pc / console
+  POST   /api/sessions/<id>/run     {steps|timeout_ms, async?}? -> stop_reason / executed / pc / console
+                                     async:true -> 202 {job_id, poll}
+  GET    /api/sessions/<id>/jobs/<job> -> {state: running|done|failed, report|code}
   POST   /api/sessions/<id>/step    {n} -> exactly n instructions
   GET    /api/sessions/<id>/console ?offset&limit -> raw bytes + X-Console-Base/Total
   GET    /api/sessions/<id>/state   -> pc / registers[32] / executed
