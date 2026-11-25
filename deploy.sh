@@ -2,7 +2,7 @@
 # 一键部署：构建镜像 → 起容器 → 等健康检查 → 打印可用地址。
 #
 #   ./deploy.sh                # 首次：生成 .env（含随机令牌）→ 构建 → 起 → 等健康
-#   ./deploy.sh rebuild        # 强制重建镜像（改了代码/前端之后）
+#   ./deploy.sh rebuild        # 全量重建镜像（--no-cache；依赖换了/缓存可疑时用）
 #   ./deploy.sh down           # 停并删容器（数据卷保留）
 #   ./deploy.sh logs           # 跟日志（Ctrl-C 退出）
 #   ./deploy.sh ps             # 看容器与健康状态
@@ -125,7 +125,18 @@ build_image() {
 
 cmd="${1:-up}"
 case "$cmd" in
-    up|rebuild)
+    up)
+        need_docker
+        ensure_env
+        # 带缓存构建：没改代码时这一步只是「检查完就说 up to date」（几秒）。
+        # 要真正全量重建（依赖换了、缓存可疑）用 `./deploy.sh rebuild`。
+        build_image
+        compose up -d --remove-orphans
+        container="${SIM_CONTAINER:-riscv-sim-server}"
+        wait_healthy "$container" || exit 1
+        print_url
+        ;;
+    rebuild)
         need_docker
         ensure_env
         build_image --no-cache
