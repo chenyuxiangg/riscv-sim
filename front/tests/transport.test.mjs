@@ -271,3 +271,146 @@ describe("M-07 传输适配器 · websocket 形态（P1 骨架）", () => {
         }
     });
 });
+
+describe("M-07 传输适配器 · server-mode 指到服务端事件流（R-13）", () => {
+    test("serverUrl + sessionId 推出 /api/sessions/{id}/events/ws", () => {
+        // ⚠️ 判别力：断言的是**端点形状**（R-13 验收的那一句），不是「有个 URL」。
+        assert.equal(
+            m07.serverEventsUrl("http://127.0.0.1:9876", "sess-000001"),
+            "ws://127.0.0.1:9876/api/sessions/sess-000001/events/ws",
+        );
+        assert.equal(
+            m07.serverEventsUrl("https://host/", "s 1"),
+            "wss://host/api/sessions/s%201/events/ws",
+        );
+        assert.equal(
+            m07.serverEventsUrl("ws://127.0.0.1:9876", "sess-1"),
+            "ws://127.0.0.1:9876/api/sessions/sess-1/events/ws",
+        );
+        assert.equal(
+            m07.serverEventsUrl("127.0.0.1:9876", "sess-1"),
+            "ws://127.0.0.1:9876/api/sessions/sess-1/events/ws",
+        );
+    });
+
+    test("只给 serverUrl（没有 sessionId）明确报 E_TRX-03", async () => {
+        const status = await m07.mountTransport({
+            mode: "websocket",
+            serverUrl: "http://127.0.0.1:9876",
+        });
+        assert.equal(status.connected, false);
+        assert.match(status.lastError, /E_TRX-03/);
+    });
+
+    test("挂载即绑定会话，并把 socket 指到该会话的事件流", async () => {
+        const original = globalThis.WebSocket;
+        globalThis.WebSocket = FakeWebSocket;
+        try {
+            const status = await m07.mountTransport({
+                mode: "websocket",
+                serverUrl: "http://127.0.0.1:9876",
+                sessionId: "sess-000001",
+                role: "embedded",
+            });
+            assert.equal(status.sessionId, "sess-000001");
+            assert.equal(status.role, "embedded");
+            assert.equal(status.label, "server websocket");
+            assert.equal(
+                FakeWebSocket.last.url,
+                "ws://127.0.0.1:9876/api/sessions/sess-000001/events/ws",
+            );
+        } finally {
+            globalThis.WebSocket = original;
+        }
+    });
+
+    test("M-07 的 resume 帧不再被当成未知类型丢掉，且丢帧会显式报出来", async () => {
+        // R-13：「允许丢帧，但不许静默断流」⇒ ⇒ 这条用例钉的是
+        // `decodeFrame` 放行 `resume`，且状态里出现一句人能看懂的话。
+        const original = globalThis.WebSocket;
+        globalThis.WebSocket = FakeWebSocket;
+        try {
+            await m07.mountTransport({ mode: "websocket", url: "ws://example.invalid" });
+            const socket = FakeWebSocket.last;
+            socket.onopen?.({});
+            const seen = [];
+            const off = m07.onMessage((frame) => seen.push(frame));
+            socket.onmessage?.({
+                data: JSON.stringify({
+                    type: "resume",
+                    seq: 42,
+                    sessionId: "sess-000001",
+                    role: null,
+                    reqId: null,
+                    payload: { lost: true, next: 42 },
+                }),
+            });
+            socket.onmessage?.({
+                data: JSON.stringify({
+                    type: "resume",
+                    seq: 99,
+                    sessionId: "sess-000001",
+                    role: null,
+                    reqId: null,
+                    payload: { topic: "sim.console", lost: true, from: 99, base: 1200 },
+                }),
+            });
+            off();
+            assert.equal(seen.length, 2, "resume 帧必须送到订阅者");
+            assert.equal(seen[0].type, "resume");
+            assert.equal(seen[0].seq, 42);
+            const lastResume = m07.getTransportStatus().lastResume ?? "";
+            assert.match(lastResume, /console 丢窗口（从 99 起/, "console 丢窗口没被显式报出来");
+            assert.doesNotMatch(
+                m07.getTransportStatus().lastError ?? "",
+                /E_PROTO-08/,
+                "resume 帧不应变成畸形帧错误",
+            );
+        } finally {
+            globalThis.WebSocket = original;
+        }
+    });
+
+    test("关闭通知（closed）也走 resume 帧并说明原因", async () => {
+        const original = globalThis.WebSocket;
+        globalThis.WebSocket = FakeWebSocket;
+        try {
+            await m07.mountTransport({ mode: "websocket", url: "ws://example.invalid" });
+            const socket = FakeWebSocket.last;
+            socket.onopen?.({});
+            socket.onmessage?.({
+                data: JSON.stringify({
+                    type: "resume",
+                    seq: 7,
+                    sessionId: "sess-000001",
+                    role: null,
+                    reqId: null,
+                    payload: { closed: true, reason: "session gone", status: 404 },
+                }),
+            });
+            assert.match(
+                m07.getTransportStatus().lastResume ?? "",
+                /通道关闭（session gone \/ HTTP 404）/,
+            );
+        } finally {
+            globalThis.WebSocket = original;
+        }
+    });
+
+    test("server-mode 不接受入向命令（命令走 REST，不静默丢）", async () => {
+        const original = globalThis.WebSocket;
+        globalThis.WebSocket = FakeWebSocket;
+        try {
+            await m07.mountTransport({ mode: "websocket", url: "ws://example.invalid" });
+            const socket = FakeWebSocket.last;
+            socket.onopen?.({});
+            assert.throws(
+                () => m07.sendCommand(commandMessage(1, Command.nop())),
+                /E_TRX-03/,
+            );
+            assert.equal(socket.sent.length, 0, "不该往只推的通道上发命令");
+        } finally {
+            globalThis.WebSocket = original;
+        }
+    });
+});

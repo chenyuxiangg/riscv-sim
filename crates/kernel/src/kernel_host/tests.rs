@@ -262,7 +262,7 @@ fn load_project_emits_an_image_loaded_receipt() {
                 platform_revision,
             } => Some((
                 name.clone(),
-                kind.clone(),
+                *kind,
                 *entry,
                 segments.clone(),
                 *elf_bits,

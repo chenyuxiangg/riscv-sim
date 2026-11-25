@@ -301,7 +301,7 @@ impl KernelHost {
             }
             loaded_events.push(EventPayload::ImageLoaded {
                 name: image.name.clone(),
-                kind: image.kind.clone(),
+                kind: image.kind,
                 entry: p.entry,
                 segments,
                 elf_bits: p.elf_isa.bits,

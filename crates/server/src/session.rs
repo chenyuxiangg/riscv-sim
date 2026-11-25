@@ -304,6 +304,10 @@ pub struct SessionInfo {
 }
 
 /// 命令面的作业。**一个作业 = 一次串行执行的活**。
+///
+/// ⚠️ 允许「变体大小不均」：作业是**一次性**的（造一个、跑一个、丢一个），
+///    队列深度只有 1 ⇒ ⇒ Box 化只会多一次分配，换不来任何内存收益。
+#[allow(clippy::large_enum_variant)]
 enum Job {
     /// 探活：证明「线程还在、状态还能取」。
     Ping {
@@ -725,18 +729,12 @@ impl SessionHandle {
 
     /// 跑到停点（R-05）。停因由内核的 `run_until` 给，这里只搬运。
     pub fn run(&self, spec: RunSpec) -> Result<serde_json::Value, ApiError> {
-        self.submit(
-            |reply| Job::Run { spec, reply },
-            crate::error::load_failure,
-        )
+        self.submit(|reply| Job::Run { spec, reply }, crate::error::load_failure)
     }
 
     /// 复位（R-14）：重新装载当前工程，回到装载起点。
     pub fn reset(&self) -> Result<serde_json::Value, ApiError> {
-        self.submit(
-            |reply| Job::Reset { reply },
-            crate::error::reset_failure,
-        )
+        self.submit(|reply| Job::Reset { reply }, crate::error::reset_failure)
     }
 
     /// 列出观察点（R-08）。
@@ -1308,11 +1306,10 @@ impl SessionRegistry {
                 .inner
                 .lock()
                 .map_err(|_| ApiError::session_poisoned("registry"))?;
-            let handle = inner
+            inner
                 .sessions
                 .remove(id)
-                .ok_or_else(|| ApiError::session_not_found(id))?;
-            handle
+                .ok_or_else(|| ApiError::session_not_found(id))?
         };
         let info = handle.info();
         handle.request_cancel();
@@ -1408,23 +1405,21 @@ fn execute_run(
         None => spec.steps,
     };
     let run_base = console.total;
-    let mut stop: Option<&'static str> = None;
     // 前缀可能**跨窗口**：保留上一窗口末尾 `len-1` 字节。
     let mut tail: Vec<u8> = Vec::new();
     // `until=breakpoint` 连续「不算数」的停点次数（兜底，见下）。
     let mut skips: u32 = 0;
 
-    loop {
+    // ⚠️ 停因**只**由 `break <label>` 交付（带值 break）⇒ ⇒ 不存在「先给个
+    //    初值再覆盖」那种永远不会被读到的赋值；也省掉末尾 `unwrap_or` 兜底
+    //    —— 兜底值一旦写错，只有这里一处会错。
+    let stop: &'static str = loop {
         let chunk = remaining.map(|n| n.min(RUN_PREFIX_CHUNK));
         // 前缀模式：每个窗口都重新算一次剩余墙钟（内核只认绝对上限）。
-        let left_ms = deadline.map(|until| {
-            until
-                .saturating_duration_since(Instant::now())
-                .as_millis() as u64
-        });
+        let left_ms = deadline
+            .map(|until| until.saturating_duration_since(Instant::now()).as_millis() as u64);
         if left_ms == Some(0) {
-            stop = Some("timeout");
-            break;
+            break "timeout";
         }
         let timeout_arg = if prefix.is_some() {
             left_ms
@@ -1464,20 +1459,17 @@ fn execute_run(
                 None => true,
             };
             if accepted {
-                stop = Some(label);
-                break;
+                break label;
             }
             // 兜底：连续跳过 64 次仍没等到目标停点 ⇒ 收工（避免死循环）。
             skips += 1;
             if skips >= 64 {
-                stop = Some(label);
-                break;
+                break label;
             }
             continue;
         }
         if hit_prefix {
-            stop = Some("prefix");
-            break;
+            break "prefix";
         }
         // ---- 预算 ----
         match remaining {
@@ -1488,21 +1480,23 @@ fn execute_run(
                 if left == 0 {
                     // 显式 `steps` 跑满 ⇒ `steps`（步进语义）；前缀模式的
                     // 缺省预算跑满 ⇒ `budget`（「没等到那一行」）。
-                    stop = Some(if spec.steps.is_some() { "steps" } else { "budget" });
-                    break;
+                    break if spec.steps.is_some() {
+                        "steps"
+                    } else {
+                        "budget"
+                    };
                 }
             }
             None => {
                 // 没有预算 ⇒ 只可能是单次 `until` 调用已经回来（继续不下去）。
-                stop = Some("budget");
-                break;
+                break "budget";
             }
         }
-    }
+    };
 
     let executed = host.total_executed().saturating_sub(before);
     let mut body = serde_json::json!({
-        "stop_reason": stop.unwrap_or("budget"),
+        "stop_reason": stop,
         "executed": executed,
         "pc": host.pc(),
         "t_ps": host.now_ps(),
@@ -1542,7 +1536,9 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// 停因的**线上拼写**（HTTP body 的 `stop_reason`）。
@@ -1805,6 +1801,10 @@ fn debug_reply(
 }
 
 /// 起会话线程：宿主从生到死只属于这里。
+///
+/// ⚠️ 参数多是**如实**的：七个句柄各自是一个共享点（控制位 / 忙位 / 活位 /
+///    心跳 / 配额…），塞进一个元组只是把「七处」变成「七处 + 一层壳」。
+#[allow(clippy::too_many_arguments)]
 fn spawn_worker(
     id: String,
     rx: Receiver<Job>,
@@ -2254,8 +2254,10 @@ mod tests {
         assert_eq!(reply.get("restored"), Some(&serde_json::Value::Bool(true)));
 
         // 畸形载荷 ⇒ **失败**（而不是静默接受）。
-        let mut broken = SessionSnapshotDto::default();
-        broken.schema_version = 999;
+        let broken = SessionSnapshotDto {
+            schema_version: 999,
+            ..SessionSnapshotDto::default()
+        };
         assert!(registry.restore(&id, Box::new(broken)).is_err());
     }
 

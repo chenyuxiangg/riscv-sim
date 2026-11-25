@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use riscv_sim_contract::model::{
-    Breakpoint, BreakpointKind, TraceFormat, TraceSource, WatchAccess, WriteSize, Watchpoint,
+    Breakpoint, BreakpointKind, TraceFormat, TraceSource, WatchAccess, Watchpoint, WriteSize,
 };
 use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::CommandPayload;
@@ -210,7 +210,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/console", get(read_console))
         .route("/api/sessions/{id}/events", get(read_events))
         .route("/api/sessions/{id}/events/ws", get(events_ws))
-        .route("/api/sessions/{id}/trace", get(read_trace).post(set_trace_enabled))
+        .route(
+            "/api/sessions/{id}/trace",
+            get(read_trace).post(set_trace_enabled),
+        )
         .route("/api/sessions/{id}/trace/enabled", put(set_trace_enabled))
         .route("/api/sessions/{id}/jobs/{job}", get(get_job))
         .route("/api/sessions/{id}/snapshot", post(take_snapshot))
@@ -266,6 +269,10 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "board": state.board,
         "session_ttl_s": state.session_ttl.as_secs(),
         "max_console": if state.max_console == 0 { DEFAULT_MAX_CONSOLE } else { state.max_console },
+        // ⚠️ **`/api/boot` 的墙钟硬上限**也报出来（R-12）：对拍脚本要在**发请求
+        //   之前**就知道「我这条 `timeout_ms` 会不会被 400 拒」，而不是撞一次
+        //   才算得出来。
+        "max_run_ms": state.max_run_ms,
         "bind": state.bind.to_string(),
     }))
 }
@@ -674,8 +681,12 @@ fn plan_event_limit(requested: Option<usize>) -> usize {
 
 /// `GET /api/sessions/{id}/events/ws` —— WS 事件流（P1 的主通道）。
 ///
-/// 协议：服务端只往**外**推，一帧一条 JSON
-/// `{since, next, lost, frames:[{seq, event}]}`；客户端拿 `next` 续读。
+/// 协议（R-13）：服务端**只往外推**，一帧一条 JSON —— 帧形就是 M-07 的
+/// `{type, seq, sessionId, role, reqId, payload}`（`payload` 直接是契约
+/// `Message` 的 `payload`，内核事件不做二次包装）⇒ ⇒ 前端
+/// `front/services/m07_transport.js` 的 server-mode 分支用它自己的
+/// `decodeFrame` 就能解。背压丢帧时**另发一条** `type:"resume"` 的帧，
+/// `payload` 里写明丢了多少、从哪个 seq 续 ⇒ ⇒ 不静默断流。
 async fn events_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -1098,10 +1109,7 @@ async fn read_memory_range(
 
 /// 内存视图（R-07）：`u32` ⇒ 小端 32 位字（不足 4 字节的尾巴丢掉）；
 /// `asc` ⇒ 可打印字符视图（不可打印按 `.`，与 `xxd -c` 的习惯一致）。
-fn memory_view(
-    bytes: &[u8],
-    format: &str,
-) -> Result<(Option<Vec<u32>>, Option<String>), ApiError> {
+fn memory_view(bytes: &[u8], format: &str) -> Result<(Option<Vec<u32>>, Option<String>), ApiError> {
     match format.to_ascii_lowercase().as_str() {
         "u32" | "word" => {
             let words: Vec<u32> = bytes
@@ -1542,8 +1550,14 @@ async fn boot(
     };
     let info = state
         .registry
-        .create(board, crate::session::BoardSource::Request)?;
+        .create(board.clone(), crate::session::BoardSource::Request)?;
     let id = info.id.clone();
+
+    // 板子的 **RAM 窗口**（`base:size`，十进制）⇒ ⇒ 随回执头一起给出（R-12：
+    // 对拍脚本要拿它去配参考侧的内存图）。取值走契约层的
+    // `ram_window()`（「取哪段 RAM」的唯一落点）⇒ ⇒ 这里不自己挑段，也不
+    // 自己算 `base + size`。
+    let ram_window = board.as_deref().and_then(boot_ram_window);
 
     let outcome = boot_once(
         &state,
@@ -1555,6 +1569,7 @@ async fn boot(
         steps,
         timeout_ms,
         request.write_to,
+        ram_window,
     )
     .await;
     // ⚠️ 无论如何都删：一把梭是**一次性**资源。
@@ -1574,6 +1589,7 @@ async fn boot_once(
     steps: u32,
     timeout_ms: u64,
     write_to: Option<String>,
+    ram_window: Option<(u32, u64)>,
 ) -> Result<Response, ApiError> {
     let loaded = state.registry.load_image(id, name, kind, bytes)?;
     let started = Instant::now();
@@ -1584,7 +1600,9 @@ async fn boot_once(
     let mut console_offset: u64 = 0;
     let mut console_total: u64 = 0;
     let mut window_lost = false;
-    let mut stop = String::from("budget");
+    // ⚠️ 不给初值：循环的**每一个** `break` 之前都先写它 ⇒ ⇒ 初值只会是
+    //    「永远不会被读到的那一个」（clippy 也按这个口径判）。
+    let stop: String;
 
     loop {
         if remaining == 0 {
@@ -1680,9 +1698,27 @@ async fn boot_once(
         .header("x-boot-console-total", console_total.to_string())
         .header("x-boot-console-lost", if window_lost { "1" } else { "0" })
         .header("x-boot-board-revision", board)
+        .header(
+            "x-boot-ram-window",
+            ram_window
+                .map(|(base, size)| format!("{base}:{size}"))
+                .unwrap_or_default(),
+        )
         .body(Body::from(collected))
         .map_err(|err| ApiError::bad_request(format!("cannot build boot response: {err}")))?;
     Ok(response)
+}
+
+/// 板子的 **RAM 窗口**（`base:size` 的数值形态）—— `POST /api/boot` 的
+/// `x-boot-ram-window` 头就是它。
+///
+/// ⚠️ **「取哪段 RAM」只有一个落点**：走契约层的 `PlatformDescription::ram_window()`
+/// （STAGE-19 裁决 I）⇒ ⇒ 服务端不自己挑段、也不自己算 `base + size` ⇒ ⇒
+/// 与内核实际映射的那一段**不可能**漂。
+fn boot_ram_window(board: &str) -> Option<(u32, u64)> {
+    platform::builtin_description(board)
+        .ok()
+        .and_then(|description| description.ram_window())
 }
 
 /// 把 console 字节写到 `write_to`（**必须**落在 `--allow-image-root` 内）。
@@ -1866,8 +1902,10 @@ mod tests {
 
     #[test]
     fn startup_default_board_reaches_the_session() {
-        let mut cfg = Config::default();
-        cfg.board = Some("minimal".to_string());
+        let cfg = Config {
+            board: Some("minimal".to_string()),
+            ..Config::default()
+        };
         let state = AppState::new(&cfg, "127.0.0.1:9876".parse().unwrap());
         assert_eq!(state.board.as_deref(), Some("minimal"));
 
@@ -2000,12 +2038,32 @@ mod tests {
         assert_eq!(plan_symbol_limit(Some(99_999)), 4_096);
     }
 
-    /// 前缀判据：字节级子串（与 `osz-boot --prefix` 同一口径）。
+    /// 前缀判据：字节级子串（与 `--prefix` 同一口径）。
     #[test]
     fn boot_contains_matches_a_byte_substring() {
         assert!(contains(b"abcOSZ$ def", b"OSZ$ "));
         assert!(!contains(b"abc", b"OSZ$ "));
         assert!(contains(b"abc", b""));
+    }
+
+    /// R-12：回执头 `x-boot-ram-window` = 板子的 RAM 窗口（`base:size`，十进制）。
+    ///
+    /// ⚠️ **取哪段 RAM** 走契约层的 <code>ram_window()</code>（STAGE-19 裁决 I 的
+    ///    唯一落点）⇒ ⇒ 这条用例钉的是「头里那串数就是它」——不是本服务端另算
+    ///    一遍（另算一遍就会与内核映射的那一段漂）。
+    #[test]
+    fn boot_ram_window_comes_from_the_board_description() {
+        let format_window = |board: &str| {
+            boot_ram_window(board)
+                .map(|(base, size)| format!("{base}:{size}"))
+                .unwrap_or_default()
+        };
+        // qemu-virt 的高段 RAM 是 0x8000_0000 + 128 MiB ⇒ 十进制两串数。
+        assert_eq!(format_window("qemu-virt"), "2147483648:134217728");
+        // default 的高段是 0x8000_0000 + 4 MiB。
+        assert_eq!(format_window("default"), "2147483648:4194304");
+        // 未知模板 ⇒ 空串（头照样在，脚本会判成「这块板没 RAM」）。
+        assert_eq!(format_window("nope"), "");
     }
 
     /// R-05 的 `prefix` / `until` 折算：合法取值通过，冲突与空前缀都拒。
@@ -2094,7 +2152,10 @@ mod tests {
     #[test]
     fn watchpoint_size_and_access_are_validated() {
         assert_eq!(parse_write_size(None).expect("缺省 word"), WriteSize::Word);
-        assert_eq!(parse_write_size(Some("half")).expect("half"), WriteSize::Half);
+        assert_eq!(
+            parse_write_size(Some("half")).expect("half"),
+            WriteSize::Half
+        );
         assert!(parse_write_size(Some("quad")).is_err());
         assert_eq!(
             parse_watch_access(None).expect("缺省 write"),

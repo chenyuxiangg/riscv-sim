@@ -20,8 +20,9 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.8（2026-11-25；R-01～R-15 全部收口：复位 / 前缀 / until / t_ps / 断点命中 / 观察点 / M-07 帧 / console 推送）· 需求基线 docs/requirements/"
-           "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim feature/m24-p0-6（契约 schema v19 / 内核 0.1.0）")
+VERSION = ("HTML 版 v1.9（2026-11-25；R-12 收成<b>一条</b>判定通道（<code>osz-boot</code> 改为 <code>/api/boot</code> 的客户端、离线 runner 移除）· R-13 的前端 server-mode 指到 "
+           "<code>…/events/ws</code> 即可解 M-07 帧）· 需求基线 docs/requirements/"
+           "Sim_Agent_API_Requirements_v0.1.html · 代码基线 main（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
     ("15", "条需求承接", "R-01～R-15 逐条有落点，无悬空条目"),
@@ -243,8 +244,8 @@ SECTIONS.append({
                 ["R-09", "错误契约（码 + detail）", "统一错误体；12 个码固定 HTTP 映射；不新造同义词", "§3.4", "P0"],
                 ["R-10", "确定性：同输入同输出", "预算按指令条数；量子常量随响应回显；不许随机初值、不许墙钟参与结果", "§5.2", "P0"],
                 ["R-11", "超时与熔断", "每窗口查 deadline；到点停下并回 504；会话仍可 <code>reset</code> 后再用", "§5.4", "P0"],
-                ["R-12", "CI / 脚本友好", "<code>POST /api/boot</code> 为<b>对外</b>判定口径；<code>osz-boot</code> 保留为<b>离线</b> runner（无 daemon 依赖），两条入口共用内核同一份 <code>run_window</code>", "§3.2 §5.2 附录 A", "P0"],
-                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧；背压显式报丢弃区间", "§3.6", "P1"],
+                ["R-12", "CI / 脚本友好", "<code>POST /api/boot</code> 是<b>唯一</b>判定口径；<code>osz-boot</code> 改为该端点的<b>客户端</b>（离线 runner 已移除，<code>--print-memory</code> 取回执头 <code>x-boot-ram-window</code>）", "§3.2 §5.2 附录 A", "P0"],
+                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点", "§3.6", "P1"],
                 ["R-14", "快照 / 复位 / trace", "复用 <code>Snapshot</code>/<code>Restore</code>/<code>SetTraceEnabled</code>/<code>ExportTrace</code>；复位的实现是重发 <code>LoadProject</code>", "§5.5", "P1"],
                 ["R-15", "安全边界", "默认只绑回环；镜像路径白名单 + 规范化；非回环需显式开关与 token", "§3.4 §5.4", "P0"],
             ],
@@ -359,7 +360,7 @@ SECTIONS.append({
             "head": ["方法 / 路径", "作用", "关键载荷 → 返回", "成功码", "优先级"],
             "rows": [
                 ["<code>GET /api/version</code>", "版本与 schema 协商", "→ <code>{kernel, schema_version, contract_version}</code>", "200", "P0"],
-                ["<code>GET /healthz</code>", "就绪探针", "→ <code>{ok, sessions, uptime_ms}</code>", "200/503", "P0"],
+                ["<code>GET /healthz</code>", "就绪探针", "→ <code>{status, sessions, session_quota, max_console, max_run_ms, board, bind, uptime_ms}</code>（<code>max_run_ms</code> 让脚本<b>先</b>知道自己的 <code>timeout_ms</code> 会不会被 400 拒）", "200/503", "P0"],
                 ["<code>POST /api/sessions</code>", "新建会话", "<code>{board?}</code> → <code>{session_id, board?, schema_version}</code>", "201", "P0"],
                 ["<code>GET /api/sessions</code>", "列出会话", "→ 数组（含 board / image / state / last_seen）", "200", "P0"],
                 ["<code>DELETE /api/sessions/{id}</code>", "回收", "→ 无体", "204", "P0"],
@@ -374,7 +375,7 @@ SECTIONS.append({
                 ["<code>GET …/state</code> · <code>…/memory</code> · <code>…/symbols</code> · <code>…/disasm</code>", "调试读取面", "<code>state</code> 含 <code>t_ps</code>；<code>memory</code> 可选 <code>format=u32|asc</code>（追加 <code>u32[]</code> / <code>asc</code> 视图，原始字节照旧）", "200", "P0"],
                 ["<code>/…/breakpoints</code>", "断点增删查", "<code>POST {addr|symbol}</code> · <code>DELETE /{id}</code> · <code>GET</code> + 启停开关", "200/201", "P0"],
                 ["<code>…/watchpoints</code>", "观察点增删查", "<code>POST {addr, size?, access?, id?}</code> · <code>DELETE /{id}</code> · <code>GET</code>（走宿主 <code>list_watchpoints</code>，内核无 List 命令）", "200/201", "P0"],
-                ["<code>POST /api/boot</code>", "一把梭（唯一判定口径）", "<code>{path, prefix, steps, timeout_ms, write_to?}</code> → console 原始字节 + meta 头", "200/504", "P0"],
+                ["<code>POST /api/boot</code>", "一把梭（唯一判定口径）", "<code>{path, board?, prefix, steps, timeout_ms, write_to?}</code> → console 原始字节 + 头 <code>X-Boot-Stop / -Executed / -Console-Total / -Console-Lost / -Board-Revision / -Ram-Window</code>", "200/504", "P0"],
                 ["<code>GET …/events</code>（升级 <code>…/events/ws</code>）", "事件流（已落地）", "WS 一条事件一帧 <b>M-07 帧</b> <code>{type:event, seq, sessionId, role, reqId, payload}</code>（payload = 契约 Message 的 payload）；丢窗口推 <code>{type:resume, payload:{lost,next}}</code>；会话没了推 close 说明再关", "101", "P1"],
                 ["<code>GET …/events?since&limit</code>", "事件流（REST 回看，已落地）", "→ <code>{frames, next, lost}</code>；<code>limit</code> 默认 256、硬上限 4096", "200", "P1"],
                 ["<code>GET …/trace?source&format&offset&limit</code>", "轨迹导出（已落地）", "<code>source=execution|waveform</code>、<code>format=csv|json|vcd</code> → <code>{chunk,next_offset,total,bytes,overflow_marked}</code>", "200/400", "P1"],
@@ -405,6 +406,19 @@ SECTIONS.append({
               "⑥ <b>事件帧</b>改用 M-07 帧（<code>{type:event, seq, sessionId, role, reqId, payload}</code>），<code>payload</code> 就是契约 <code>Message</code> 的 payload（不二次包装）；<b>不带</b> <code>crc</code> —— 需求口径只列五个字段，前端解码对「没有 crc」放行。"
               "⑦ <b>console 推送</b>：WS 每拍顺带推 console 增量（<code>payload = EventPayload::Console</code>，<code>seq</code> = console 绝对偏移）⇒ 与 <code>GET …/console?offset=</code> <b>同一份账</b>；窗口丢失推 <code>resume{lost, base}</code> 而不是静默少字节。"
               "⑧ <b>「忙」的一瞬假阳性</b>：会话线程先发回执再清忙位 ⇒ <code>submit</code> 加 <b>3 ms</b> 宽限；真在跑的命令照样 409（口径没放宽）—— <code>/api/boot</code> 连续调用踩到过这个缝。"),
+        ("note", "<b>R-12 / R-13 的收口口径（v1.9）：</b>① <b>判定通道只剩一条</b>：<code>tools/boot-osz.sh</code> 只走 <code>POST /api/boot</code>；"
+              "<code>crates/kernel/src/bin/osz-boot.rs</code> 已改成该端点的<b>客户端</b>（它自己不再 <code>KernelHost::new()</code>、不再按镜像地址<b>自动选档</b>）"
+              "⇒ ⇒ 板、停因、预算、墙钟<b>都</b>由服务端判，离线 runner 从此不存在；CLI 名字、stdout=原始字节、stderr=判决行、退出码（0/1/2/3）照旧。"
+              "② <b>参考侧的内存图不再由客户端挑段</b>：<code>/api/boot</code> 回执新增 <code>x-boot-ram-window</code>（<code>base:size</code>，十进制），"
+              "取值走契约层 <code>PlatformDescription::ram_window()</code>（「取哪段 RAM」的唯一落点）⇒ <code>osz-boot --print-memory</code> 只是把它打出来，"
+              "脚本照旧用它拼 Spike 的 <code>-m</code>（<code>SPIKE_MEM</code> 覆盖口仍在）。"
+              "③ <b><code>osz-boot</code> 的 <code>--max-console</code> 删除</b>：console 环上限是服务端启动参数，客户端再设一个是第二个真相；"
+              "墙钟默认改成 5 000 ms（与服务端缺省 <code>--max-run-ms</code> 对齐），脚本起手先读 <code>/healthz.max_run_ms</code>，超了<b>先说清楚</b>而不是等 400。"
+              "④ <b>前端 server-mode 接通</b>：<code>mountTransport({mode:'websocket', serverUrl, sessionId})</code> 由 <code>serverEventsUrl()</code> 推出 "
+              "<code>ws://…/api/sessions/{id}/events/ws</code>；帧解包仍是 <code>front/lib/frame.js</code> 那一个 <code>decodeFrame</code> ⇒ ⇒ "
+              "<code>decodeFrame</code> 放行 <code>FRAME_TYPE.Resume</code>（此前只放行 command/event ⇒ ⇒ 服务端的 <code>resume</code> 会被当畸形帧<b>丢掉</b>，正是 R-13 禁止的「静默断流」）；"
+              "<code>resume</code> 帧进状态 <code>lastResume</code>（丢帧、console 丢窗口、通道关闭三种都说成人话）并照常交给订阅者。"
+              "⑤ <b>server-mode 是事件通道、不是命令通道</b>：该 socket 只往外推 ⇒ <code>sendCommand</code> 在 server-mode 直接报 <code>E_TRX-03</code>（命令走 REST），不做「发出去没人看」的静默失败。"),
         ("note", "<b>读接口的语义要点：</b><code>state</code> 返回 <code>{pc, gpr[32], t_ps}</code> —— <b>pc 单独一个字段</b>，不在 <code>gpr</code> 里，且 <code>gpr[0]</code> 恒 0（需求里踩过的坑就在这）；"
               "<code>memory</code> 的 <code>len ≤ 4096</code>（契约 <code>DUMP_MAX_BYTES</code>），越界原样拒；<code>format=u32|asc</code> 只<b>追加</b>视图（原始字节仍在 <code>bytes</code> 里，两个消费者不必二选一）；<code>symbols</code> 精确命中与候选并存（候选上限 16）；"
               "<code>disasm</code> 允许短于 <code>count</code>（未映射即止，与内核一致）。"),
@@ -618,9 +632,10 @@ fn run_window(host, spec, deadline, ctrl) -> StopReport {
         ("note", "<b>量子对齐与 overshoot：</b><code>prefix</code> 与 <code>timeout</code> 只能停在窗口边界，因此实际执行条数可能比「理论停点」多出至多一个量子（10 000 条）。"
               "本设计把这个上界写进 <code>meta.overshoot_max</code> 并回显量子常量 —— 使「同一个镜像、同一组参数」在两次运行之间<b>逐字节可比</b>，"
               "也让 AC-01 的 <code>executed</code> 有一个说得清的可复现区间，而不是一个靠运气的数。"),
-        ("note", "<b>两个入口、一份判定：</b>停止条件（预算 / 前缀 / 墙钟 / 停因次序）只实现一次 —— 就是住内核的 <code>run_window</code>。"
-              "<code>osz-boot</code> 保留为<b>离线</b>入口（不起 daemon、不占端口、不需要 token），服务端 <code>run</code> 与 <code>/api/boot</code> 走同一函数，"
-              "差别只在传输形态。判据是 T-14：同 ELF、同参数，两侧 <code>stop_reason</code> 与 console 字节必须一致；次序表被改歪时，表 19 的 <code>judge_stop</code> 先红。"),
+        ("note", "<b>一条通道、一份判定（v1.9 收口）：</b>停止条件（预算 / 前缀 / 墙钟 / 停因次序）只实现一次 —— 就是住内核的 <code>run_window</code>，"
+              "而<b>唯一</b>的入口是 <code>POST /api/boot</code>（<code>tools/boot-osz.sh</code> 的候选侧与 <code>osz-boot</code> 都只是它的客户端）。"
+              "早先的「<code>osz-boot</code> 离线 runner」已删除：它自己挑板、自己算 RAM 窗口，等于<b>第二套</b>判定 ⇒ 两份实现一定会漂，而两边 debug 都「看着对」。"
+              "现在的对拍口径是「同一个 ELF、同一条 <code>POST /api/boot</code>」：<code>x-boot-stop</code> 就是判决，console 回体就是字节流；参考侧内存图来自 <code>x-boot-ram-window</code>。"),
         ("h3", "sec5-3", "5.3 console 的一致性"),
         ("p", "console 是<b>字节</b>不是字符串：ANSI 序列、<code>\\r</code>、半截 UTF-8 一律不加工。ring 用绝对 offset，只追加、不改写；裁剪只从尾部发生，并在丢弃表里留证据。"),
         ("code", """// append：只追加，裁剪时记账（不静默丢）
@@ -765,7 +780,7 @@ SECTIONS.append({
                 ["T-11", "<code>POST …/run</code> 与正在跑的 run 重叠", "<code>409 + E_SESS-02</code>；不乱序、不交错"],
                 ["T-12", "<code>pause</code> 打在长 run 上", "≤ 1 个量子内停；<code>stop_reason=paused</code>"],
                 ["T-13", "console 溢出后按旧 offset 取", "<code>409 + E_SESS-04</code>，回 base 与丢弃区间"],
-                ["T-14", "同一 ELF 双入口对拍（<code>osz-boot</code> × <code>/api/boot</code>）", "<code>stop_reason</code> 与 console 字节一致；不进默认门禁（需仓外 ELF）"],
+                ["T-14", "同一 ELF 单通道对拍（<code>tools/boot-osz.sh</code> → <code>osz-boot</code> → <code>/api/boot</code>）", "候选侧 console 与 Spike 逐字节一致；<code>--print-memory</code> 那一行来自回执头（不是客户端自己挑段）；不进默认门禁（需仓外 ELF + 本机 Spike + 起着的服务）"],
             ],
         }),
         ("h3", "sec7-2", "7.2 单元测试与可维护性"),
@@ -833,14 +848,16 @@ SECTIONS.append({
                 ["P0-3", "配板 + 装载（octet-stream / path / 模板）", "osy.elf 装载 entry=0x80000000", "P0-2 + 模板端点"],
                 ["P0-4", "run / step / pause / reset + console ring（已落地：内核 <code>run_until</code> 是停因唯一实现，服务端只做请求折算与 504 包装）", "AC-01 / AC-05 / AC-07 / AC-09", "P0-3"],
                 ["P0-5", "状态 / 内存 / 符号 / 反汇编 / 断点（已落地：读面全走内核既有命令，符号类断点先 <code>ResolveSymbol</code> 再注册）", "AC-04 / AC-06", "P0-4"],
-                ["P0-6", "<code>/api/boot</code>（临时会话，跑完即删；回原始 console 字节 + <code>X-Boot-*</code> 头）；<code>osz-boot</code> 改走 <code>run_until</code> 并按优先级自动选板（CLI 与退出码不变）（已落地：<code>E_PLT-22</code> 断链已修）", "一条 curl 完成 osz 判定，与 Spike MATCH；<code>--print-memory</code> 链路保持", "P0-5"],
+                ["P0-6", "<code>/api/boot</code>（临时会话，跑完即删；回原始 console 字节 + <code>X-Boot-*</code> 头）；<code>osz-boot</code> <b>改为该端点的客户端</b>（自带 <code>--server</code>，CLI 与退出码不变；离线 runner 已在 v1.9 移除）", "一条 curl 完成 osz 判定，与 Spike MATCH；<code>--print-memory</code> 取自 <code>x-boot-ram-window</code>", "P0-5"],
                 ["P1-2", "需求收口：复位 / run 的 <code>prefix</code>+<code>until</code>+<code>t_ps</code>+断点命中 / <code>memory</code> 视图 / 观察点 / M-07 帧 / console 推送 / <code>POST …/trace</code>（<b>已落地</b>，46 项服务端测试通过，HTTP 冒烟全绿）", "R-05 / R-07 / R-08 / R-06 推送面 / R-13 帧形 / R-14 复位逐条兑现", "P1"],
+                ["P1-3", "R-12 收成单通道（<code>osz-boot</code> 变客户端、<code>x-boot-ram-window</code>、<code>/healthz.max_run_ms</code>）+ R-13 前端 server-mode（URL 推导 / <code>resume</code> 帧 / 只推通道）（<b>已落地</b>，前端 20 项 transport 用例通过，真实端点冒烟收到 M-07 帧）", "R-12 / R-13 的验收两句逐条兑现", "P1"],
                 ["P1", "事件流（WS + REST）、trace 导出 / 开关、快照采集 / 还原（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；异步 run（作业表 + 结果槽）<b>已落地</b>", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
             ],
         }),
         ("h3", "sec9-2", "9.2 五项决策与落地取舍"),
         ("p", "需求文档 §08 的五项会改变实现形态，五项<b>已全部拍板</b>；实施期又追加一项（D6 装载回执，见表 22）。其中 D1–D4 按本设计的建议通过；"
-              "D5 改为保留 <code>osz-boot</code> 作为<b>离线</b>入口，因此额外的落地约束是「停因判定必须共处一份实现」，见 §5.2 的末尾说明。"),
+              "D5 原先把 <code>osz-boot</code> 留作<b>离线</code> runner，<b>v1.9 按 R-12 的「仓内只保留一份判定口径」改为把它变成 <code>/api/boot</code> 的客户端</b>"
+              "（离线执行路径删除）⇒ 代价是「对拍要先起服务」，收益是板的选择与停因<b>不可能</b>再有第二份实现。"),
         ("caption", "表 22 · 决策点与裁决"),
         ("table", {
             "widths": ["6%", "16%", "34%", "12%", "32%"],
@@ -850,7 +867,7 @@ SECTIONS.append({
                 ["D2", "镜像投递", "① 只路径；② 只上传；③ 两者", "③（已拍板）", "Agent 传字节、CI 传路径都合理；路径必须白名单"],
                 ["D3", "<code>run</code> 语义", "① 同步到停点；② 立即返回 + 回调", "①（已拍板；② 留 P1）", "CI 的「一次调用拿到结果」不可退让"],
                 ["D4", "默认板", "① 不提供；② 启动参数显式配", "②（已拍板）", "显式、可追溯，且不绕过「无板不装载」"],
-                ["D5", "<code>/api/boot</code> 与 CLI", "① CLI 保留为<b>离线</b> runner（不起 daemon）；② CLI 变薄客户端（依赖 daemon）", "①（已拍板）", "离线验证不能依赖常驻进程；代价是停因判定必须共用内核<b>一处</b>，否则两套实现会漂，而两边 debug 都「看着对」"],
+                ["D5", "<code>/api/boot</code> 与 CLI", "① CLI 保留为<b>离线</b> runner（不起 daemon）；② CLI 变薄客户端（依赖 daemon）", "②（v1.9 改判）", "R-12 要求「仓内只保留一份判定口径」⇒ 离线 runner 自己挑板、自己算 RAM 窗口 = 第二套判定；改成客户端后 CLI 只剩「拼请求 / 吐字节 / 译停因」，判定全在服务端"],
                 ["D6", "装载回执", "① 内核发 <code>ImageLoaded</code>（契约升 19）；② 宿主侧再解析一遍合成回执", "①（已拍板）", "解析只在装载路径做<b>一次</b>：回执是「真的装了什么」的证据；宿主侧再解析=两个来源，且多一次 ELF 解析开销"],
             ],
         }),
@@ -882,8 +899,9 @@ curl -s -X POST http://127.0.0.1:9876/api/boot \\
      -d '{"path":"output/image/osz.elf","prefix":"OSZ$ ","timeout_ms":30000}' \\
      -o console.bin -D meta.txt   # meta 全部在 X-Sim-Meta / X-Stop-Reason 头里"""),
         ("p", "落成之后，客户端侧的承诺照需求执行：<code>tools/sim/run_on_platform.mjs</code>（import wasm 的过渡方案）退役，"
-              "文档里的运行验证命令统一改成 API 形态；<code>osz-boot</code> 保留同名 CLI、退出码与 <code>--print-memory</code> 语义，"
-              "作为<b>离线</b>入口（不要求先起 server），内部换用与 M-24 相同的 <code>run_window</code> ⇒ ⇒ 两个入口、一份判定。"),
+              "文档里的运行验证命令统一改成 API 形态；<code>crates/kernel/src/bin/osz-boot.rs</code> 保留同名 CLI 与退出码，"
+              "但它的实现已经是 <code>POST /api/boot</code> 的<b>客户端</b>（<code>--server</code> 缺省 <code>http://127.0.0.1:9876</code>）"
+              "⇒ ⇒ <b>一条通道、一份判定</b>；离线执行路径、按镜像自动选档、客户端自算 RAM 窗口全部删除。"),
     ],
 })
 

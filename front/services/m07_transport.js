@@ -4,9 +4,10 @@
 //   - browser-mode : postMessage to a Web Worker hosting the kernel
 //                    (`front/kernel-worker.js` — the WASM kernel from
 //                    `crates/kernel`, stage 1).
-//   - server-mode  : WebSocket to `riscv_sim_server` (P1). Skeleton only:
-//                    without a URL it stays in an explicit "not connected"
-//                    state.
+//   - server-mode  : WebSocket to `riscv_sim_server`'s event stream
+//                    (`GET /api/sessions/{id}/events/ws`). 服务端**只往外推**
+//                    M-07 帧（R-13）⇒ ⇒ 这条通道是**事件通道**；命令走 REST。
+//                    给 `url`，或给 `serverUrl + sessionId` 让它自己推地址。
 //
 // Both carry the **frozen** `riscv_sim_contract::protocol::Message`
 // envelope inside an M-07 transport frame (see `front/lib/frame.js` and
@@ -34,6 +35,8 @@ import { FRONT_ERROR_CODES } from "../lib/message.js";
  * @property {boolean} connected                    — is the channel open now
  * @property {"connecting"|"ready"|"closed"|"reconnecting"} connState
  * @property {string|null} lastError                — last error, if any
+ * @property {string|null} lastResume                — last back-pressure notice
+ *                                                     from the server (R-13)
  * @property {string|null} sessionId                — bound session (M-04)
  * @property {string|null} role                      — bound workbench role
  * @property {number} seq                           — last transmitted sequence
@@ -46,6 +49,7 @@ let status = {
     connected: false,
     connState: "closed",
     lastError: null,
+    lastResume: null,
     sessionId: null,
     role: null,
     label: "none",
@@ -255,22 +259,87 @@ function createWorkerAdapter(options) {
 }
 
 /**
- * Server-mode adapter: WebSocket (P1). Without a URL the transport stays
- * in an explicit "not connected" state — it never pretends to be up.
+ * The server's event-stream URL for a session (R-13).
  *
- * @param {{url?: string|null}} options
+ * `riscv_sim_server` 的端点形状是 `GET /api/sessions/{id}/events/ws`，
+ * 它推的就是 M-07 帧 ⇒ ⇒ server-mode 只要把地址指到这里就能解，不需要
+ * 第二套解码器。
+ *
+ * 接受三种入参：已经完整的 `ws(s)://…`、`http(s)://host:port`（自动换成
+ * `ws(s)`）、裸 `host:port`（补 `http://` 再换）。
+ *
+ * @param {string} serverUrl
+ * @param {string} sessionId
+ * @returns {string}
+ */
+export function serverEventsUrl(serverUrl, sessionId) {
+    if (!sessionId) {
+        throw transportError(FRONT_ERROR_CODES["E_TRX-03"], "server-mode 需要 sessionId");
+    }
+    const base = String(serverUrl ?? "").trim().replace(/\/+$/, "");
+    if (!base) {
+        throw transportError(FRONT_ERROR_CODES["E_TRX-03"], "server-mode 需要 serverUrl");
+    }
+    let ws;
+    if (/^wss?:\/\//i.test(base)) ws = base;
+    else if (/^https?:\/\//i.test(base)) ws = base.replace(/^http/i, "ws");
+    else ws = `ws://${base}`;
+    return `${ws}/api/sessions/${encodeURIComponent(sessionId)}/events/ws`;
+}
+
+/**
+ * 把服务端 `resume` 帧的 `payload` 说成**人话**（R-13：丢帧必须显式报
+ * 「丢了多少、从哪个 seq 起」）。
+ *
+ * 服务端目前有三种 `resume` 用途，`payload` 的形状各不相同：
+ *   - 事件环丢窗口 `{lost:true, next}`；
+ *   - console 丢窗口 `{topic:"sim.console", lost:true, from, base}`；
+ *   - 会话没了 / 关闭 `{closed:true, reason, status}`。
+ *
+ * @param {object} payload
+ * @returns {string}
+ */
+export function summarizeResume(payload) {
+    const p = /** @type {any} */ (payload ?? {});
+    if (p.closed) {
+        return `通道关闭（${p.reason ?? "unknown"}${p.status ? ` / HTTP ${p.status}` : ""}）`;
+    }
+    if (p.lost) {
+        if (p.topic === "sim.console") {
+            return `console 丢窗口（从 ${p.from} 起，服务端能给的起始 offset = ${p.base}）`;
+        }
+        return `事件丢帧（从 seq ${p.next} 起续读）`;
+    }
+    return "resume（无丢帧信息）";
+}
+
+/**
+ * Server-mode adapter: WebSocket to `riscv_sim_server`'s event stream (R-13).
+ *
+ * ⚠️ 这条通道**只往外推**（服务端不接受入向命令）：命令走 REST
+ * （`POST …/run` / `…/step` / `…/reset` …）⇒ ⇒ 这里 `send` 直接报错，
+ * 不做「发出去没人看」的静默失败。
+ *
+ * @param {{url?: string|null, serverUrl?: string|null, sessionId?: string|null}} options
  * @returns {{ok: true, adapter: object, ready: boolean}|{ok: false, error: string}}
  */
 function createWebSocketAdapter(options) {
-    const url = options.url ?? null;
+    let url = options.url ?? null;
+    if (!url && options.serverUrl && options.sessionId) {
+        try {
+            url = serverEventsUrl(options.serverUrl, options.sessionId);
+        } catch (err) {
+            return { ok: false, error: err?.message ?? String(err) };
+        }
+    }
     if (!url) {
         return {
             ok: false,
-            error: `${FRONT_ERROR_CODES["E_TRX-03"]} 未配置 WebSocket URL（服务端形态为 P1，当前仅保留接口骨架）`,
+            error: `${FRONT_ERROR_CODES["E_TRX-03"]} 未配置 WebSocket URL（给 url，或给 serverUrl + sessionId 由它推出 /api/sessions/{id}/events/ws）`,
         };
     }
     if (typeof WebSocket === "undefined") {
-        return { ok: false, error: `${FRONT_ERROR_CODES["E_TRX-03"]} 当前环境没有 WebSocket（服务端形态为 P1）` };
+        return { ok: false, error: `${FRONT_ERROR_CODES["E_TRX-03"]} 当前环境没有 WebSocket` };
     }
     let socket;
     try {
@@ -299,6 +368,11 @@ function createWebSocketAdapter(options) {
             setStatus({ lastError: err?.message ?? String(err) });
             return;
         }
+        // ⚠️ `resume` 帧**先入状态**再交给订阅者：状态栏能立刻说「丢了什么」，
+        //    订阅者照样能拿到原始帧（谁想自己处理都行）。
+        if (frame.type === FRAME_TYPE.Resume) {
+            setStatus({ lastResume: summarizeResume(frame.payload) });
+        }
         emitFrame(frame);
     };
     return {
@@ -307,8 +381,12 @@ function createWebSocketAdapter(options) {
         // drives the status from its `onopen` / `onclose` callbacks.
         ready: false,
         adapter: {
-            send(frame) {
-                socket.send(JSON.stringify(frame));
+            pushOnly: true,
+            send() {
+                throw transportError(
+                    FRONT_ERROR_CODES["E_TRX-03"],
+                    "server 事件通道只往外推；命令走 REST（POST …/run、…/step 等）",
+                );
             },
             close() {
                 try {
@@ -333,7 +411,7 @@ function createWebSocketAdapter(options) {
  * explicit "not connected" status, so the workbench still comes up and
  * the status bar can explain itself.
  *
- * @param {{mode?: "worker"|"websocket", workerUrl?: string, url?: string|null, createWorker?: (url: string) => any}} [options]
+ * @param {{mode?: "worker"|"websocket", workerUrl?: string, url?: string|null, serverUrl?: string|null, sessionId?: string|null, role?: string|null, createWorker?: (url: string) => any}} [options]
  * @returns {Promise<TransportStatus>}
  */
 export async function mountTransport(options = {}) {
@@ -347,19 +425,26 @@ export async function mountTransport(options = {}) {
         adapter = null;
     }
     const mode = options.mode === "websocket" ? "websocket" : "worker";
-    const label = mode === "websocket" ? "server websocket (P1)" : "wasm worker";
+    const label = mode === "websocket" ? "server websocket" : "wasm worker";
     setStatus({
         mode,
         connected: false,
         connState: "connecting",
         lastError: null,
-        sessionId: null,
-        role: null,
+        lastResume: null,
+        // ⚠️ server-mode 的会话在**挂载时就绑定**（R-13：端点地址要靠它）⇒ ⇒
+        //    状态里的 `sessionId` 必须与请求里的那一条是同一个。
+        sessionId: mode === "websocket" ? options.sessionId ?? null : null,
+        role: mode === "websocket" ? options.role ?? null : null,
         label,
     });
 
     const built = mode === "websocket"
-        ? createWebSocketAdapter({ url: options.url ?? null })
+        ? createWebSocketAdapter({
+            url: options.url ?? null,
+            serverUrl: options.serverUrl ?? null,
+            sessionId: options.sessionId ?? null,
+        })
         : createWorkerAdapter({
             workerUrl: options.workerUrl ?? "./kernel-worker.js",
             createWorker: options.createWorker,

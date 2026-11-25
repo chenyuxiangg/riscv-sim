@@ -436,15 +436,22 @@ VERDICT <PASS|FAIL <n>|NOVERDICT|ERROR>
 
 最后一行永远是 `VERDICT` 行；**进程退出码与判决一致**（`0` = PASS / `1` = FAIL / `2` = NOVERDICT / `3` = ERROR）。
 
-### 5.2 `osz-boot` —— 跑真实 RTOS，抓 UART 字节流
+### 5.2 `osz-boot` —— `/api/boot` 的命令行客户端
 
 ```bash
-cargo run --bin osz-boot -- <path/to.elf> [--out <path>] [--prefix <text>] \
-                            [--budget <n>] [--timeout-ms <n>] [--max-console <n>]
+# 先起服务（需要对拍镜像所在目录可读）
+cargo run -p riscv_sim_server -- --port 9876 --allow-image-root /tmp/osz-artifacts --max-run-ms 60000
+
+cargo run --bin osz-boot -- <path/to.elf> [--server <url>] [--board <id>] [--out <path>] \
+                            [--prefix <text>] [--budget <n>] [--timeout-ms <n>] [--print-memory]
 ```
 
 - **stdout** = console 的**原始字节**（可直接 `cmp`）；**stderr** = 判决行；
-- `--prefix` 让它「看到这段文字就停」（真实 RTOS 是死循环，没有墙钟兜底会永远跑下去）。
+- `--prefix` 让它「看到这段文字就停」（真实 RTOS 是死循环，没有墙钟兜底会永远跑下去）；
+- `--server` 默认 `http://127.0.0.1:9876`；`--board` 默认 `qemu-virt`（`default` 板上没有 UART）；
+- `--print-memory` 打印**服务端那块板的** RAM 窗口（回执头 `x-boot-ram-window`）⇒ 参考侧的内存图不再由客户端挑段算出来；
+- ⚠️ **它不再在本进程里跑内核**：板、停因、预算、墙钟都由 `POST /api/boot` 判（R-12：仓内只有一份判定口径）；`--max-console` 因此删除（上限是服务端的启动参数）。
+- ⚠️ `--timeout-ms` 不能超过服务端的 `--max-run-ms`（超了服务端 400）；`/healthz` 会把它报出来。
 
 ### 5.3 与 Spike 对拍
 
@@ -458,11 +465,12 @@ tools/golden-run.sh --check-mem     # 额外打印两侧 RAM 窗口并断言逐�
 判决口径：**两侧的判决必须一致**（`FAIL` 还要一致到**测试号**）。
 
 ```bash
-tools/boot-osz.sh --elf <path/to/osz.elf>   # 真实 RTOS 与 Spike 逐字节比 UART
+tools/boot-osz.sh --elf <path/to/osz.elf> [--server http://127.0.0.1:9876] [--board qemu-virt]
 ```
 
 判决口径：**两侧 UART TX 字节流逐字节相同** ⇒ 打印 `VERDICT MATCH / MISMATCH / NO-VERDICT`。
 
+⚠️ 候选侧**只走一条通道**：`POST /api/boot`（`osz-boot` 是它的客户端）⇒ 跑之前要有一个起着的服务，并用 `--allow-image-root` 覆盖 ELF 所在目录、用 `--max-run-ms` 覆盖 `--timeout-ms`。
 ⚠️ 这两个脚本**不进默认门禁**（需要仓外的镜像与本机的 Spike）。
 ⚠️ osz 的产物**在仓外**（默认读 `$OSZ_ELF`，其次 `/tmp/osz-artifacts/osz.elf`）。
 

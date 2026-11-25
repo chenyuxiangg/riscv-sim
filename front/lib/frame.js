@@ -180,7 +180,14 @@ export function decodeFrame(raw) {
         throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], "传输帧不是对象");
     }
     const f = /** @type {any} */ (raw);
-    if (f.type !== FRAME_TYPE.Command && f.type !== FRAME_TYPE.Event) {
+    // ⚠️ **`resume` 也是合法帧**（M-07 `resumeBySeq` / R-13 的背压与关闭通知）：
+    // 老实现的判据只放行 `command` / `event` ⇒ ⇒ 服务端的 `resume` 帧会被当成
+    // 「未知帧类型」丢掉 ⇒ ⇒ 丢帧这件事就**没人报**了（R-13 明确禁止静默断流）。
+    if (
+        f.type !== FRAME_TYPE.Command
+        && f.type !== FRAME_TYPE.Event
+        && f.type !== FRAME_TYPE.Resume
+    ) {
         throw frameError(RUST_ERROR_CODE_REFS["E_PROTO-08"], `未知帧类型：${String(f.type)}`);
     }
     if (typeof f.seq !== "number" || !Number.isFinite(f.seq)) {
