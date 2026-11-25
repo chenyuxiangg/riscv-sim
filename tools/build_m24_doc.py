@@ -20,8 +20,8 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.9（2026-11-25；R-12 收成<b>一条</b>判定通道（<code>osz-boot</code> 改为 <code>/api/boot</code> 的客户端、离线 runner 移除）· R-13 的前端 server-mode 指到 "
-           "<code>…/events/ws</code> 即可解 M-07 帧）· 需求基线 docs/requirements/"
+VERSION = ("HTML 版 v1.10（2026-11-25；R-13 接到<b>页面</b>：前端 <code>?server=</code> 入口 + 服务端 CORS 闸门 · 事件帧 <code>payload</code> 订正为"
+           "<b>完整</b>契约 <code>Message</code> 信封（此前只发内层 <code>{&quot;Event&quot;:…}</code>，前端一帧也解不开））· 需求基线 docs/requirements/"
            "Sim_Agent_API_Requirements_v0.1.html · 代码基线 main（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
@@ -245,7 +245,7 @@ SECTIONS.append({
                 ["R-10", "确定性：同输入同输出", "预算按指令条数；量子常量随响应回显；不许随机初值、不许墙钟参与结果", "§5.2", "P0"],
                 ["R-11", "超时与熔断", "每窗口查 deadline；到点停下并回 504；会话仍可 <code>reset</code> 后再用", "§5.4", "P0"],
                 ["R-12", "CI / 脚本友好", "<code>POST /api/boot</code> 是<b>唯一</b>判定口径；<code>osz-boot</code> 改为该端点的<b>客户端</b>（离线 runner 已移除，<code>--print-memory</code> 取回执头 <code>x-boot-ram-window</code>）", "§3.2 §5.2 附录 A", "P0"],
-                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点", "§3.6", "P1"],
+                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧，<code>payload</code> = <b>完整</b>契约 <code>Message</code> 信封；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点；<b>v1.10 起页面地址带 <code>?server=</code> 就能直接用</b>（REST 建/验会话 + 状态水合 + 只读事件流）", "§3.6", "P1"],
                 ["R-14", "快照 / 复位 / trace", "复用 <code>Snapshot</code>/<code>Restore</code>/<code>SetTraceEnabled</code>/<code>ExportTrace</code>；复位的实现是重发 <code>LoadProject</code>", "§5.5", "P1"],
                 ["R-15", "安全边界", "默认只绑回环；镜像路径白名单 + 规范化；非回环需显式开关与 token", "§3.4 §5.4", "P0"],
             ],
@@ -403,7 +403,7 @@ SECTIONS.append({
               "③ <b>until</b>：<code>breakpoint</code> / <code>halt</code>；前者把观察点 / 单步这类「停一下不该收工」的停点跳过，连续跳过 64 次兜底收工。"
               "④ <b>断点命中</b>：内核 <code>Halted</code> 只带 pc ⇒ 服务端用 <code>ListBreakpoints</code> 的权威表按 pc 找回 <code>{id, addr, kind}</code>（不猜、不另造停因）。"
               "⑤ <b>观察点</b>：契约<b>没有</b> List 命令（Set / Clear 的回执只有 Tick）⇒ 宿主新增只读访问器 <code>list_watchpoints</code>；<code>POST</code> 缺省 id = 现有最大 + 1，显式给 id 则覆盖（内核语义）。"
-              "⑥ <b>事件帧</b>改用 M-07 帧（<code>{type:event, seq, sessionId, role, reqId, payload}</code>），<code>payload</code> 就是契约 <code>Message</code> 的 payload（不二次包装）；<b>不带</b> <code>crc</code> —— 需求口径只列五个字段，前端解码对「没有 crc」放行。"
+              "⑥ <b>事件帧</b>改用 M-07 帧（<code>{type:event, seq, sessionId, role, reqId, payload}</code>），<code>payload</code> 是<b>完整的</b>契约 <code>Message</code>（<code>{schema_version, direction, seq, payload}</code>；<b>v1.10 订正</b>：v1.9 只发内层 <code>{\"Event\":…}</code>，前端 <code>decodeMessage</code> 第一步读 <code>schema_version</code> ⇒ 整帧 <code>E_PROTO-08</code>）；<b>不带</b> <code>crc</code> —— 需求口径只列五个字段，前端解码对「没有 crc」放行。"
               "⑦ <b>console 推送</b>：WS 每拍顺带推 console 增量（<code>payload = EventPayload::Console</code>，<code>seq</code> = console 绝对偏移）⇒ 与 <code>GET …/console?offset=</code> <b>同一份账</b>；窗口丢失推 <code>resume{lost, base}</code> 而不是静默少字节。"
               "⑧ <b>「忙」的一瞬假阳性</b>：会话线程先发回执再清忙位 ⇒ <code>submit</code> 加 <b>3 ms</b> 宽限；真在跑的命令照样 409（口径没放宽）—— <code>/api/boot</code> 连续调用踩到过这个缝。"),
         ("note", "<b>R-12 / R-13 的收口口径（v1.9）：</b>① <b>判定通道只剩一条</b>：<code>tools/boot-osz.sh</code> 只走 <code>POST /api/boot</code>；"
@@ -419,6 +419,24 @@ SECTIONS.append({
               "<code>decodeFrame</code> 放行 <code>FRAME_TYPE.Resume</code>（此前只放行 command/event ⇒ ⇒ 服务端的 <code>resume</code> 会被当畸形帧<b>丢掉</b>，正是 R-13 禁止的「静默断流」）；"
               "<code>resume</code> 帧进状态 <code>lastResume</code>（丢帧、console 丢窗口、通道关闭三种都说成人话）并照常交给订阅者。"
               "⑤ <b>server-mode 是事件通道、不是命令通道</b>：该 socket 只往外推 ⇒ <code>sendCommand</code> 在 server-mode 直接报 <code>E_TRX-03</code>（命令走 REST），不做「发出去没人看」的静默失败。"),
+        ("note", "<b>浏览器入口与帧信封（v1.10）：</b>① <b>帧信封订正</b>：v1.9 的 <code>payload</code> 只发内层 "
+              "<code>{\"Event\":…}</code>，而前端 <code>decodeMessage</code> 第一件事就是读 <code>schema_version</code> ⇒ ⇒ "
+              "<b>每一帧都落成 <code>E_PROTO-08</code></b>：页面显示「已连接」，但寄存器 / 终端一个字也没有。"
+              "这个缺陷躲过了 v1.9 的 Node 冒烟（它只断言「帧类型 + 内层键」）⇒ ⇒ 真 Chrome 一开就暴露（假绿）；"
+              "现在 <code>EventRing::since</code> 与 <code>console_frame</code> 都发<b>完整信封</b>，判据也改成按前端解码器写"
+              "（<code>schema_version</code> / <code>direction</code> / 内层 <code>Event</code> 三层都断言）。"
+              "② <b>CORS 闸门</b>：页面与服务端天然是两个 origin（<code>front/</code> 由任意静态服务器托管）⇒ ⇒ 不起这一层，浏览器在跨域检查那一关就拒。"
+              "放行集合 = 显式 <code>--cors-origins</code> ∪ <b>回环 origin</b>（<code>{http,https}://{127.0.0.1,localhost,[::1]}[:port]</code>，任意端口）；"
+              "<b>不接受通配 <code>*</code></b>（等于把内核的执行能力交给任何网页）；预检 <code>OPTIONS</code> 在中间件里直接 204（不进 <code>require_token</code>），"
+              "并把 <code>x-boot-*</code> / <code>x-console-*</code> 列进 <code>Access-Control-Expose-Headers</code> —— 不 expose 的话浏览器读不到这些头，会以为「服务端没给」。"
+              "③ <b>页面入口</b>：<code>?server=&amp;session=&amp;token=&amp;board=</code>（不给 <code>server</code> 就仍是本地 Worker 模式，一个字都不改）。"
+              "<code>server</code> 收 <code>http(s)://host:port</code> / <code>ws(s)://</code> / 裸 <code>host:port</code>；"
+              "给了会话先 <code>GET /api/sessions/{id}</code> <b>验活</b>（404 才重建，500 / 连不上原样抛、不偷偷建），没给就 <code>POST /api/sessions</code>；"
+              "然后把会话绑给 M-07、<code>GET …/state</code> 取一次 <code>pc / 寄存器 / t_ps</code> 翻成 <code>SimStateDelta</code> + <code>Tick</code> 两条事件推进视图。"
+              "服务端模式下<b>不跑</b> <code>loadProjectIntoKernel</code> 与 <code>Nop</code> 往返（那是本地内核的命令面，服务端会话早有自己的镜像）。"
+              "④ <b>范围</b>：本轮接通的是<b>观察面</b>（事件流 + console 推送 + 状态水合）；界面上「运行 / 单步 / 断点」等按钮仍走 M-05 → M-07 的写通道，"
+              "在 server-mode 会<b>显式</b>报 <code>E_TRX-03</code>（命令走 REST）—— 不伪装成能用。"),
+
         ("note", "<b>读接口的语义要点：</b><code>state</code> 返回 <code>{pc, gpr[32], t_ps}</code> —— <b>pc 单独一个字段</b>，不在 <code>gpr</code> 里，且 <code>gpr[0]</code> 恒 0（需求里踩过的坑就在这）；"
               "<code>memory</code> 的 <code>len ≤ 4096</code>（契约 <code>DUMP_MAX_BYTES</code>），越界原样拒；<code>format=u32|asc</code> 只<b>追加</b>视图（原始字节仍在 <code>bytes</code> 里，两个消费者不必二选一）；<code>symbols</code> 精确命中与候选并存（候选上限 16）；"
               "<code>disasm</code> 允许短于 <code>count</code>（未映射即止，与内核一致）。"),
@@ -851,6 +869,7 @@ SECTIONS.append({
                 ["P0-6", "<code>/api/boot</code>（临时会话，跑完即删；回原始 console 字节 + <code>X-Boot-*</code> 头）；<code>osz-boot</code> <b>改为该端点的客户端</b>（自带 <code>--server</code>，CLI 与退出码不变；离线 runner 已在 v1.9 移除）", "一条 curl 完成 osz 判定，与 Spike MATCH；<code>--print-memory</code> 取自 <code>x-boot-ram-window</code>", "P0-5"],
                 ["P1-2", "需求收口：复位 / run 的 <code>prefix</code>+<code>until</code>+<code>t_ps</code>+断点命中 / <code>memory</code> 视图 / 观察点 / M-07 帧 / console 推送 / <code>POST …/trace</code>（<b>已落地</b>，46 项服务端测试通过，HTTP 冒烟全绿）", "R-05 / R-07 / R-08 / R-06 推送面 / R-13 帧形 / R-14 复位逐条兑现", "P1"],
                 ["P1-3", "R-12 收成单通道（<code>osz-boot</code> 变客户端、<code>x-boot-ram-window</code>、<code>/healthz.max_run_ms</code>）+ R-13 前端 server-mode（URL 推导 / <code>resume</code> 帧 / 只推通道）（<b>已落地</b>，前端 20 项 transport 用例通过，真实端点冒烟收到 M-07 帧）", "R-12 / R-13 的验收两句逐条兑现", "P1"],
+                ["P1-4", "浏览器直连服务端（<code>?server=</code> + CORS 闸门 + 帧信封订正）（<b>已落地</b>，真 Chrome 冒烟：状态栏 <code>已连接 · server websocket</code>、寄存器 <code>x5=0x10000000</code>、终端出现 console 的 <code>A</code>、无 console 报错；前端 819 项、服务端 51 项全绿）", "R-13「指到那就能用」在<b>页面</b>上成立；命令面仍走 REST（未接）", "P1"],
                 ["P1", "事件流（WS + REST）、trace 导出 / 开关、快照采集 / 还原（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；异步 run（作业表 + 结果槽）<b>已落地</b>", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
             ],
         }),

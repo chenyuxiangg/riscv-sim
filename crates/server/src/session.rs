@@ -148,8 +148,8 @@ impl EventRing {
     ///
     /// ⚠️ 帧形**就是** `front/lib/frame.js` 的那一层（R-13 逐字要求复用
     ///   M-07 帧，不另造封套）：`{type, seq, sessionId, role, reqId, payload}`
-    ///   ⇒ ⇒ `payload` 是契约 `Message` 的 serde JSON（内核事件**不做二次
-    ///   包装**：`payload` 里就是 `{"Event": {...}}`）。
+    ///   ⇒ ⇒ `payload` 是**完整的**契约 `Message`（`{schema_version,
+    ///   direction, seq, payload}`）——前端 `decodeMessage` 认的是这一层。
     fn push(&mut self, events: &[EventPayload]) {
         for event in events {
             // ⚠️ `Tick` 是心跳，**不进流**：它每个窗口一条，对客户端没有信息量，
@@ -183,13 +183,21 @@ impl EventRing {
             .filter(|(seq, _)| *seq >= since)
             .take(limit.max(1))
             .map(|(seq, message)| {
-                // `Message` 的 serde JSON 形如
-                // `{"schema_version":19,"direction":"event","seq":7,"payload":{"Event":{...}}}`
-                // ⇒ ⇒ 帧只借它的 `payload` 与 `seq`（其余三个字段属于 M-07 层）。
-                let payload = message
-                    .get("payload")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                // ⚠️ **`payload` 是完整的契约 `Message`**（`{schema_version,
+                // direction, seq, payload}`），**不是**它里面的那一层
+                // `{"Event":{…}}`。
+                //
+                // 这条判据是前端定的（`front/services/m05_commandrouter.js`
+                // 的 `handleFrame` 直接 `decodeMessage(frame.payload)`，
+                // 而 `decodeMessage` 第一步就要 `schema_version`）——与本仓的
+                // Worker 通道同形（`front/kernel-worker.js` 的
+                // `payload: eventMessage(...)`）。
+                //
+                // ⚠️ **曾经的错法**：这里只取 `message["payload"]`，等于把
+                // 契约信封拆掉 ⇒ ⇒ 前端每一帧都解不开、全部落成
+                // `E_PROTO-08`，而 Node 侧只看「帧类型 + 内层键」的冒烟**照样
+                // 绿**（假绿）。真浏览器一开就发现寄存器 / console 都是空的。
+                let payload = message.clone();
                 serde_json::json!({
                     "type": "event",
                     "seq": seq,
@@ -2533,7 +2541,13 @@ mod tests {
     }
 
     /// 事件帧就是 M-07 帧（R-13）：`{type,seq,sessionId,role,reqId,payload}`，
-    /// `payload` 是契约 `Message` 的 payload（`{"Event":…}`），不二次包装。
+    /// 且 `payload` 是**完整的**契约 `Message`（带 `schema_version` /
+    /// `direction` / `seq`），**不是**只取里面那一层 `{"Event":…}`。
+    ///
+    /// ⚠️ 这条断言是**按前端解码器**写的：`front/lib/message.js` 的
+    /// `decodeMessage` 第一件事就是读 `schema_version` ⇒ ⇒ 少了信封就是整帧
+    /// `E_PROTO-08`。曾经这里只断言「`Event` 键在」，于是服务端发裸内层、
+    /// 前端一帧也解不开，冒烟**照样绿**。
     #[test]
     fn event_frames_use_the_m07_envelope() {
         let mut ring = EventRing::new(4, "sess-x");
@@ -2550,9 +2564,22 @@ mod tests {
         assert!(frame.get("role").map(|v| v.is_null()).unwrap_or(false));
         assert!(frame.get("reqId").map(|v| v.is_null()).unwrap_or(false));
         let payload = frame.get("payload").expect("payload 必须在");
+        assert_eq!(
+            payload.get("schema_version").and_then(|v| v.as_u64()),
+            Some(riscv_sim_contract::SCHEMA_VERSION as u64),
+            "payload 必须是完整信封：前端 decodeMessage 先读 schema_version"
+        );
+        assert_eq!(
+            payload.get("direction").and_then(|v| v.as_str()),
+            Some("Event")
+        );
+        assert_eq!(payload.get("seq").and_then(|v| v.as_u64()), Some(0));
         assert!(
-            payload.get("Event").is_some(),
-            "payload 必须是契约 Message 的 payload（外部标签 `Event`）：{payload}"
+            payload
+                .get("payload")
+                .and_then(|inner| inner.get("Event"))
+                .is_some(),
+            "信封里面才是 `{{\"Event\":…}}`：{payload}"
         );
     }
 }

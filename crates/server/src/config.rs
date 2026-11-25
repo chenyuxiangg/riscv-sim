@@ -70,6 +70,12 @@ pub struct Config {
     pub allow_remote: bool,
     /// 远程模式令牌。回环模式下即使给了也只在请求校验时生效。
     pub token: Option<String>,
+    /// 显式放行的 **浏览器** origin（`--cors-origins`，逗号分隔）。
+    ///
+    /// ⚠️ 回环 origin（`http://127.0.0.1[:port]` / `http://localhost[:port]`）
+    /// **默认就放行**（服务默认只绑回环 ⇒ 那一组 origin 只可能是本机页面）；
+    /// 这个表只用来补「前端不在本机 / 换了个主机名」的场合。
+    pub cors_origins: Vec<String>,
 }
 
 impl Default for Config {
@@ -87,6 +93,7 @@ impl Default for Config {
             max_run_ms: DEFAULT_MAX_RUN_MS,
             allow_remote: false,
             token: None,
+            cors_origins: Vec::new(),
         }
     }
 }
@@ -118,6 +125,7 @@ impl Config {
                 "--max-run-ms" => "--max-run-ms",
                 "--allow-remote" => "--allow-remote",
                 "--token" => "--token",
+                "--cors-origins" => "--cors-origins",
                 other if other.starts_with('-') => {
                     return Err(format!("unknown option {other}"));
                 }
@@ -229,6 +237,22 @@ impl Config {
                     }
                     cfg.token = Some(raw.to_string());
                 }
+                "--cors-origins" => {
+                    let raw = value(&mut it, flag)?;
+                    let mut list = Vec::new();
+                    for item in raw.split(',') {
+                        if item.trim().is_empty() {
+                            continue;
+                        }
+                        list.push(normalize_origin(item).map_err(|msg| {
+                            format!("bad --cors-origins entry in {raw:?}: {msg}")
+                        })?);
+                    }
+                    if list.is_empty() {
+                        return Err("bad --cors-origins value: nothing but separators".to_string());
+                    }
+                    cfg.cors_origins = list;
+                }
                 // 上面已经穷举过；这一支只为让 match 完整（不可达）。
                 _ => return Err(format!("unknown option {flag}")),
             }
@@ -279,6 +303,79 @@ pub fn guard_bind(cfg: &Config) -> Result<(), String> {
             "refusing to bind {} in remote mode: --token is required as well",
             cfg.bind
         )),
+    }
+}
+
+/// 校验并规范化一个 CORS origin（`<scheme>://<host>[:<port>]`）。
+///
+/// ⚠️ **不接受 `*`**：通配 origin 等于把内核的执行能力交给任何网页 ⇒ 要放开
+/// 就逐条列出来（R-15 的同一思路：宽的东西必须是人**显式**要的）。
+/// 规范化 = 小写 scheme/host、去掉末尾 `/` ⇒ ⇒ 与浏览器发来的 `Origin` 头
+/// 逐字可比，不必在请求期再做模糊匹配。
+fn normalize_origin(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("origin is blank".to_string());
+    }
+    if trimmed == "*" {
+        return Err("wildcard `*` is not supported — list the exact origins".to_string());
+    }
+    let (scheme, rest) = trimmed
+        .split_once("://")
+        .ok_or_else(|| format!("origin {raw:?} has no scheme (http:// or https://)"))?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("origin {raw:?}: scheme must be http or https"));
+    }
+    if rest.is_empty()
+        || rest.contains('/')
+        || rest.contains('?')
+        || rest.contains('#')
+        || rest.contains('@')
+    {
+        return Err(format!(
+            "origin {raw:?}: only <scheme>://<host>[:<port>] is allowed (no path, query, user or fragment)"
+        ));
+    }
+    let (host, port) = split_host_port(rest)
+        .ok_or_else(|| format!("origin {raw:?}: host is blank or the port is not a u16"))?;
+    if port == Some(0) {
+        return Err(format!("origin {raw:?}: port 0 is not a real origin"));
+    }
+    let host = if host.starts_with('[') {
+        // IPv6 字面量（`[::1]`）：方括号是 URL 语法的一部分，原样保留。
+        host.to_ascii_lowercase()
+    } else {
+        host.to_ascii_lowercase()
+    };
+    Ok(match port {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
+}
+
+/// 把 `host[:port]`（含 `[::1]:port`）拆成 `(host, Option<port>)`。
+fn split_host_port(rest: &str) -> Option<(&str, Option<u16>)> {
+    if let Some(tail) = rest.strip_prefix('[') {
+        let (host, after) = tail.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let bracket_host = &rest[..rest.len() - after.len()];
+        return match after.strip_prefix(':') {
+            None if after.is_empty() => Some((bracket_host, None)),
+            Some(port) => Some((bracket_host, Some(port.parse::<u16>().ok()?))),
+            None => None,
+        };
+    }
+    match rest.split_once(':') {
+        None => Some((rest, None)),
+        Some((host, port)) => {
+            if host.is_empty() {
+                return None;
+            }
+            Some((host, Some(port.parse::<u16>().ok()?)))
+        }
     }
 }
 
@@ -363,6 +460,36 @@ mod tests {
             args(&["--nope"]),                     // 未知旗标
             args(&["osz.elf"]),                    // 位置参数
             args(&["--bind", "localhost"]),        // 主机名不是 IP 字面量
+        ] {
+            assert!(
+                Config::parse(&bad).is_err(),
+                "argv {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn cors_origins_are_normalized_and_wildcards_are_refused() {
+        let cfg = Config::parse(&args(&[
+            "--cors-origins",
+            " HTTP://LocalHost:8000/ , https://sim.example.com ",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.cors_origins,
+            vec![
+                "http://localhost:8000".to_string(),
+                "https://sim.example.com".to_string()
+            ]
+        );
+
+        for bad in [
+            args(&["--cors-origins", "*"]),                 // 通配
+            args(&["--cors-origins", "http://a.com/path"]), // 带路径
+            args(&["--cors-origins", "a.com"]),             // 没 scheme
+            args(&["--cors-origins", "ftp://a.com"]),       // 非 http(s)
+            args(&["--cors-origins", "http://a.com:0"]),    // 端口 0
+            args(&["--cors-origins", " , "]),               // 只有分隔符
         ] {
             assert!(
                 Config::parse(&bad).is_err(),

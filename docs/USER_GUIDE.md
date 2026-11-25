@@ -528,6 +528,41 @@ PY
 
 ⚠️ **界面上那个文件选择器**（路 A）**不需要**这一步 ⇒ ⇒ 日常用路 A 就够。
 
+### 5.5 在浏览器里看服务端的会话（`?server=`）
+
+页面上带一个 `?server=` 参数，整条前端就不起本地内核，改成连 `riscv_sim_server`：
+
+```bash
+# 1) 先起服务（回环地址就行；浏览器跨域靠服务端的 CORS 闸门放行）
+./target/debug/riscv_sim_server --port 9876 --allow-image-root /tmp
+
+# 2) 再起前端静态服务（不缓存，改完就是新的）
+python3 tools/serve-front.py --port 8090
+
+# 3) 打开页面：不给 session 就现建一条
+#    http://127.0.0.1:8090/?server=http://127.0.0.1:9876
+#    想盯某一条已有会话：
+#    http://127.0.0.1:8090/?server=127.0.0.1:9876&session=sess-000003&board=qemu-virt
+```
+
+四个参数：`server`（必给，`http(s)://host:port`、`ws(s)://`、裸 `host:port` 都认）、
+`session`（可选；给了先**验活**，404 才重建）、`token`（可选，服务端开了 `--token` 时带 `x-auth-token`）、
+`board`（可选，建会话时用哪块板，缺省服务端默认板）。
+
+页面会做什么：**REST 建/验会话** → 把会话绑进 M-07 → **取一次 `pc / 寄存器 / t_ps`**（`GET …/state`）把视图先填上 →
+WebSocket 挂到 `/api/sessions/{id}/events/ws` 收后续的事件与 console 字节。状态栏显示「已连接 · server websocket」，
+页脚显示会话 id 与板；服务端发来 `resume`（丢帧 / console 丢窗口 / 通道关闭）时，那句话说在状态栏里，不静默。
+
+⚠️ **这一批只接观察面**：查看状态、看 console 现场增长、看事件流。界面上「运行 / 单步 / 断点」那些按钮走的是前端的写通道，
+服务端的事件 socket **只往外推** ⇒ ⇒ 点了会**显式**报 `E_TRX-03`（命令走 REST），**不会**假装执行成功。
+要驱动一次运行，用 REST（`POST /api/sessions/{id}/run`）或 `tools/boot-osz.sh`。
+
+⚠️ **跨域**：页面与 `:9876` 是两个 origin ⇒ ⇒ 服务端带 CORS 中间件，**回环 origin 默认放行**
+（`http://127.0.0.1:任意端口` / `http://localhost:任意端口`），且**不接受通配**。前端换了主机名或放到别的机器上时，
+起服务要显式给：`--cors-origins http://host:8090,https://sim.example.com`。
+
+⚠️ **不给 `?server=` 就是原来那条路**：本地 Worker + WASM 内核，一个字都不改。
+
 ---
 
 ## 6. 常见问题

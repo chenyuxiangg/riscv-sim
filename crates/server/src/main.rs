@@ -53,6 +53,8 @@ usage: riscv_sim_server [options]
   --max-run-ms <ms>        wall-clock cap for one run (default 5000)
   --allow-remote           allow a non-loopback bind (needs --token too)
   --token <secret>         bearer token checked in remote mode
+  --cors-origins <list>    extra browser origins allowed to read the API
+                           (comma separated; loopback origins are always allowed)
   -h, --help               print this message
 
   GET    /api/version          kernel / schema_version / contract_version / server / bind

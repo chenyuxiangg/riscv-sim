@@ -26,6 +26,8 @@ import * as viewStore from "./views/m03_viewstore.js";
 import { mountSession } from "./services/m04_session.js";
 import { mountCommandRouter } from "./services/m05_commandrouter.js";
 import * as transportApi from "./services/m07_transport.js";
+// 服务端模式的浏览器门槛（R-13）：读 `?server=` → 建/验会话 → 水合一次状态。
+import * as serverModeApi from "./services/m07_servermode.js";
 import { mountRegisterMemory } from "./services/m10_registermemory.js";
 // ⚠️ M-15 器件中间层的前端接线（STAGE-43 · v0.66 · D-175）⇒ ⇒ 器件类型
 // 注册表与逐实例状态**只**从内核来（前端不抄第二份）。
@@ -1087,6 +1089,65 @@ export async function handleCommand(detail, services) {
 
 
 
+/**
+ * 服务端模式的**观察面**启动：绑定会话 + 取一次状态 + 把状态推给视图。
+ *
+ * ⚠️ 与本地 `startSession()` 的差别是**刻意的**：
+ *   - 不装载工程（`LoadProject` 是本地内核的命令面，服务端模式下那条写通道
+ *     不存在 —— 服务端的会话早就有自己的镜像了）；
+ *   - 不做 `Nop` 往返（同上：命令走 REST，而这里没有写通道）；
+ *   - 只发**事件**（`sim.state.delta` / `tick`），因为 `m10` 与视图只吃事件
+ *     ⇒ ⇒ 不编造「命令成功」这种前端自己给自己回的假回执。
+ *
+ * 会话被回收（404）时 `ensureSession` 会重建一条 ⇒ ⇒ 这里照常接，
+ * 但页脚要写明「重建了一条」，不假装还是原来那条。
+ *
+ * @param {{session: object, commandRouter: object, params: object, binding: object|null, failure: (Error|null)}} args
+ */
+async function startServerMirror({ session, commandRouter, params, binding, failure }) {
+    if (!binding) {
+        setNote(`服务端模式没起来：${failure?.message ?? "没有可绑定的会话"}`);
+        return;
+    }
+    try {
+        await session.createSession({ id: binding.sessionId, role: "host" });
+        const state = await serverModeApi.fetchSessionState({
+            serverUrl: params.serverUrl,
+            sessionId: binding.sessionId,
+            token: params.token,
+        });
+        // 一次性水合：`pc / 寄存器 / 虚拟时间` 先落进视图，后面的推进由 WS
+        // 事件流接着喂（服务端的会话默认就订阅了 `sim.state.delta`）。
+        const delta = serverModeApi.stateDeltaEvent(state);
+        if (delta) {
+            commandRouter.publish({
+                variant: "SimStateDelta",
+                value: delta,
+                topic: "sim.state.delta",
+                seq: 0,
+                reqId: null,
+                sessionId: binding.sessionId,
+            });
+        }
+        const tick = serverModeApi.tickEvent(state);
+        if (tick) {
+            commandRouter.publish({
+                variant: "Tick",
+                value: tick,
+                topic: "tick",
+                seq: 0,
+                reqId: null,
+                sessionId: binding.sessionId,
+            });
+        }
+        const board = binding.board ? ` · 板 ${binding.board}` : "";
+        const recycled = binding.restarted ? " · 原会话已回收，重建了一条" : "";
+        setNote(`服务端模式：${binding.sessionId}${board}${recycled}（事件流只读；命令走 REST）`);
+    } catch (err) {
+        setNote(`服务端模式没起来：${err?.message ?? err}`);
+    }
+}
+
 async function bootstrap() {
     status.textContent = "正在挂载模块…";
     // Two redundant safeguards guarantee that the view component library
@@ -1107,6 +1168,28 @@ async function bootstrap() {
     const workspacePromise = mountWorkbench();
     const viewStorePromise = viewStore.mountViewStore();
 
+    // ⚠️ **服务端模式**（R-13）：页面地址带 `?server=…` 就**不**起本地内核，
+    // 改成「REST 建/验会话 + WebSocket 只读事件流」：
+    //   `?server=http://127.0.0.1:9876[&session=<id>][&token=<tok>][&board=<id>]`
+    // 不给 `?server=` 时一个字都不改（本地 Worker 那条照旧）。
+    const serverParams = serverModeApi.parseServerParams(
+        typeof globalThis.location?.search === "string" ? globalThis.location.search : "",
+    );
+    /** @type {{sessionId: string, created: boolean, restarted: boolean, board: string|null}|null} */
+    let serverBinding = null;
+    /** @type {(Error & {code?: string})|null} */
+    let serverFailure = null;
+    if (serverParams) {
+        try {
+            serverBinding = await serverModeApi.ensureSession(serverParams);
+        } catch (err) {
+            // ⚠️ **不吞**：会话没建起来就如实记下，下面 `startServerMirror`
+            //    把原因写到页脚；传输层那条（没有 sessionId ⇒ E_TRX-03）
+            //    同时在状态栏，两处说的是「同一件事的两个面」。
+            serverFailure = err;
+        }
+    }
+
     // The service layer is mounted in dependency order (M-07 → M-05 →
     // M-04 / M-10). `mountTransport` never throws: a missing `Worker`
     // (Node under the front-end gate) or a `file://` origin end up as an
@@ -1115,10 +1198,16 @@ async function bootstrap() {
     // `mountTransport` returns the **status snapshot**; the adapter API
     // itself is the module namespace (ES modules are singletons), so
     // the router / session / regmem service get the live adapter.
-    const transportStatus = await transportApi.mountTransport({
-        mode: "worker",
-        workerUrl: KERNEL_WORKER_URL,
-    });
+    const transportStatus = await transportApi.mountTransport(
+        serverParams
+            ? {
+                mode: "websocket",
+                serverUrl: serverParams.serverUrl,
+                sessionId: serverBinding?.sessionId ?? serverParams.sessionId ?? null,
+                role: "host",
+            }
+            : { mode: "worker", workerUrl: KERNEL_WORKER_URL },
+    );
     const commandRouter = await mountCommandRouter({ transport: transportApi });
     const session = await mountSession({ transport: transportApi, commandRouter });
     const registerMemory = await mountRegisterMemory({
@@ -1258,7 +1347,19 @@ async function bootstrap() {
     });
 
     // Fire and forget — the session comes up on its own.
-    void startSession({ session, ...services, workspace });
+    // ⚠️ 服务端模式**不**走本地 `startSession()`（它会 `LoadProject` + `Nop`
+    //    往返，两条都是服务端模式下不存在的写通道）⇒ ⇒ 换成观察面那一支。
+    if (serverParams) {
+        void startServerMirror({
+            session,
+            commandRouter,
+            params: serverParams,
+            binding: serverBinding,
+            failure: serverFailure,
+        });
+    } else {
+        void startSession({ session, ...services, workspace });
+    }
 }
 
 /**

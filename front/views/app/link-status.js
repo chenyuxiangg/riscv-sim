@@ -41,7 +41,10 @@ export function describeTransport(transport) {
     }
     if (transport.connected) {
         const label = transport.label ?? `${transport.mode}`;
-        return `已连接 · ${label}`;
+        // ⚠️ **丢帧必须看得见**（R-13：允许丢、不许静默断流）⇒ ⇒ 服务端发过
+        // `resume` 就把那句话接在贴着的状态栏后面，而不是只躺在内部状态里。
+        const resume = transport.lastResume ? ` · ${transport.lastResume}` : "";
+        return `已连接 · ${label}${resume}`;
     }
     const reason = transport.lastError ? transport.lastError : "未接线";
     return `未连接 · ${reason}`;

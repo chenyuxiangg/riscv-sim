@@ -36,6 +36,16 @@ use crate::upload;
 /// 远程模式的令牌头名（R-15）。
 const TOKEN_HEADER: &str = "x-auth-token";
 
+/// CORS 的固定三段：允许的请求头 / 方法 / 客户端可读的响应头。
+///
+/// ⚠️ **可读响应头必须列全**：`x-boot-*` / `x-console-*` 是对拍与分页的判据
+/// ⇒ ⇒ 不 expose 的话浏览器 `fetch` 拿不到它们（跨域响应头**默认不可读**），
+/// 客户端会以为「服务端没给」。
+const CORS_ALLOW_HEADERS: &str = "content-type,x-auth-token";
+const CORS_ALLOW_METHODS: &str = "GET,POST,PUT,DELETE,OPTIONS";
+const CORS_EXPOSE_HEADERS: &str = "x-boot-stop,x-boot-executed,x-boot-console-total,x-boot-console-lost,x-boot-board-revision,x-boot-ram-window,x-console-offset,x-console-base,x-console-total,x-trace-next,x-trace-lost";
+const CORS_MAX_AGE_SECS: &str = "600";
+
 /// `run` 的 `prefix` 长度上限（字节）。
 ///
 /// 前缀是「console 里出现这一行」的判据 ⇒ ⇒ 真实前缀是几十字节；
@@ -99,6 +109,10 @@ pub struct AppState {
     pub max_run_ms: u64,
     /// 远程模式令牌；`None` ⇒ 不校验。
     pub token: Option<String>,
+    /// 显式放行的浏览器 origin（`--cors-origins`）。
+    ///
+    /// ⚠️ 回环 origin **不靠这张表**：那是[`origin_is_loopback`]的默认判据。
+    pub cors_origins: Vec<String>,
     /// 会话表。
     pub registry: Arc<SessionRegistry>,
 }
@@ -117,6 +131,7 @@ impl AppState {
             max_snapshot_bytes: cfg.max_snapshot_bytes,
             max_run_ms: cfg.max_run_ms,
             token: cfg.token.clone(),
+            cors_origins: cfg.cors_origins.clone(),
             registry: Arc::new(SessionRegistry::new(
                 cfg.max_sessions,
                 cfg.session_ttl,
@@ -252,6 +267,10 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .merge(guarded)
         .fallback(unknown_route)
+        // ⚠️ CORS 必须在**最外层**：预检（`OPTIONS`）既没有令牌、也不会被路由
+        // 认出来 ⇒ ⇒ 放在 `require_token` 里面那一层会被 401/405 拒掉 ⇒ ⇒
+        // 浏览器根本读不到「这个 origin 允不允许」。
+        .layer(middleware::from_fn_with_state(state.clone(), cors_headers))
         .with_state(state)
 }
 
@@ -834,9 +853,14 @@ async fn stream_events(mut socket: WebSocket, state: AppState, id: String) {
     }
 }
 
-/// console 的 M-07 帧：`payload` 是契约 `Message` 的 `payload`
-/// （`{"Event":{"Console":{"bytes":[...]}}}`），`seq` 用 **console 绝对偏移**
-/// ⇒ ⇒ 与 `GET …/console?offset=` 同一份账（R-06：不能两个真相）。
+/// console 的 M-07 帧：`payload` 是**完整的**契约 `Message`
+/// （`{schema_version, direction, seq, payload:{"Event":{"Console":{...}}}}`），
+/// `seq` 用 **console 绝对偏移** ⇒ ⇒ 与 `GET …/console?offset=` 同一份账
+/// （R-06：不能两个真相）。
+///
+/// ⚠️ 信封**不能省**：前端 `decodeMessage` 第一步就要 `schema_version`，
+/// 只给内层 `{"Event":…}` 会被整帧判成 `E_PROTO-08` ⇒ ⇒ 终端的字节流看起来
+/// 「一个都没有」。与 Worker 通道同形（`payload: eventMessage(...)`）。
 fn console_frame(session_id: &str, offset: u64, bytes: &[u8]) -> serde_json::Value {
     let message = riscv_sim_contract::protocol::Message::event(
         offset,
@@ -844,10 +868,7 @@ fn console_frame(session_id: &str, offset: u64, bytes: &[u8]) -> serde_json::Val
             bytes: bytes.to_vec(),
         },
     );
-    let payload = serde_json::to_value(&message)
-        .ok()
-        .and_then(|value| value.get("payload").cloned())
-        .unwrap_or(serde_json::Value::Null);
+    let payload = serde_json::to_value(&message).unwrap_or(serde_json::Value::Null);
     json!({
         "type": "event",
         "seq": offset,
@@ -1824,6 +1845,129 @@ async fn require_token(
     }
 }
 
+/// 浏览器跨域（CORS）：页面与服务端天然是**两个 origin**（`front/` 由
+/// `tools/serve-front.py` 或任意静态服务器托管，服务端在 `:9876`）⇒ ⇒ 不做
+/// 这一层，浏览器在跨域检查那一关就把 `fetch` 拒掉 —— 与「服务好不好」无关。
+///
+/// ⚠️ **不放 `*`**：放行集合 = 显式 `--cors-origins` ∪ 回环 origin
+/// （`{http,https}://{127.0.0.1,localhost,[::1]}[:port]`）。默认只绑回环
+/// ⇒ ⇒ 效果是「本机页面能读、外站读不到」，与 R-15 的方向一致；前端换了
+/// 主机名/端口之外的位置，才需要往 `--cors-origins` 里加一条。
+async fn cors_headers(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let origin = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let allowed = origin
+        .as_deref()
+        .map(|value| cors_origin_allowed(&state.cors_origins, value))
+        .unwrap_or(false);
+
+    // 预检：路由表里没有 `OPTIONS`（也不该为每个端点手写一条）⇒ ⇒ 在这里
+    // 直接答完，**不进** `next`（否则会被 405 拒掉，浏览器照样读不到集合）。
+    let preflight = req.method() == Method::OPTIONS
+        && req.headers().contains_key("access-control-request-method");
+    if preflight {
+        let mut response = if allowed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "code": "E_TRX-03",
+                    "detail": "跨域预检被拒：这个 origin 不在放行集合里（--cors-origins）",
+                    "status": 403,
+                })),
+            )
+                .into_response()
+        };
+        if allowed {
+            apply_cors(&mut response, origin.as_deref().unwrap_or_default());
+        }
+        return response;
+    }
+
+    let mut response = next.run(req).await;
+    if allowed {
+        apply_cors(&mut response, origin.as_deref().unwrap_or_default());
+    }
+    response
+}
+
+/// 把 CORS 响应头写进一条响应（只对**已判定放行**的 origin 调用）。
+fn apply_cors(response: &mut Response, origin: &str) {
+    use axum::http::header::{HeaderValue, VARY};
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(origin) {
+        headers.insert("access-control-allow-origin", value);
+        // ⚠️ **不**发 `access-control-allow-credentials`：令牌走请求头而不是
+        // cookie ⇒ ⇒ 不需要凭据模式；发了只会把这个口子往「带 cookie」那边
+        // 推一步。
+        headers.insert(
+            "access-control-allow-methods",
+            HeaderValue::from_static(CORS_ALLOW_METHODS),
+        );
+        headers.insert(
+            "access-control-allow-headers",
+            HeaderValue::from_static(CORS_ALLOW_HEADERS),
+        );
+        headers.insert(
+            "access-control-expose-headers",
+            HeaderValue::from_static(CORS_EXPOSE_HEADERS),
+        );
+        headers.insert(
+            "access-control-max-age",
+            HeaderValue::from_static(CORS_MAX_AGE_SECS),
+        );
+        // 放行集合按 origin 变化 ⇒ ⇒ 中间缓存必须按 `Origin` 分桶。
+        headers.insert(VARY, HeaderValue::from_static("origin"));
+    }
+}
+
+/// 回环 origin 判据（纯函数 ⇒ ⇒ 不必起服务就能单测）。
+///
+/// 认三种主机名：`127.0.0.1` / `localhost` / `[::1]`，端口随便是谁 —— 本机
+/// 任何静态服务器（`serve-front.py` 换过多少个口都行）都算「本机页面」。
+fn origin_is_loopback(origin: &str) -> bool {
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return false;
+    }
+    let host = if let Some(tail) = rest.strip_prefix('[') {
+        tail.split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or_default()
+    } else if let Some((host, _port)) = rest.split_once(':') {
+        host
+    } else {
+        rest
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// origin 放行判据：回环 origin ∪ 显式清单（大小写不敏感，末尾 `/` 无意义）。
+fn cors_origin_allowed(allow_list: &[String], origin: &str) -> bool {
+    let trimmed = origin.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    if origin_is_loopback(trimmed) {
+        return true;
+    }
+    allow_list
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(trimmed))
+}
+
 /// 定长比较：**不**在第一个不同字节就返回 —— 否则令牌的前缀/长度会从耗时
 /// 上漏出去。
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -1883,6 +2027,71 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    /// 回环 origin 认三种写法、任意端口；外站 origin 一律不认。
+    #[test]
+    fn loopback_origins_are_recognised_without_any_config() {
+        for origin in [
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+            "http://localhost",
+            "https://127.0.0.1:443",
+            "http://[::1]:5173",
+        ] {
+            assert!(origin_is_loopback(origin), "{origin} 必须是回环");
+        }
+        for origin in [
+            "http://127.0.0.2:8000",
+            "http://10.0.0.5:8000",
+            "https://example.com",
+            "ftp://127.0.0.1:8000",
+            "127.0.0.1:8000",
+        ] {
+            assert!(!origin_is_loopback(origin), "{origin} 不该被当回环");
+        }
+    }
+
+    /// 放行集合 = 回环 ∪ 显式清单；大小写与末尾 `/` 不影响判定，外站照样拒。
+    #[test]
+    fn cors_allow_list_extends_the_loopback_default() {
+        let list = vec!["https://sim.example.com".to_string()];
+        assert!(cors_origin_allowed(&list, "http://127.0.0.1:8000"));
+        assert!(cors_origin_allowed(&list, "https://sim.example.com"));
+        assert!(cors_origin_allowed(&list, "https://SIM.example.com/"));
+        assert!(
+            !cors_origin_allowed(&list, "https://evil.example.com"),
+            "不在清单里的外站 origin 必须拒 —— 通配等于把内核交给任何网页"
+        );
+        assert!(!cors_origin_allowed(&[], "https://evil.example.com"));
+    }
+
+    /// console 帧同样是**完整信封**：前端解码器先读 `schema_version`。
+    #[test]
+    fn console_frames_carry_the_full_contract_envelope() {
+        let frame = console_frame("sess-x", 7, b"A");
+        assert_eq!(frame.get("type").and_then(|v| v.as_str()), Some("event"));
+        assert_eq!(frame.get("seq").and_then(|v| v.as_u64()), Some(7));
+        let payload = frame.get("payload").expect("payload 必须在");
+        assert_eq!(
+            payload.get("schema_version").and_then(|v| v.as_u64()),
+            Some(riscv_sim_contract::SCHEMA_VERSION as u64)
+        );
+        assert_eq!(
+            payload.get("direction").and_then(|v| v.as_str()),
+            Some("Event")
+        );
+        let bytes = payload
+            .get("payload")
+            .and_then(|inner| inner.get("Event"))
+            .and_then(|event| event.get("Console"))
+            .and_then(|console| console.get("bytes"))
+            .and_then(|bytes| bytes.as_array())
+            .expect("Event→Console→bytes");
+        assert_eq!(
+            bytes.iter().filter_map(|v| v.as_u64()).collect::<Vec<_>>(),
+            vec![b'A' as u64]
+        );
     }
 
     #[test]
