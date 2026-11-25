@@ -89,6 +89,8 @@ http://localhost:8080/?token=<随机生成的令牌>
 
 常用子命令：`./deploy.sh rebuild`（改了代码/前端后重建）、`down`（停，数据卷保留）、`logs`、`ps`。
 
+整张图在 [`docs/architecture/deploy-view.svg`](./architecture/deploy-view.svg)（同名 `.png` 供直接看）：浏览器 → 宿主 `8080` → 容器 `9876` → 进程（静态托管 / API / 会话线程 / 内核），以及卷与健康检查的位置。
+
 几个必须知道的点：
 
 - **页面不需要 `?server=`**：容器里服务端用 `--front-dir` 自己托管 `front/`，页面向同源发 `GET /api/version` 探测成功后**自动**进服务端模式。地址里只需要带 `?token=`。
