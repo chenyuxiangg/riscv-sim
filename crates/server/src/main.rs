@@ -147,19 +147,20 @@ fn main() -> ExitCode {
 async fn shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(signal) => signal,
-                Err(err) => {
-                    // 装不上 SIGTERM 处理器不是致命错误：退化成只认 ctrl-c，
-                    // 但要**说出来**（否则用户以为 SIGTERM 生效了）。
-                    eprintln!(
+        let mut term = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(signal) => signal,
+            Err(err) => {
+                // 装不上 SIGTERM 处理器不是致命错误：退化成只认 ctrl-c，
+                // 但要**说出来**（否则用户以为 SIGTERM 生效了）。
+                eprintln!(
                     "riscv_sim_server: cannot hook SIGTERM ({err}); only ctrl-c stops the server"
                 );
-                    let _ = tokio::signal::ctrl_c().await;
-                    return "ctrl-c";
-                }
-            };
+                let _ = tokio::signal::ctrl_c().await;
+                return "ctrl-c";
+            }
+        };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => "ctrl-c",
             _ = term.recv() => "SIGTERM",

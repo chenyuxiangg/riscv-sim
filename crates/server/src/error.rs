@@ -13,8 +13,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use riscv_sim_contract::error::{
-    ErrorFamily, E_SESS_01_NOT_FOUND, E_SESS_02_BUSY, E_SESS_03_POISONED, E_SESS_05_QUOTA_EXCEEDED,
-    E_SESS_06_TIMEOUT, E_SESS_07_UNAUTHORIZED,
+    ErrorFamily, E_SESS_01_NOT_FOUND, E_SESS_02_BUSY, E_SESS_03_POISONED,
+    E_SESS_05_QUOTA_EXCEEDED, E_SESS_06_TIMEOUT, E_SESS_07_UNAUTHORIZED,
 };
 use serde::Serialize;
 
@@ -124,9 +124,7 @@ impl ApiError {
         Self::new(
             StatusCode::NOT_FOUND,
             format!("E_{}-22", ErrorFamily::Platform.as_str()),
-            format!(
-                "no builtin board template {id:?}; GET /api/board/templates lists the known ids"
-            ),
+            format!("no builtin board template {id:?}; GET /api/board/templates lists the known ids"),
         )
     }
 
@@ -236,7 +234,11 @@ pub fn snapshot_failure(code: &str, detail: &str) -> ApiError {
 /// 会话族的码**从契约常量拼出来**，不在这里抄字面量 —— 抄一份就是第二个
 /// 真相，改名时必漂。
 fn session_code(scenario: u16) -> String {
-    format!("E_{}-{:02}", ErrorFamily::Session.as_str(), scenario)
+    format!(
+        "E_{}-{:02}",
+        ErrorFamily::Session.as_str(),
+        scenario
+    )
 }
 
 impl IntoResponse for ApiError {
