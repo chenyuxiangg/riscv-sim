@@ -27,10 +27,14 @@
 # ## 用法
 #
 #   tools/boot-osz.sh [--elf <path>] [--spike <cmd>] [--timeout-ms <n>]
+#                      [--server <url>]
 #
 #   --elf <path>    要跑的 ELF（默认 $OSZ_ELF，其次 /tmp/osz-artifacts/osz.elf）
 #   --spike <cmd>   Spike 可执行文件（默认 spike）
 #   --timeout-ms    两侧各自的墙钟上限（默认 60000）
+#   --server <url>  候选侧改走 **HTTP**：`POST <url>/api/boot`（R-12）
+#                   ⇒ ⇒ 需要该服务以 `--allow-image-root` 覆盖 ELF 所在目录
+#                   ⚠️ 缺省仍走**离线** `osz-boot`（D5：离线验证保留）
 #
 # ## 退出码
 #
@@ -50,6 +54,8 @@ cd "$REPO_ROOT"
 ELF="${OSZ_ELF:-/tmp/osz-artifacts/osz.elf}"
 SPIKE="${SPIKE:-spike}"
 TIMEOUT_MS=60000
+# 候选侧的**在线通道**（R-12）；空 ⇒ 走离线 `osz-boot`。
+SERVER=""
 
 # Spike 的 ISA 串与内存图（v0.23 批实测确定，**不要**随便改）。
 #
@@ -73,6 +79,7 @@ while [ $# -gt 0 ]; do
     --elf)        ELF="$2"; shift 2 ;;
     --spike)      SPIKE="$2"; shift 2 ;;
     --timeout-ms) TIMEOUT_MS="$2"; shift 2 ;;
+    --server)     SERVER="$2"; shift 2 ;;
     -h|--help)
       # ⚠️ 帮助文本 = **头部注释块** ⇒ ⇒ 不能写死行号（头部会变长 ⇒ ⇒ 行号
       # 会把帮助**截断在半句**）⇒ ⇒ 取到第一行**不是**注释为止。
@@ -107,6 +114,30 @@ echo "  elf    : $ELF"
 echo "  spike  : $("$SPIKE" --help 2>&1 | head -1)"
 echo
 
+# ---- 候选侧：**在线通道**（R-12 · `POST /api/boot`） ----------------------
+#
+# ⚠️ 判定口径**只有一份**：停因由服务端的内核 `run_until` + 服务端的前缀
+#   观察给出（`x-boot-stop`），console 字节就是 `/api/boot` 的**回体**
+#   ⇒ ⇒ 本脚本不在这里再判一次预算 / 前缀。
+if [ -n "$SERVER" ]; then
+  echo "-- 候选侧（在线）：$SERVER/api/boot --"
+  BODY_JSON="$(printf '{"path":"%s","prefix":"OSZ$ ","steps":100000000,"timeout_ms":%s}' "$ELF" "$TIMEOUT_MS")"
+  HTTP_CODE="$(curl -sS -o "$PLAT_OUT" -D "$WORK/platform.headers" \
+      -w '%{http_code}' -X POST "$SERVER/api/boot" \
+      -H 'content-type: application/json' -d "$BODY_JSON")" || {
+    echo "boot-osz.sh: /api/boot 请求失败（服务没起？）" >&2
+    exit 3
+  }
+  PLAT_STOP="$(tr -d '\r' < "$WORK/platform.headers" | awk 'tolower($1)=="x-boot-stop:" {print $2}')"
+  PLAT_RC=0
+  PLAT_BYTES=$(wc -c < "$PLAT_OUT" | tr -d ' ')
+  echo "   http=$HTTP_CODE stop=${PLAT_STOP:-?} console=$PLAT_BYTES 字节"
+  # 前缀没等到 / 超时 ⇒ 候选侧没跑出判决。
+  case "${PLAT_STOP:-}" in
+    prefix) ;;
+    *) echo "VERDICT NO-VERDICT 候选侧没到前缀（stop=${PLAT_STOP:-?}）" >&2; exit 3 ;;
+  esac
+else
 # ---- 候选侧（本平台） --------------------------------------------------
 #
 # ⚠️ 用仓内的 watchdog.pl 加超时：osz 是**死循环**，不超时不会自己停。
@@ -166,6 +197,8 @@ cat "$WORK/platform.stderr"
 PLAT_BYTES=$(wc -c < "$PLAT_OUT" | tr -d ' ')
 echo "   console 字节数: $PLAT_BYTES (exit=$PLAT_RC)"
 echo
+
+fi  # 候选侧通道结束
 
 # ---- 参考侧（Spike） ---------------------------------------------------
 #

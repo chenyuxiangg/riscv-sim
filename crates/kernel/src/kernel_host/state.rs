@@ -37,6 +37,16 @@ impl KernelHost {
     pub fn now_ps(&self) -> u64 {
         self.backend.engine().now_ps()
     }
+
+    /// 观察点表的**只读快照**（M-24 R-08「按内核既有能力暴露」）。
+    ///
+    /// ⚠️ 内核**没有** `ListWatchpoints` 命令（契约里观察点只有 Set / Clear
+    ///   ⇒ ⇒ 回执是 `Tick`），所以外部要「列出观察点」只能由宿主开一个只读
+    ///   口子；这里按 **id 升序**给出去（`WatchpointTable::iter` 的顺序），
+    ///   ⇒ ⇒ 两次调用顺序一致，测试与客户端都不必自己排。
+    pub fn list_watchpoints(&self) -> Vec<riscv_sim_contract::model::Watchpoint> {
+        self.backend.watchpoints().iter().cloned().collect()
+    }
     /// 事件队列里**待处理**的事件数（D-07）。
     ///
     /// 时间驱动链路的心跳：跑过一轮之后，队列里应当留着一件待派发的

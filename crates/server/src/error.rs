@@ -185,6 +185,16 @@ pub fn board_failure(code: &str, detail: &str) -> ApiError {
     ApiError::new(status, code, detail)
 }
 
+/// 复位发生点（R-14）：**没装过镜像** ⇒ `E_SESS-02` ⇒ **409**（状态冲突，
+/// 不是请求错）；其余沿用 [`load_failure`] 的装载口径（镜像还在，只是重装
+/// 失败 ⇒ 与首次装载同一个码、同一个状态）。
+pub fn reset_failure(code: &str, detail: &str) -> ApiError {
+    match code {
+        "E_SESS-02" => ApiError::new(StatusCode::CONFLICT, code, detail),
+        _ => load_failure(code, detail),
+    }
+}
+
 /// 读 console 发生点：`E_SESS-04`（窗口丢失）⇒ **409**（客户端要重新对齐，
 /// 不是请求错）⇒ 其余 400。
 pub fn console_failure(code: &str, detail: &str) -> ApiError {

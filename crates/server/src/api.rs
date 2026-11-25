@@ -18,7 +18,9 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use riscv_sim_contract::model::{Breakpoint, BreakpointKind, TraceFormat, TraceSource};
+use riscv_sim_contract::model::{
+    Breakpoint, BreakpointKind, TraceFormat, TraceSource, WatchAccess, WriteSize, Watchpoint,
+};
 use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::CommandPayload;
 use riscv_sim_contract::session::{CheckpointMetaDto, SessionSnapshotDto};
@@ -28,11 +30,17 @@ use serde_json::json;
 
 use crate::config::{Config, DEFAULT_MAX_CONSOLE};
 use crate::error::ApiError;
-use crate::session::{BoardSource, SessionInfo, SessionRegistry};
+use crate::session::{BoardSource, RunSpec, RunUntil, SessionInfo, SessionRegistry};
 use crate::upload;
 
 /// 远程模式的令牌头名（R-15）。
 const TOKEN_HEADER: &str = "x-auth-token";
+
+/// `run` 的 `prefix` 长度上限（字节）。
+///
+/// 前缀是「console 里出现这一行」的判据 ⇒ ⇒ 真实前缀是几十字节；
+/// 给到 1 KiB 已经远超需要，再长只会让每个窗口做一次无意义的长匹配。
+const MAX_PREFIX_BYTES: usize = 1024;
 
 /// 一次 console 读的默认上限（64 KiB）。真正的上界是 `--max-console`。
 const DEFAULT_CONSOLE_READ: usize = 64 * 1024;
@@ -54,6 +62,8 @@ const BOOT_CHUNK: u32 = 10_000;
 /// 所以 WS 这一侧只能**按拍查询**，不是内核主动推。
 const WS_POLL: Duration = Duration::from_millis(50);
 const WS_CHUNK: usize = 256;
+/// WS 每拍最多推多少 console 字节（R-06 的推送通道）。
+const WS_CONSOLE_CHUNK: usize = 4096;
 
 /// `GET .../events`（REST 版）一次最多取多少帧。
 const DEFAULT_EVENT_LIMIT: usize = 256;
@@ -192,6 +202,7 @@ pub fn router(state: AppState) -> Router {
             get(get_session).delete(delete_session),
         )
         .route("/api/sessions/{id}/pause", post(pause_session))
+        .route("/api/sessions/{id}/reset", post(reset_session))
         .route("/api/sessions/{id}/board", put(set_board))
         .route("/api/sessions/{id}/image", post(load_image))
         .route("/api/sessions/{id}/run", post(run_session))
@@ -199,7 +210,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/console", get(read_console))
         .route("/api/sessions/{id}/events", get(read_events))
         .route("/api/sessions/{id}/events/ws", get(events_ws))
-        .route("/api/sessions/{id}/trace", get(read_trace))
+        .route("/api/sessions/{id}/trace", get(read_trace).post(set_trace_enabled))
         .route("/api/sessions/{id}/trace/enabled", put(set_trace_enabled))
         .route("/api/sessions/{id}/jobs/{job}", get(get_job))
         .route("/api/sessions/{id}/snapshot", post(take_snapshot))
@@ -211,6 +222,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}/breakpoints",
             get(list_breakpoints).post(set_breakpoint),
+        )
+        .route(
+            "/api/sessions/{id}/watchpoints",
+            get(list_watchpoints).post(set_watchpoint),
+        )
+        .route(
+            "/api/sessions/{id}/watchpoints/{wp}",
+            delete(clear_watchpoint),
         )
         .route(
             "/api/sessions/{id}/breakpoints/{bp}",
@@ -431,7 +450,7 @@ async fn get_template(Path(id): Path<String>) -> Result<Json<serde_json::Value>,
     Ok(Json(json!({ "id": id, "description": description })))
 }
 
-/// `POST …/run` 的请求体：**整份可选**。
+/// `POST …/run` 的请求体：**整份可选**（R-05）。
 #[derive(Debug, Default, Deserialize)]
 pub struct RunRequest {
     /// 指令上限（不给 ⇒ 只看墙钟）。
@@ -440,24 +459,31 @@ pub struct RunRequest {
     /// 墙钟上限（毫秒）；不给 ⇒ 用 `--max-run-ms`。
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// console 里出现这个字节串就停（R-05 的 `prefix`）。
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// 继续到下一个停点：`breakpoint` / `halt`（R-05）。
+    #[serde(default)]
+    pub until: Option<String>,
     /// `true` ⇒ **异步**：立刻回 `202 {job_id, poll}`，结果由
     /// `GET …/jobs/{job_id}` 轮询（P1）。
     #[serde(default, rename = "async")]
     pub run_async: bool,
 }
 
-/// 把请求折成 `run_until` 的两个参数（**纯函数** ⇒ ⇒ 三条校验可单测）。
+/// 把请求折成一份 [`RunSpec`]（**纯函数** ⇒ ⇒ 校验可单测）。
 ///
 /// 规则：
 /// - `steps = 0` ⇒ 400（「跑 0 条」没有意义，且会让调用方以为跑过）；
 /// - **`steps` 与 `timeout_ms` 同时给 ⇒ 400**：`StepN` 是「恰好 n 条」的
 ///   调试器语义，套墙钟会让它变成「跑了多少算多少」⇒ ⇒ 两件事不能混；
+/// - `until` 只认 `breakpoint` / `halt`，其余 ⇒ 400；`until` 与 `steps`
+///   同时给 ⇒ 400（「跑满 n 条」与「跑到停点」是两句话）；
+/// - `prefix` 空串 ⇒ 400（空串会立刻命中，等于没给）；超过
+///   [`MAX_PREFIX_BYTES`] ⇒ 400；
 /// - `timeout_ms = 0` ⇒ 400；`> --max-run-ms` ⇒ 400（**不静默夹到上限**，
 ///   否则客户端以为它要的 30 s 生效了）。
-pub fn plan_run(
-    request: RunRequest,
-    max_run_ms: u64,
-) -> Result<(Option<u32>, Option<u64>), ApiError> {
+pub fn plan_run(request: RunRequest, max_run_ms: u64) -> Result<RunSpec, ApiError> {
     if let (Some(_), Some(_)) = (request.steps, request.timeout_ms) {
         return Err(ApiError::bad_request(
             "give either `steps` or `timeout_ms`, not both (step semantics are exact-n)",
@@ -467,18 +493,68 @@ pub fn plan_run(
         if steps == 0 {
             return Err(ApiError::bad_request("field `steps` must be >= 1"));
         }
-        return Ok((Some(steps), None));
     }
-    let timeout_ms = request.timeout_ms.unwrap_or(max_run_ms);
-    if timeout_ms == 0 {
-        return Err(ApiError::bad_request("field `timeout_ms` must be >= 1"));
+    let until = match request.until.as_deref() {
+        None => None,
+        Some(raw) => match RunUntil::parse(raw) {
+            Some(until) => Some(until),
+            None => {
+                return Err(ApiError::bad_request(format!(
+                    "field `until` must be \"breakpoint\" or \"halt\" (got {raw:?})"
+                )))
+            }
+        },
+    };
+    if until.is_some() && request.steps.is_some() {
+        return Err(ApiError::bad_request(
+            "give either `steps` or `until`, not both (exact-n vs run-to-the-next-stop)",
+        ));
     }
-    if timeout_ms > max_run_ms {
-        return Err(ApiError::bad_request(format!(
-            "timeout_ms {timeout_ms} exceeds --max-run-ms ({max_run_ms}); raise the limit or lower the request"
-        )));
+    if let Some(prefix) = request.prefix.as_deref() {
+        if prefix.is_empty() {
+            return Err(ApiError::bad_request(
+                "field `prefix` must not be empty (an empty needle matches at once)",
+            ));
+        }
+        if prefix.len() > MAX_PREFIX_BYTES {
+            return Err(ApiError::bad_request(format!(
+                "field `prefix` is {} bytes; the limit is {MAX_PREFIX_BYTES}",
+                prefix.len()
+            )));
+        }
     }
-    Ok((None, Some(timeout_ms)))
+    let timeout_ms = if request.steps.is_some() {
+        None
+    } else if until.is_some() || request.prefix.is_some() {
+        // 前缀 / until 需要一个熔断：缺省沿用服务端上限，0 与超限都拒。
+        match request.timeout_ms {
+            None => Some(max_run_ms),
+            Some(0) => return Err(ApiError::bad_request("field `timeout_ms` must be >= 1")),
+            Some(timeout_ms) if timeout_ms > max_run_ms => {
+                return Err(ApiError::bad_request(format!(
+                    "timeout_ms {timeout_ms} exceeds --max-run-ms ({max_run_ms}); raise the limit or lower the request"
+                )))
+            }
+            Some(timeout_ms) => Some(timeout_ms),
+        }
+    } else {
+        let timeout_ms = request.timeout_ms.unwrap_or(max_run_ms);
+        if timeout_ms == 0 {
+            return Err(ApiError::bad_request("field `timeout_ms` must be >= 1"));
+        }
+        if timeout_ms > max_run_ms {
+            return Err(ApiError::bad_request(format!(
+                "timeout_ms {timeout_ms} exceeds --max-run-ms ({max_run_ms}); raise the limit or lower the request"
+            )));
+        }
+        Some(timeout_ms)
+    };
+    Ok(RunSpec {
+        steps: request.steps,
+        timeout_ms,
+        prefix: request.prefix,
+        until,
+    })
 }
 
 /// 跑到停点（R-05）。
@@ -495,21 +571,21 @@ async fn run_session(
     // ⚠️ 先记下 `async`：`plan_run` 吃的是**同一份**折算规则（steps 与
     //    timeout_ms 互斥、0 与超上限都拒），异步与同步不能各判一套。
     let run_async = request.run_async;
-    let (steps, timeout_ms) = plan_run(request, state.max_run_ms)?;
+    let max_run_ms = state.max_run_ms;
+    let spec = plan_run(request, max_run_ms)?;
     if run_async {
-        let submitted = state.registry.run_async(&id, steps, timeout_ms)?;
+        let submitted = state.registry.run_async(&id, spec)?;
         return Ok((StatusCode::ACCEPTED, Json(submitted)).into_response());
     }
-    let report = state.registry.run(&id, steps, timeout_ms)?;
+    let report = state.registry.run(&id, spec)?;
     if report.get("stop_reason").and_then(|value| value.as_str()) == Some("timeout") {
         let mut timeout_body = report;
         timeout_body["code"] = json!(format!(
             "E_{}-06",
             riscv_sim_contract::error::ErrorFamily::Session.as_str()
         ));
-        let limit_ms = timeout_ms.unwrap_or(state.max_run_ms);
         timeout_body["detail"] = json!(format!(
-            "run hit the wall-clock limit ({limit_ms} ms); the guest is stopped, see `executed` / `pc`"
+            "run hit the wall-clock limit ({max_run_ms} ms); the guest is stopped, see `executed` / `pc`"
         ));
         timeout_body["status"] = json!(504);
         return Ok((StatusCode::GATEWAY_TIMEOUT, Json(timeout_body)).into_response());
@@ -542,7 +618,13 @@ async fn step_session(
     if request.n == 0 {
         return Err(ApiError::bad_request("field `n` must be >= 1"));
     }
-    let report = state.registry.run(&id, Some(request.n), None)?;
+    let report = state.registry.run(
+        &id,
+        RunSpec {
+            steps: Some(request.n),
+            ..RunSpec::default()
+        },
+    )?;
     Ok(Json(report))
 }
 
@@ -604,6 +686,9 @@ async fn events_ws(
 
 async fn stream_events(mut socket: WebSocket, state: AppState, id: String) {
     let mut next: u64 = 0;
+    // console 推送的游标（R-06 的 P1：与拉取**共用同一份 offset**）。
+    let mut console_next: u64 = 0;
+    let mut console_lost = false;
     loop {
         tokio::select! {
             _ = tokio::time::sleep(WS_POLL) => {
@@ -622,14 +707,19 @@ async fn stream_events(mut socket: WebSocket, state: AppState, id: String) {
                         } else {
                             "session gone"
                         };
+                        // 关闭帧沿用 M-07 的 `resume` 形状（`payload` 里说明原因），
+                        // 客户端照帧解析即可，不必另认一种封套。
                         let frame = serde_json::json!({
-                            "since": since,
-                            "next": since,
-                            "lost": false,
-                            "frames": [],
-                            "closed": true,
-                            "reason": reason,
-                            "status": err.into_response().status().as_u16(),
+                            "type": "resume",
+                            "seq": since,
+                            "sessionId": id,
+                            "role": serde_json::Value::Null,
+                            "reqId": serde_json::Value::Null,
+                            "payload": {
+                                "closed": true,
+                                "reason": reason,
+                                "status": err.into_response().status().as_u16(),
+                            },
                         });
                         let _ = socket.send(Message::Text(frame.to_string().into())).await;
                         let _ = socket.send(Message::Close(None)).await;
@@ -638,16 +728,88 @@ async fn stream_events(mut socket: WebSocket, state: AppState, id: String) {
                 };
                 let got_next = body.get("next").and_then(|value| value.as_u64()).unwrap_or(since);
                 let lost = body.get("lost").and_then(|value| value.as_bool()).unwrap_or(false);
-                let frames = body.get("frames").cloned().unwrap_or(json!([]));
-                let frame = serde_json::json!({
-                    "since": since,
-                    "next": got_next,
-                    "lost": lost,
-                    "frames": frames,
-                });
                 next = got_next;
-                if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
-                    return;
+                // 背压：丢了就**显式**报（R-13：允许丢帧，但不许静默断流）。
+                if lost {
+                    let frame = serde_json::json!({
+                        "type": "resume",
+                        "seq": got_next,
+                        "sessionId": id,
+                        "role": serde_json::Value::Null,
+                        "reqId": serde_json::Value::Null,
+                        "payload": { "lost": true, "next": got_next },
+                    });
+                    if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        return;
+                    }
+                }
+                if let Some(frames) = body.get("frames").and_then(|value| value.as_array()) {
+                    for frame in frames {
+                        if socket
+                            .send(Message::Text(frame.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                // ---- console 推送（R-06 P1）----
+                if !console_lost {
+                    match state.registry.console(&id, console_next, WS_CONSOLE_CHUNK) {
+                        Ok(body) => {
+                            let base = body.get("base").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let total = body.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if base > console_next {
+                                // 窗口丢了：显式说「从哪重新对齐」，不静默少字节。
+                                console_lost = true;
+                                let frame = serde_json::json!({
+                                    "type": "resume",
+                                    "seq": base,
+                                    "sessionId": id,
+                                    "role": serde_json::Value::Null,
+                                    "reqId": serde_json::Value::Null,
+                                    "payload": {
+                                        "topic": "sim.console",
+                                        "lost": true,
+                                        "from": console_next,
+                                        "base": base,
+                                    },
+                                });
+                                if socket
+                                    .send(Message::Text(frame.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            let bytes: Vec<u8> = body
+                                .get("bytes")
+                                .and_then(|value| value.as_array())
+                                .map(|list| {
+                                    list.iter()
+                                        .filter_map(|byte| byte.as_u64().map(|v| v as u8))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if !bytes.is_empty() {
+                                let len = bytes.len() as u64;
+                                let frame = console_frame(&id, console_next, &bytes);
+                                console_next += len;
+                                if socket
+                                    .send(Message::Text(frame.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            } else if total == console_next {
+                                // 没有新字节，游标不动（保持与拉取同一份 offset）。
+                            }
+                        }
+                        Err(_) => console_lost = true,
+                    }
                 }
             }
             incoming = socket.recv() => {
@@ -659,6 +821,30 @@ async fn stream_events(mut socket: WebSocket, state: AppState, id: String) {
             }
         }
     }
+}
+
+/// console 的 M-07 帧：`payload` 是契约 `Message` 的 `payload`
+/// （`{"Event":{"Console":{"bytes":[...]}}}`），`seq` 用 **console 绝对偏移**
+/// ⇒ ⇒ 与 `GET …/console?offset=` 同一份账（R-06：不能两个真相）。
+fn console_frame(session_id: &str, offset: u64, bytes: &[u8]) -> serde_json::Value {
+    let message = riscv_sim_contract::protocol::Message::event(
+        offset,
+        riscv_sim_contract::protocol::EventPayload::Console {
+            bytes: bytes.to_vec(),
+        },
+    );
+    let payload = serde_json::to_value(&message)
+        .ok()
+        .and_then(|value| value.get("payload").cloned())
+        .unwrap_or(serde_json::Value::Null);
+    json!({
+        "type": "event",
+        "seq": offset,
+        "sessionId": session_id,
+        "role": serde_json::Value::Null,
+        "reqId": serde_json::Value::Null,
+        "payload": payload,
+    })
 }
 
 /// `GET /api/sessions/{id}/trace?source=&format=&offset=&limit=`
@@ -865,6 +1051,9 @@ pub struct MemoryQuery {
     /// 字节数（缺省 64；`0` 与 `> DUMP_MAX_BYTES` 由内核回 `E_DBG-03`）。
     #[serde(default)]
     pub len: Option<u32>,
+    /// 附加视图：`u32`（小端 32 位字）或 `asc`（可打印字符）。
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// 读一段内存（R-07）：走契约 `DumpMemory` ⇒ 一次最多 `DUMP_MAX_BYTES`。
@@ -880,11 +1069,66 @@ async fn read_memory_range(
         .addr
         .ok_or_else(|| ApiError::bad_request("query `addr` is required"))?;
     let len = query.len.unwrap_or(DEFAULT_MEMORY_LEN);
-    Ok(Json(
-        state
-            .registry
-            .debug(&id, CommandPayload::DumpMemory { addr, len })?,
-    ))
+    let mut body = state
+        .registry
+        .debug(&id, CommandPayload::DumpMemory { addr, len })?;
+    // R-07 的「可选视图」：`format=u32|asc` 只**追加**视图，原始字节照旧
+    // 在 `bytes` 里 ⇒ ⇒ 两个消费者（要判位的 / 要看的）不必二选一。
+    if let Some(format) = query.format.as_deref() {
+        let bytes: Vec<u8> = body
+            .get("bytes")
+            .and_then(|value| value.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|byte| byte.as_u64().map(|value| value as u8))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (words, ascii) = memory_view(&bytes, format)?;
+        if let Some(words) = words {
+            body["u32"] = json!(words);
+        }
+        if let Some(ascii) = ascii {
+            body["asc"] = json!(ascii);
+        }
+        body["format"] = json!(format);
+    }
+    Ok(Json(body))
+}
+
+/// 内存视图（R-07）：`u32` ⇒ 小端 32 位字（不足 4 字节的尾巴丢掉）；
+/// `asc` ⇒ 可打印字符视图（不可打印按 `.`，与 `xxd -c` 的习惯一致）。
+fn memory_view(
+    bytes: &[u8],
+    format: &str,
+) -> Result<(Option<Vec<u32>>, Option<String>), ApiError> {
+    match format.to_ascii_lowercase().as_str() {
+        "u32" | "word" => {
+            let words: Vec<u32> = bytes
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+            Ok((Some(words), None))
+        }
+        "asc" | "ascii" => {
+            let text: String = bytes
+                .iter()
+                .map(|byte| {
+                    if (0x20..0x7f).contains(byte) {
+                        char::from(*byte)
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            Ok((None, Some(text)))
+        }
+        other => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "E_PROTO-01",
+            format!("unknown memory format {other:?}; expected u32|asc"),
+        )),
+    }
 }
 
 /// `GET …/symbols` 的查询串。
@@ -1110,6 +1354,113 @@ async fn enable_breakpoint(
     )?))
 }
 
+/// `POST …/reset` —— 复位（R-14）：回到**当前工程的装载起点**。
+///
+/// 口径与前端「复位 = 重新装载当前工程」一致：用的是这条会话**最后一次
+/// 成功装载**的那份镜像（服务端记着），板与订阅原样重建。
+async fn reset_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(state.registry.reset(&id)?))
+}
+
+/// `GET …/watchpoints` —— 观察点表（R-08）。
+async fn list_watchpoints(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(state.registry.watchpoints(&id)?))
+}
+
+/// `POST …/watchpoints` 的请求体（R-08）。
+///
+/// ⚠️ **id 可省**：省了就由服务端按「当前最大 id + 1」分配（与内核的
+///   `set_watchpoint_with_id` 显式 id 语义对齐）；显式给了就按给的来
+///   （同一 id 重复注册 ⇒ 覆盖，内核语义）。
+#[derive(Debug, Deserialize)]
+pub struct WatchpointRequest {
+    /// 被观察的地址（必填）。
+    pub addr: u32,
+    /// 观察宽度：`byte` / `half` / `word`（缺省 `word`）。
+    #[serde(default)]
+    pub size: Option<String>,
+    /// 访问方向：`read` / `write` / `either`（缺省 `write`）。
+    #[serde(default)]
+    pub access: Option<String>,
+    /// 显式 id（缺省 ⇒ 服务端分配）。
+    #[serde(default)]
+    pub id: Option<u32>,
+}
+
+async fn set_watchpoint(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<WatchpointRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let size = parse_write_size(request.size.as_deref())?;
+    let access = parse_watch_access(request.access.as_deref())?;
+    let existing = state.registry.watchpoints(&id)?;
+    let watchpoint_id = match request.id {
+        Some(explicit) => explicit,
+        None => {
+            let max = existing
+                .get("watchpoints")
+                .and_then(|value| value.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|wp| wp.get("id").and_then(|value| value.as_u64()))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            (max + 1) as u32
+        }
+    };
+    let wp = Watchpoint {
+        id: watchpoint_id,
+        addr: request.addr,
+        size,
+        access,
+    };
+    let table = state.registry.set_watchpoint(&id, wp)?;
+    Ok((StatusCode::CREATED, Json(table)))
+}
+
+/// 删观察点（R-08）。幂等：id 不存在 ⇒ 表不变、仍 200（内核就是幂等）。
+async fn clear_watchpoint(
+    State(state): State<AppState>,
+    Path((id, wp)): Path<(String, u32)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(state.registry.clear_watchpoint(&id, wp)?))
+}
+
+fn parse_write_size(raw: Option<&str>) -> Result<WriteSize, ApiError> {
+    match raw.map(|value| value.to_ascii_lowercase()).as_deref() {
+        None | Some("word") | Some("4") => Ok(WriteSize::Word),
+        Some("half") | Some("2") => Ok(WriteSize::Half),
+        Some("byte") | Some("1") => Ok(WriteSize::Byte),
+        Some(other) => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "E_PROTO-01",
+            format!("unknown watchpoint size {other:?}; expected byte|half|word"),
+        )),
+    }
+}
+
+fn parse_watch_access(raw: Option<&str>) -> Result<WatchAccess, ApiError> {
+    match raw.map(|value| value.to_ascii_lowercase()).as_deref() {
+        None | Some("write") => Ok(WatchAccess::Write),
+        Some("read") => Ok(WatchAccess::Read),
+        Some("either") | Some("read-write") => Ok(WatchAccess::Either),
+        Some(other) => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "E_PROTO-01",
+            format!("unknown watchpoint access {other:?}; expected read|write|either"),
+        )),
+    }
+}
+
 /// `POST /api/boot` 的请求体（**一把梭** · R-08）。
 #[derive(Debug, Default, Deserialize)]
 pub struct BootRequest {
@@ -1245,7 +1596,15 @@ async fn boot_once(
             break;
         }
         let chunk = remaining.min(BOOT_CHUNK);
-        let report = state.registry.run(id, Some(chunk), None)?;
+        // ⚠️ 与 `run` **同一份**停点描述：`boot` 自己不再造停因，只是把
+        //   「跑一个窗口」交给会话线程，前缀/预算由它自己判（R-12）。
+        let report = state.registry.run(
+            id,
+            RunSpec {
+                steps: Some(chunk),
+                ..RunSpec::default()
+            },
+        )?;
         let ran = report
             .get("executed")
             .and_then(|value| value.as_u64())
@@ -1525,7 +1884,7 @@ mod tests {
             RunRequest {
                 steps: Some(3),
                 timeout_ms: Some(100),
-                run_async: false,
+                ..RunRequest::default()
             },
             5_000,
         )
@@ -1535,8 +1894,7 @@ mod tests {
         let zero = plan_run(
             RunRequest {
                 steps: Some(0),
-                timeout_ms: None,
-                run_async: false,
+                ..RunRequest::default()
             },
             5_000,
         )
@@ -1545,9 +1903,8 @@ mod tests {
 
         let too_long = plan_run(
             RunRequest {
-                steps: None,
                 timeout_ms: Some(30_000),
-                run_async: false,
+                ..RunRequest::default()
             },
             5_000,
         )
@@ -1560,19 +1917,28 @@ mod tests {
     fn plan_run_defaults_to_the_process_limit() {
         assert_eq!(
             plan_run(RunRequest::default(), 5_000).expect("缺省合法"),
-            (None, Some(5_000))
+            RunSpec {
+                steps: None,
+                timeout_ms: Some(5_000),
+                prefix: None,
+                until: None,
+            }
         );
         assert_eq!(
             plan_run(
                 RunRequest {
                     steps: Some(7),
-                    timeout_ms: None,
-                    run_async: false,
+                    ..RunRequest::default()
                 },
                 5_000
             )
             .expect("步进合法"),
-            (Some(7), None)
+            RunSpec {
+                steps: Some(7),
+                timeout_ms: None,
+                prefix: None,
+                until: None,
+            }
         );
     }
 
@@ -1640,5 +2006,104 @@ mod tests {
         assert!(contains(b"abcOSZ$ def", b"OSZ$ "));
         assert!(!contains(b"abc", b"OSZ$ "));
         assert!(contains(b"abc", b""));
+    }
+
+    /// R-05 的 `prefix` / `until` 折算：合法取值通过，冲突与空前缀都拒。
+    #[test]
+    fn plan_run_accepts_prefix_and_until_but_rejects_conflicts() {
+        let prefix = plan_run(
+            RunRequest {
+                prefix: Some("OSZ$ ".to_string()),
+                timeout_ms: Some(30_000),
+                ..RunRequest::default()
+            },
+            5_000,
+        );
+        // 超上限要拒（不是夹到 5000）。
+        assert!(prefix.is_err());
+
+        let ok = plan_run(
+            RunRequest {
+                prefix: Some("OSZ$ ".to_string()),
+                ..RunRequest::default()
+            },
+            5_000,
+        )
+        .expect("前缀 + 缺省熔断合法");
+        assert_eq!(ok.prefix.as_deref(), Some("OSZ$ "));
+        assert_eq!(ok.timeout_ms, Some(5_000));
+
+        let until = plan_run(
+            RunRequest {
+                until: Some("breakpoint".to_string()),
+                ..RunRequest::default()
+            },
+            5_000,
+        )
+        .expect("until 合法");
+        assert_eq!(until.until, Some(RunUntil::Breakpoint));
+
+        let bad_until = plan_run(
+            RunRequest {
+                until: Some("trap".to_string()),
+                ..RunRequest::default()
+            },
+            5_000,
+        )
+        .expect_err("未知 until 必须拒");
+        assert_eq!(bad_until.status(), StatusCode::BAD_REQUEST);
+
+        let until_and_steps = plan_run(
+            RunRequest {
+                until: Some("halt".to_string()),
+                steps: Some(3),
+                ..RunRequest::default()
+            },
+            5_000,
+        )
+        .expect_err("`steps` 与 `until` 不能同时给");
+        assert_eq!(until_and_steps.status(), StatusCode::BAD_REQUEST);
+
+        let empty = plan_run(
+            RunRequest {
+                prefix: Some(String::new()),
+                ..RunRequest::default()
+            },
+            5_000,
+        )
+        .expect_err("空前缀会立刻命中");
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// R-07 的 `format` 视图：`u32` 小端字、`asc` 可打印兜底。
+    #[test]
+    fn memory_view_renders_words_and_ascii() {
+        let bytes = [0x01, 0x00, 0x00, 0x00, b'a', b'b', 0x00, 0x7f];
+        let (words, ascii) = memory_view(&bytes, "u32").expect("u32 视图");
+        assert_eq!(words, Some(vec![1, 0x7F00_6261]));
+        assert!(ascii.is_none());
+
+        let (_, ascii) = memory_view(&bytes, "asc").expect("asc 视图");
+        assert_eq!(ascii.as_deref(), Some("....ab.."));
+
+        let bad = memory_view(&bytes, "hex").expect_err("未知视图必须拒");
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// R-08 的观察点参数：宽度与方向只认那三个词。
+    #[test]
+    fn watchpoint_size_and_access_are_validated() {
+        assert_eq!(parse_write_size(None).expect("缺省 word"), WriteSize::Word);
+        assert_eq!(parse_write_size(Some("half")).expect("half"), WriteSize::Half);
+        assert!(parse_write_size(Some("quad")).is_err());
+        assert_eq!(
+            parse_watch_access(None).expect("缺省 write"),
+            WatchAccess::Write
+        );
+        assert_eq!(
+            parse_watch_access(Some("either")).expect("either"),
+            WatchAccess::Either
+        );
+        assert!(parse_watch_access(Some("execute")).is_err());
     }
 }

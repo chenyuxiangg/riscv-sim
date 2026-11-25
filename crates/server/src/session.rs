@@ -29,7 +29,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, Project, ProjectVersion};
+use riscv_sim_contract::model::{
+    ImageKind, ImageRef, ImageSource, Project, ProjectVersion, Watchpoint,
+};
 use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, HaltReason, Message};
 use riscv_sim_contract::session::{CheckpointMetaDto, SessionSnapshotDto};
@@ -42,6 +44,11 @@ use crate::error::ApiError;
 pub const CTRL_PAUSE: u8 = 1 << 0;
 /// 控制位：取消（删除 / TTL 回收 / 关进程）。置上后线程不再接新活。
 pub const CTRL_CANCEL: u8 = 1 << 1;
+
+/// 「刚收到回执、位还没清」的宽限窗口（见 [`SessionHandle::submit`]）。
+const BUSY_GRACE: Duration = Duration::from_millis(3);
+/// 宽限窗口的轮询步长。
+const BUSY_GRACE_STEP: Duration = Duration::from_millis(1);
 
 /// 一次作业的回执上限。超了 ⇒ `504 + E_SESS-06`（R-11：不许无限等）。
 ///
@@ -123,18 +130,26 @@ struct EventRing {
     /// 下一条要分配的 seq。
     next: u64,
     cap: usize,
+    /// 这些帧属于哪条会话（M-07 帧的 `sessionId`）。
+    session_id: String,
 }
 
 impl EventRing {
-    fn new(cap: usize) -> Self {
+    fn new(cap: usize, session_id: &str) -> Self {
         Self {
             frames: VecDeque::new(),
             next: 0,
             cap: cap.max(1),
+            session_id: session_id.to_string(),
         }
     }
 
-    /// 把一批事件压进环（一条事件一帧）。
+    /// 把一批事件压进环（一条事件 = 一帧 M-07 传输帧）。
+    ///
+    /// ⚠️ 帧形**就是** `front/lib/frame.js` 的那一层（R-13 逐字要求复用
+    ///   M-07 帧，不另造封套）：`{type, seq, sessionId, role, reqId, payload}`
+    ///   ⇒ ⇒ `payload` 是契约 `Message` 的 serde JSON（内核事件**不做二次
+    ///   包装**：`payload` 里就是 `{"Event": {...}}`）。
     fn push(&mut self, events: &[EventPayload]) {
         for event in events {
             // ⚠️ `Tick` 是心跳，**不进流**：它每个窗口一条，对客户端没有信息量，
@@ -142,7 +157,8 @@ impl EventRing {
             if matches!(event, EventPayload::Tick { .. }) {
                 continue;
             }
-            let Ok(value) = serde_json::to_value(event) else {
+            let message = Message::event(self.next, event.clone());
+            let Ok(value) = serde_json::to_value(&message) else {
                 continue;
             };
             self.frames.push_back((self.next, value));
@@ -166,7 +182,23 @@ impl EventRing {
             .iter()
             .filter(|(seq, _)| *seq >= since)
             .take(limit.max(1))
-            .map(|(seq, value)| serde_json::json!({ "seq": seq, "event": value }))
+            .map(|(seq, message)| {
+                // `Message` 的 serde JSON 形如
+                // `{"schema_version":19,"direction":"event","seq":7,"payload":{"Event":{...}}}`
+                // ⇒ ⇒ 帧只借它的 `payload` 与 `seq`（其余三个字段属于 M-07 层）。
+                let payload = message
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({
+                    "type": "event",
+                    "seq": seq,
+                    "sessionId": self.session_id,
+                    "role": serde_json::Value::Null,
+                    "reqId": serde_json::Value::Null,
+                    "payload": payload,
+                })
+            })
             .collect();
         (frames, self.next, lost)
     }
@@ -193,6 +225,63 @@ impl BoardSource {
             Self::None => "none",
         }
     }
+}
+
+/// `run` 的**until** 取值（R-05：`until?:breakpoint|halt`）。
+///
+/// ⚠️ 两个取值都落到内核**同一个**判据（「继续到下一个停点」）：内核的
+///   `run_until(None, …)` 只有一种「继续」语义，停因由它自己给
+///   （断点 / 观察点 / trap / 结束）⇒ ⇒ 服务端**不**在这里再分叉出一个
+///   第二套停因表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunUntil {
+    /// 只认断点（观察点 / 单步这类停点继续跑）。
+    Breakpoint,
+    /// 继续到停机。
+    Halt,
+}
+
+impl RunUntil {
+    /// 从线上拼写解析；未知取值 ⇒ `None`（由调用方回 400）。
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "breakpoint" => Some(Self::Breakpoint),
+            "halt" => Some(Self::Halt),
+            _ => None,
+        }
+    }
+
+    /// 这个停因**算不算**这次的 `until` 目标。
+    ///
+    /// `halt` ⇒ 任何停点都算；`breakpoint` ⇒ 只认断点（观察点 / 单步
+    /// 这类「停一下但不该收工」的停因继续跑）。
+    fn accepts(self, label: &str) -> bool {
+        match self {
+            Self::Halt => true,
+            Self::Breakpoint => label == "breakpoint",
+        }
+    }
+}
+
+/// 一次 `run` 的**完整停点描述**（R-05）。
+///
+/// ⚠️ 同步 `run` / `step` / 异步 `run` 共用这一份 ⇒ ⇒ 折算规则只有一处
+///   （`api::plan_run`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunSpec {
+    /// 指令上限（`step` 就是 `Some(n)`）。
+    pub steps: Option<u32>,
+    /// 墙钟上限（毫秒；`None` ⇒ 用服务端的 `--max-run-ms`）。
+    pub timeout_ms: Option<u64>,
+    /// 跑到 console 里出现这个字节串就停（R-05 的 `prefix`）。
+    ///
+    /// ⚠️ 判据在**服务端**：内核 `run_until` 不认识 console 内容 ⇒ ⇒ 按
+    ///   小窗口推进、每个窗口扫一遍新增的 console 字节（与
+    ///   `POST /api/boot` **同一套**做法）。停因仍由内核给，前缀只是
+    ///   「服务端发现条件已满足就收工」。
+    pub prefix: Option<String>,
+    /// 继续到下一个停点（`until`）。
+    pub until: Option<RunUntil>,
 }
 
 /// 一个会话的对外描述（列表与详情共用）。
@@ -231,23 +320,51 @@ enum Job {
         reply: Sender<JobReply>,
     },
     /// 跑到停点（R-05）：内核侧的 `run_until`（**唯一**停因判定），回执带
-    /// 停因、本次条数、pc 与本次新增的 console 字节。
+    /// 停因、本次条数、pc、虚拟时间与本次新增的 console 字节。
+    ///
+    /// ⚠️ **停点描述是一整份 [`RunSpec`]**（`steps` / `timeout_ms` /
+    /// `prefix` / `until`）⇒ ⇒ 同步与异步走**同一个**执行体，不各写一套。
     Run {
-        /// 指令上限（`step` 就是 `Some(n)`；`run` 不给就是只看墙钟）。
-        steps: Option<u32>,
-        /// 墙钟上限（毫秒）；对 `steps = Some(n)` **不生效**（见内核注释）。
-        timeout_ms: Option<u64>,
+        /// 停点描述。
+        spec: RunSpec,
         /// 回执通道。
         reply: Sender<JobReply>,
     },
     /// 异步 run（P1）：跑完把结果写进 `slot`，**没有**回执通道。
     RunAsync {
-        /// 指令上限。
-        steps: Option<u32>,
-        /// 墙钟上限（毫秒）。
-        timeout_ms: Option<u64>,
+        /// 停点描述（与同步 `Run` 逐字相同）。
+        spec: RunSpec,
         /// 结果落点（HTTP 侧拿 `job_id` 轮询它）。
         slot: Arc<AsyncSlot>,
+    },
+    /// 复位（R-14）：回到**当前工程的装载起点** —— 用会话记下的那份镜像
+    /// 重新走一遍 `LoadProject`（同一块板、同一订阅）。
+    ///
+    /// ⚠️ **没有镜像就没什么可复位** ⇒ ⇒ `409 + E_SESS-02`（不是 200 空跑）。
+    Reset {
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 列出观察点（R-08）：内核没有 `ListWatchpoints` 命令 ⇒ ⇒ 走宿主新增的
+    /// 只读访问器（[`KernelHost::list_watchpoints`]）。
+    Watchpoints {
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 设置观察点（R-08）：`SetWatchpoint` 的即时回执只有 `Tick`
+    /// ⇒ ⇒ 回体用宿主的**真实表**（不猜）。
+    SetWatchpoint {
+        /// 观察点（id 由 API 层分配或由调用方显式给）。
+        watchpoint: Watchpoint,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 清除观察点（R-08）：`ClearWatchpoint` 幂等（id 不存在也不报错）。
+    ClearWatchpoint {
+        /// 观察点 id。
+        id: u32,
+        /// 回执通道。
+        reply: Sender<JobReply>,
     },
     /// 读事件流（P1）：`seq >= since` 的帧。
     Events {
@@ -516,8 +633,19 @@ impl SessionHandle {
         if !self.is_alive() {
             return Err(ApiError::session_poisoned(&self.id));
         }
+        // ⚠️ 「忙」有一瞬的**假阳性**：会话线程先发回执、再清 `busy` 位
+        //    ⇒ ⇒ 调用方拿到回执**立刻**发下一条（`POST /api/boot` 就是这种
+        //    节奏）时，可能正好撞进这个缝隙。这里最多等 [`BUSY_GRACE`]；
+        //    真在跑的命令（毫秒级以上）照样回 409 —— 判据没被放宽。
         if self.busy.load(Ordering::Acquire) {
-            return Err(ApiError::session_busy(&self.id));
+            let mut waited = Duration::ZERO;
+            while self.busy.load(Ordering::Acquire) && waited < BUSY_GRACE {
+                thread::sleep(BUSY_GRACE_STEP);
+                waited += BUSY_GRACE_STEP;
+            }
+            if self.busy.load(Ordering::Acquire) {
+                return Err(ApiError::session_busy(&self.id));
+            }
         }
         let (tx, rx) = mpsc::channel();
         self.tx
@@ -541,8 +669,19 @@ impl SessionHandle {
         if !self.is_alive() {
             return Err(ApiError::session_poisoned(&self.id));
         }
+        // ⚠️ 「忙」有一瞬的**假阳性**：会话线程先发回执、再清 `busy` 位
+        //    ⇒ ⇒ 调用方拿到回执**立刻**发下一条（`POST /api/boot` 就是这种
+        //    节奏）时，可能正好撞进这个缝隙。这里最多等 [`BUSY_GRACE`]；
+        //    真在跑的命令（毫秒级以上）照样回 409 —— 判据没被放宽。
         if self.busy.load(Ordering::Acquire) {
-            return Err(ApiError::session_busy(&self.id));
+            let mut waited = Duration::ZERO;
+            while self.busy.load(Ordering::Acquire) && waited < BUSY_GRACE {
+                thread::sleep(BUSY_GRACE_STEP);
+                waited += BUSY_GRACE_STEP;
+            }
+            if self.busy.load(Ordering::Acquire) {
+                return Err(ApiError::session_busy(&self.id));
+            }
         }
         let (tx, rx) = mpsc::channel();
         self.tx
@@ -585,18 +724,45 @@ impl SessionHandle {
     }
 
     /// 跑到停点（R-05）。停因由内核的 `run_until` 给，这里只搬运。
-    pub fn run(
-        &self,
-        steps: Option<u32>,
-        timeout_ms: Option<u64>,
-    ) -> Result<serde_json::Value, ApiError> {
+    pub fn run(&self, spec: RunSpec) -> Result<serde_json::Value, ApiError> {
         self.submit(
-            |reply| Job::Run {
-                steps,
-                timeout_ms,
+            |reply| Job::Run { spec, reply },
+            crate::error::load_failure,
+        )
+    }
+
+    /// 复位（R-14）：重新装载当前工程，回到装载起点。
+    pub fn reset(&self) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Reset { reply },
+            crate::error::reset_failure,
+        )
+    }
+
+    /// 列出观察点（R-08）。
+    pub fn watchpoints(&self) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Watchpoints { reply },
+            crate::error::board_failure,
+        )
+    }
+
+    /// 设置观察点（R-08）。
+    pub fn set_watchpoint(&self, wp: Watchpoint) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::SetWatchpoint {
+                watchpoint: wp,
                 reply,
             },
-            crate::error::load_failure,
+            crate::error::board_failure,
+        )
+    }
+
+    /// 清除观察点（R-08）。
+    pub fn clear_watchpoint(&self, id: u32) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::ClearWatchpoint { id, reply },
+            crate::error::board_failure,
         )
     }
 
@@ -640,11 +806,7 @@ impl SessionHandle {
 
     /// 提交一条异步 `run`（P1）：立刻回 `job_id`，结果写进槽后由
     /// [`Self::job`] 读。
-    pub fn run_async(
-        &self,
-        steps: Option<u32>,
-        timeout_ms: Option<u64>,
-    ) -> Result<serde_json::Value, ApiError> {
+    pub fn run_async(&self, spec: RunSpec) -> Result<serde_json::Value, ApiError> {
         if !self.is_alive() {
             return Err(ApiError::session_poisoned(&self.id));
         }
@@ -670,11 +832,7 @@ impl SessionHandle {
             id
         };
         self.tx
-            .send(Job::RunAsync {
-                steps,
-                timeout_ms,
-                slot,
-            })
+            .send(Job::RunAsync { spec, slot })
             .map_err(|_| ApiError::session_poisoned(&self.id))?;
         Ok(serde_json::json!({
             "job_id": job_id,
@@ -979,12 +1137,7 @@ impl SessionRegistry {
     }
 
     /// 跑到停点（R-05）。**借**一条会话，同 [`Self::set_board`]。
-    pub fn run(
-        &self,
-        id: &str,
-        steps: Option<u32>,
-        timeout_ms: Option<u64>,
-    ) -> Result<serde_json::Value, ApiError> {
+    pub fn run(&self, id: &str, spec: RunSpec) -> Result<serde_json::Value, ApiError> {
         let handle = {
             let guard = self
                 .inner
@@ -997,7 +1150,31 @@ impl SessionRegistry {
                     .ok_or_else(|| ApiError::session_not_found(id))?,
             )
         };
-        handle.run(steps, timeout_ms)
+        handle.run(spec)
+    }
+
+    /// 复位（R-14）。
+    pub fn reset(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.reset()
+    }
+
+    /// 列出观察点（R-08）。
+    pub fn watchpoints(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.watchpoints()
+    }
+
+    /// 设置观察点（R-08）。
+    pub fn set_watchpoint(&self, id: &str, wp: Watchpoint) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.set_watchpoint(wp)
+    }
+
+    /// 清除观察点（R-08）。
+    pub fn clear_watchpoint(&self, id: &str, wp: u32) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.clear_watchpoint(wp)
     }
 
     /// 读 console（R-06）。**借**一条会话，同 [`Self::set_board`]。
@@ -1039,14 +1216,9 @@ impl SessionRegistry {
     }
 
     /// 提交异步 `run`（P1）。
-    pub fn run_async(
-        &self,
-        id: &str,
-        steps: Option<u32>,
-        timeout_ms: Option<u64>,
-    ) -> Result<serde_json::Value, ApiError> {
+    pub fn run_async(&self, id: &str, spec: RunSpec) -> Result<serde_json::Value, ApiError> {
         let handle = self.handle_for(id)?;
-        handle.run_async(steps, timeout_ms)
+        handle.run_async(spec)
     }
 
     /// 读一条异步作业（P1）。
@@ -1191,6 +1363,186 @@ impl SessionRegistry {
             handle.join_within(Duration::from_millis(500));
         }
     }
+}
+
+/// 前缀模式的**单窗口预算**（条）。
+///
+/// 为什么不是一次跑到 `steps`：`prefix` 的判据在 console 字节里，内核对
+/// console 内容一无所知 ⇒ ⇒ 只能「小步跑 + 每步看一眼」，窗口越小停得越准。
+/// 1 000 条的量级是「几十微秒」⇒ ⇒ `executed` 相对真实停点最多**多算一个
+/// 窗口**（文档里把这一点写成明口径，不假装精确）。
+const RUN_PREFIX_CHUNK: u32 = 1_000;
+
+/// 前缀模式**没给 `steps`** 时的默认预算（条）。
+///
+/// ⚠️ 前缀可能永远不出现（镜像根本没打印那一行）⇒ ⇒ 必须有个上界，
+/// 否则请求会一直跑到墙钟熔断为止。取与 `POST /api/boot` 同一量级。
+const RUN_PREFIX_DEFAULT_BUDGET: u32 = 1_000_000;
+
+/// **一次 `run` 的完整执行体**（同步与异步共用，R-05）。
+///
+/// 停因判定只有一处（内核 `run_until`）；这里额外做三件**服务端**的事：
+///
+/// 1. **前缀观察**：有小窗口推进时，每个窗口扫一遍新增的 console 字节；
+///    命中 ⇒ `stop_reason = "prefix"`（与 `POST /api/boot` 同一套做法）。
+/// 2. **断点回执补全**：停因是 `breakpoint` 时，用 `ListBreakpoints` 的
+///    权威表按 `pc` 找回**是哪一条**（内核的 `Halted` 只带 pc）。
+/// 3. **统一回体**：`stop_reason / executed / pc / t_ps / total_executed /
+///    console{base,bytes,total}`。
+fn execute_run(
+    host: &mut KernelHost,
+    console: &mut ConsoleRing,
+    events_ring: &mut EventRing,
+    spec: &RunSpec,
+    pause_requested: &dyn Fn() -> bool,
+) -> serde_json::Value {
+    let before = host.total_executed();
+    let started = Instant::now();
+    let deadline = spec
+        .timeout_ms
+        .map(|ms| started + Duration::from_millis(ms));
+    let prefix = spec.prefix.as_deref();
+    // 前缀模式 ⇒ 预算缺省 1e6（`steps` 给了就听它的）。
+    let mut remaining: Option<u32> = match prefix {
+        Some(_) => Some(spec.steps.unwrap_or(RUN_PREFIX_DEFAULT_BUDGET)),
+        None => spec.steps,
+    };
+    let run_base = console.total;
+    let mut stop: Option<&'static str> = None;
+    // 前缀可能**跨窗口**：保留上一窗口末尾 `len-1` 字节。
+    let mut tail: Vec<u8> = Vec::new();
+    // `until=breakpoint` 连续「不算数」的停点次数（兜底，见下）。
+    let mut skips: u32 = 0;
+
+    loop {
+        let chunk = remaining.map(|n| n.min(RUN_PREFIX_CHUNK));
+        // 前缀模式：每个窗口都重新算一次剩余墙钟（内核只认绝对上限）。
+        let left_ms = deadline.map(|until| {
+            until
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64
+        });
+        if left_ms == Some(0) {
+            stop = Some("timeout");
+            break;
+        }
+        let timeout_arg = if prefix.is_some() {
+            left_ms
+        } else {
+            spec.timeout_ms
+        };
+        let report = host.run_until(chunk, timeout_arg, pause_requested);
+        // ⚠️ 每个窗口**立刻**把字节搬进会话环：内核捕获环有界，攒着会丢。
+        events_ring.push(&host.take_pending_events());
+        let drained = host.drain_console();
+        console.push(&drained);
+
+        // ---- 前缀观察（只在服务端发生，停因仍由内核给）----
+        let mut hit_prefix = false;
+        if let Some(needle) = prefix {
+            let mut window = tail.clone();
+            window.extend_from_slice(&drained);
+            if contains_bytes(&window, needle.as_bytes()) {
+                hit_prefix = true;
+            } else {
+                let keep = needle.len().saturating_sub(1);
+                tail = window[window.len().saturating_sub(keep)..].to_vec();
+            }
+        }
+
+        // ---- 内核的停因（优先级最高：它说停了就是停了）----
+        let halt = match report.stop {
+            RunStop::Halted(_) | RunStop::Paused => Some(stop_label(report.stop)),
+            RunStop::Timeout => Some("timeout"),
+            RunStop::Steps | RunStop::Budget => None,
+        };
+        if let Some(label) = halt {
+            // `until=breakpoint` ⇒ 观察点 / 单步这类停点**不算收工**，继续跑；
+            // 其余（断点 / trap / 结束 / 暂停 / 超时）照常收。
+            let accepted = match spec.until {
+                Some(until) => until.accepts(label),
+                None => true,
+            };
+            if accepted {
+                stop = Some(label);
+                break;
+            }
+            // 兜底：连续跳过 64 次仍没等到目标停点 ⇒ 收工（避免死循环）。
+            skips += 1;
+            if skips >= 64 {
+                stop = Some(label);
+                break;
+            }
+            continue;
+        }
+        if hit_prefix {
+            stop = Some("prefix");
+            break;
+        }
+        // ---- 预算 ----
+        match remaining {
+            Some(rem) => {
+                let spent = chunk.unwrap_or(rem).min(rem);
+                let left = rem - spent;
+                remaining = Some(left);
+                if left == 0 {
+                    // 显式 `steps` 跑满 ⇒ `steps`（步进语义）；前缀模式的
+                    // 缺省预算跑满 ⇒ `budget`（「没等到那一行」）。
+                    stop = Some(if spec.steps.is_some() { "steps" } else { "budget" });
+                    break;
+                }
+            }
+            None => {
+                // 没有预算 ⇒ 只可能是单次 `until` 调用已经回来（继续不下去）。
+                stop = Some("budget");
+                break;
+            }
+        }
+    }
+
+    let executed = host.total_executed().saturating_sub(before);
+    let mut body = serde_json::json!({
+        "stop_reason": stop.unwrap_or("budget"),
+        "executed": executed,
+        "pc": host.pc(),
+        "t_ps": host.now_ps(),
+        "total_executed": host.total_executed(),
+        "console": {
+            "base": run_base,
+            "bytes": console.total.saturating_sub(run_base),
+            "total": console.total,
+        },
+    });
+    // 断点命中：按 pc 去权威表里找（`Halted` 只带 pc，不带 id）。
+    if body.get("stop_reason").and_then(|v| v.as_str()) == Some("breakpoint") {
+        let pc = host.pc();
+        let events = host.handle_message(&Message::command(1, CommandPayload::ListBreakpoints));
+        let hit = events.iter().find_map(|event| match event {
+            EventPayload::Breakpoints { breakpoints } => breakpoints
+                .iter()
+                .find(|info| info.breakpoint.enabled && info.breakpoint.addr == pc)
+                .map(|info| {
+                    serde_json::json!({
+                        "id": info.breakpoint.id,
+                        "addr": info.breakpoint.addr,
+                        "kind": info.breakpoint.kind,
+                    })
+                }),
+            _ => None,
+        });
+        if let Some(hit) = hit {
+            body["breakpoint"] = hit;
+        }
+    }
+    body
+}
+
+/// 字节子串判定（不引依赖的朴素实现；console 窗口长度有限，够用）。
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 /// 停因的**线上拼写**（HTTP body 的 `stop_reason`）。
@@ -1469,7 +1821,9 @@ fn spawn_worker(
             // `KernelHost` 是 `!Send` ⇒ ⇒ 只能在这里 `new()`，不能从外面搬进来。
             let mut host = KernelHost::new();
             let mut console = ConsoleRing::new(max_console);
-            let mut events_ring = EventRing::new(EVENT_RING_CAP);
+            let mut events_ring = EventRing::new(EVENT_RING_CAP, &id);
+            // 本会话**最后一次成功装载**的镜像（复位 R-14 的原料）。
+            let mut last_image: Option<(String, ImageKind, Vec<u8>)> = None;
             // 事件流的基础：**订阅 `sim.state.delta`** ⇒ ⇒ 此后每个运行窗口都会
             // 产出一条增量（不订阅的话内核只发 `Tick`，事件流等于空的）。
             let baseline = host.handle_message(&Message::command(
@@ -1512,35 +1866,19 @@ fn spawn_worker(
                                 executed: host.total_executed(),
                             });
                         }
-                        Job::Run {
-                            steps,
-                            timeout_ms,
-                            reply,
-                        } => {
+                        Job::Run { spec, reply } => {
                             // ⚠️ 暂停位在**窗口边界**被读（≤1 个预算窗口的延迟）：
                             //   `run_until` 收一个闭包 ⇒ ⇒ 内核不知道「谁在要求暂停」，
                             //   只知道「要不要停」。
                             let pause_flag = Arc::clone(&ctrl);
-                            let report = host.run_until(steps, timeout_ms, &|| {
-                                pause_flag.load(Ordering::Acquire) & CTRL_PAUSE != 0
-                            });
-                            // ⚠️ 跑完**立刻**把字节从内核搬进会话环：内核侧的捕获环
-                            //   也是有界的，攒着不取会丢最新的字节。
-                            events_ring.push(&host.take_pending_events());
-                            let drained = host.drain_console();
-                            let run_base = console.total;
-                            console.push(&drained);
-                            let _ = reply.send(Ok(serde_json::json!({
-                                "stop_reason": stop_label(report.stop),
-                                "executed": report.executed,
-                                "pc": report.pc,
-                                "total_executed": host.total_executed(),
-                                "console": {
-                                    "base": run_base,
-                                    "bytes": drained,
-                                    "total": console.total,
-                                },
-                            })));
+                            let body = execute_run(
+                                &mut host,
+                                &mut console,
+                                &mut events_ring,
+                                &spec,
+                                &|| pause_flag.load(Ordering::Acquire) & CTRL_PAUSE != 0,
+                            );
+                            let _ = reply.send(Ok(body));
                         }
                         Job::Console {
                             offset,
@@ -1563,33 +1901,18 @@ fn spawn_worker(
                                 }),
                             });
                         }
-                        Job::RunAsync {
-                            steps,
-                            timeout_ms,
-                            slot,
-                        } => {
+                        Job::RunAsync { spec, slot } => {
                             let started = Instant::now();
                             let pause_flag = Arc::clone(&ctrl);
-                            let report = host.run_until(steps, timeout_ms, &|| {
-                                pause_flag.load(Ordering::Acquire) & CTRL_PAUSE != 0
-                            });
-                            events_ring.push(&host.take_pending_events());
-                            let drained = host.drain_console();
-                            let run_base = console.total;
-                            console.push(&drained);
-                            let outcome = Ok(serde_json::json!({
-                                "stop_reason": stop_label(report.stop),
-                                "executed": report.executed,
-                                "pc": report.pc,
-                                "total_executed": host.total_executed(),
-                                "console": {
-                                    "base": run_base,
-                                    "bytes": drained,
-                                    "total": console.total,
-                                },
-                            }));
+                            let body = execute_run(
+                                &mut host,
+                                &mut console,
+                                &mut events_ring,
+                                &spec,
+                                &|| pause_flag.load(Ordering::Acquire) & CTRL_PAUSE != 0,
+                            );
                             let elapsed_ms = started.elapsed().as_millis() as u64;
-                            slot.finish(outcome, elapsed_ms);
+                            slot.finish(Ok(body), elapsed_ms);
                         }
                         Job::Snapshot { meta, reply } => {
                             let payload = host.capture_session(meta);
@@ -1634,6 +1957,7 @@ fn spawn_worker(
                                 "pc": host.pc(),
                                 "registers": host.registers(),
                                 "executed": host.total_executed(),
+                                "t_ps": host.now_ps(),
                             })));
                         }
                         Job::Symbols { limit, reply } => {
@@ -1686,6 +2010,7 @@ fn spawn_worker(
                             // ⚠️ 一次请求 = 一个单镜像工程。工程 id 用固定前缀
                             //   ⇒ ⇒ 内核里「最后一个工程」只在会话线程里，不
                             //   会跨会话串味。
+                            let project_name = name.clone();
                             let project = Project {
                                 id: "m24-load".to_string(),
                                 name: name.clone(),
@@ -1693,7 +2018,7 @@ fn spawn_worker(
                                 images: vec![ImageRef {
                                     name,
                                     kind,
-                                    source: ImageSource::Bytes(bytes),
+                                    source: ImageSource::Bytes(bytes.clone()),
                                 }],
                                 version: ProjectVersion::default(),
                             };
@@ -1715,8 +2040,102 @@ fn spawn_worker(
                                     },
                                 ));
                                 events_ring.push(&restored);
+                                // 记住这份工程：复位（R-14）要原样重装一遍。
+                                last_image = Some((project_name, kind, bytes));
                             }
                             let _ = reply.send(result);
+                        }
+                        Job::Reset { reply } => {
+                            // ⚠️ 没有记住的镜像 ⇒ ⇒ 如实拒绝（不是 200 空跑）。
+                            match last_image.clone() {
+                                None => {
+                                    let _ = reply.send(Err(KernelFailure {
+                                        code: "E_SESS-02".to_string(),
+                                        message: "会话还没有装载过镜像，没有可复位的工程"
+                                            .to_string(),
+                                    }));
+                                }
+                                Some((name, kind, bytes)) => {
+                                    let project = Project {
+                                        id: "m24-load".to_string(),
+                                        name: name.clone(),
+                                        tree: Default::default(),
+                                        images: vec![ImageRef {
+                                            name,
+                                            kind,
+                                            source: ImageSource::Bytes(bytes),
+                                        }],
+                                        version: ProjectVersion::default(),
+                                    };
+                                    let events = host.handle_message(&Message::command(
+                                        1,
+                                        CommandPayload::LoadProject(project),
+                                    ));
+                                    events_ring.push(&events);
+                                    let result = load_reply(&host, &events);
+                                    if result.is_ok() {
+                                        let restored = host.handle_message(&Message::command(
+                                            2,
+                                            CommandPayload::Subscribe {
+                                                topic: TOPIC_STATE_DELTA.to_string(),
+                                            },
+                                        ));
+                                        events_ring.push(&restored);
+                                    }
+                                    // ⚠️ console 环**不裁**（R-06：只追加不改写）⇒ ⇒ 复位
+                                    //    之后新一段从 `total` 起；回执把 `base/total` 一起
+                                    //    给出去，客户端据此对齐，不必猜。
+                                    let _ = reply.send(result.map(|mut loaded| {
+                                        loaded["restored"] = serde_json::json!(true);
+                                        loaded["console"] = serde_json::json!({
+                                            "base": console.base,
+                                            "total": console.total,
+                                        });
+                                        loaded
+                                    }));
+                                }
+                            }
+                        }
+                        Job::Watchpoints { reply } => {
+                            let watchpoints = host.list_watchpoints();
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "watchpoints": watchpoints,
+                                "returned": watchpoints.len(),
+                            })));
+                        }
+                        Job::SetWatchpoint { watchpoint, reply } => {
+                            let events = host.handle_message(&Message::command(
+                                1,
+                                CommandPayload::SetWatchpoint(watchpoint),
+                            ));
+                            events_ring.push(&events);
+                            let _ = reply.send(match kernel_failure(&events) {
+                                Some(failure) => Err(failure),
+                                None => {
+                                    let watchpoints = host.list_watchpoints();
+                                    Ok(serde_json::json!({
+                                        "watchpoints": watchpoints,
+                                        "returned": watchpoints.len(),
+                                    }))
+                                }
+                            });
+                        }
+                        Job::ClearWatchpoint { id, reply } => {
+                            let events = host.handle_message(&Message::command(
+                                1,
+                                CommandPayload::ClearWatchpoint { id },
+                            ));
+                            events_ring.push(&events);
+                            let _ = reply.send(match kernel_failure(&events) {
+                                Some(failure) => Err(failure),
+                                None => {
+                                    let watchpoints = host.list_watchpoints();
+                                    Ok(serde_json::json!({
+                                        "watchpoints": watchpoints,
+                                        "returned": watchpoints.len(),
+                                    }))
+                                }
+                            });
                         }
                     }
                     busy.store(false, Ordering::Release);
@@ -1769,7 +2188,13 @@ mod tests {
             )
             .expect("装载自跳镜像");
         let submitted = registry
-            .run_async(&id, Some(2), None)
+            .run_async(
+                &id,
+                RunSpec {
+                    steps: Some(2),
+                    ..RunSpec::default()
+                },
+            )
             .expect("空闲会话必须能提交异步 run");
         let job_id = submitted
             .get("job_id")
@@ -1836,7 +2261,7 @@ mod tests {
 
     #[test]
     fn event_ring_skips_ticks_and_caps_itself() {
-        let mut ring = EventRing::new(2);
+        let mut ring = EventRing::new(2, "s1");
         // `Tick` 是心跳 ⇒ **不进流**（不进环、也不占 seq）。
         ring.push(&[EventPayload::Tick {
             elapsed_ps: 1,
@@ -1965,5 +2390,167 @@ mod tests {
         // `UserPause` 与宿主 `Paused` **同一个词**：调用方只关心「停了」。
         assert_eq!(stop_label(RunStop::Halted(HaltReason::UserPause)), "pause");
         assert_eq!(stop_label(RunStop::Paused), "pause");
+    }
+
+    /// 前缀停因（R-05）：console 里出现 `prefix` ⇒ `stop_reason = "prefix"`。
+    ///
+    /// 程序（4 条，RawHex）：`lui t0,0x10000` → `addi t1,x0,65` →
+    /// `sb t1,0(t0)`（写 UART THR）→ `jal x0,0`（自跳）。板用 `qemu-virt`
+    /// （UART0 @ 0x1000_0000）。
+    #[test]
+    fn run_stops_on_the_console_prefix() {
+        let registry = registry();
+        let info = registry
+            .create(Some("qemu-virt".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        let program = vec![
+            0xb7, 0x02, 0x00, 0x10, // lui t0, 0x10000
+            0x13, 0x03, 0x10, 0x04, // addi t1, x0, 65 ('A')
+            0x23, 0x80, 0x62, 0x00, // sb t1, 0(t0)
+            0x6f, 0x00, 0x00, 0x00, // jal x0, 0
+        ];
+        registry
+            .load_image(&id, "puts.bin".to_string(), ImageKind::RawHex, program)
+            .expect("装载打印镜像");
+        let report = registry
+            .run(
+                &id,
+                RunSpec {
+                    prefix: Some("A".to_string()),
+                    timeout_ms: Some(1_000),
+                    ..RunSpec::default()
+                },
+            )
+            .expect("前缀 run 必须成功");
+        assert_eq!(
+            report.get("stop_reason").and_then(|v| v.as_str()),
+            Some("prefix"),
+            "console 出现 `A` 就该停在前缀：{report}"
+        );
+        assert_eq!(
+            report
+                .get("console")
+                .and_then(|c| c.get("bytes"))
+                .and_then(|b| b.as_u64()),
+            Some(1),
+            "回体必须报出本次新增的 1 个字节：{report}"
+        );
+        // R-05：回体带虚拟时间。
+        assert!(report.get("t_ps").and_then(|v| v.as_u64()).is_some());
+    }
+
+    /// 复位（R-14）：回到装载起点 —— pc 回 entry、已执行条数归零。
+    #[test]
+    fn reset_returns_to_the_loading_start() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        registry
+            .load_image(
+                &id,
+                "spin.bin".to_string(),
+                ImageKind::RawHex,
+                vec![0x6f, 0, 0, 0],
+            )
+            .expect("装载自跳镜像");
+        registry
+            .run(
+                &id,
+                RunSpec {
+                    steps: Some(10),
+                    ..RunSpec::default()
+                },
+            )
+            .expect("先跑 10 条");
+        let state_before = registry.state(&id).expect("读状态");
+        assert_eq!(
+            state_before.get("executed").and_then(|v| v.as_u64()),
+            Some(10)
+        );
+        let reset = registry.reset(&id).expect("复位必须成功");
+        assert_eq!(reset.get("restored").and_then(|v| v.as_bool()), Some(true));
+        let state_after = registry.state(&id).expect("复位后读状态");
+        assert_eq!(
+            state_after.get("pc").and_then(|v| v.as_u64()),
+            Some(0),
+            "复位后 pc 回到 entry"
+        );
+        assert_eq!(
+            state_after.get("executed").and_then(|v| v.as_u64()),
+            Some(0),
+            "复位后计数归零"
+        );
+    }
+
+    /// 没装过镜像就没有「当前工程」可复位 ⇒ 如实拒绝（不是 200 空跑）。
+    #[test]
+    fn reset_without_an_image_is_rejected() {
+        let registry = registry();
+        let info = registry.create(None, BoardSource::None).unwrap();
+        let err = registry.reset(&info.id).expect_err("空会话不能复位");
+        assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    /// 观察点（R-08）：设置 / 列出 / 清除，全部走内核的表。
+    #[test]
+    fn watchpoints_go_through_the_kernel_table() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        let wp = Watchpoint {
+            id: 7,
+            addr: 0x8000_0000,
+            size: riscv_sim_contract::model::WriteSize::Word,
+            access: riscv_sim_contract::model::WatchAccess::Write,
+        };
+        let table = registry.set_watchpoint(&id, wp).expect("设置观察点");
+        let listed = table.get("watchpoints").and_then(|v| v.as_array()).cloned();
+        assert_eq!(listed.map(|list| list.len()), Some(1), "{table}");
+        assert_eq!(
+            table
+                .get("watchpoints")
+                .and_then(|v| v.as_array())
+                .and_then(|list| list.first())
+                .and_then(|wp| wp.get("id"))
+                .and_then(|v| v.as_u64()),
+            Some(7)
+        );
+        let cleared = registry.clear_watchpoint(&id, 7).expect("清除观察点");
+        assert_eq!(
+            cleared
+                .get("watchpoints")
+                .and_then(|v| v.as_array())
+                .map(|list| list.len()),
+            Some(0)
+        );
+    }
+
+    /// 事件帧就是 M-07 帧（R-13）：`{type,seq,sessionId,role,reqId,payload}`，
+    /// `payload` 是契约 `Message` 的 payload（`{"Event":…}`），不二次包装。
+    #[test]
+    fn event_frames_use_the_m07_envelope() {
+        let mut ring = EventRing::new(4, "sess-x");
+        ring.push(&[delta()]);
+        let (frames, next, _) = ring.since(0, 8);
+        assert_eq!(next, 1);
+        let frame = frames.first().expect("必须有帧");
+        assert_eq!(frame.get("type").and_then(|v| v.as_str()), Some("event"));
+        assert_eq!(frame.get("seq").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            frame.get("sessionId").and_then(|v| v.as_str()),
+            Some("sess-x")
+        );
+        assert!(frame.get("role").map(|v| v.is_null()).unwrap_or(false));
+        assert!(frame.get("reqId").map(|v| v.is_null()).unwrap_or(false));
+        let payload = frame.get("payload").expect("payload 必须在");
+        assert!(
+            payload.get("Event").is_some(),
+            "payload 必须是契约 Message 的 payload（外部标签 `Event`）：{payload}"
+        );
     }
 }

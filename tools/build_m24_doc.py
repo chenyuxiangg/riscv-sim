@@ -20,7 +20,7 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.7（2026-11-25；P0-1～P0-6 与 P1 全部落地：事件流 / trace / 快照还原 / 异步 run）· 需求基线 docs/requirements/"
+VERSION = ("HTML 版 v1.8（2026-11-25；R-01～R-15 全部收口：复位 / 前缀 / until / t_ps / 断点命中 / 观察点 / M-07 帧 / console 推送）· 需求基线 docs/requirements/"
            "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim feature/m24-p0-6（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
@@ -367,17 +367,18 @@ SECTIONS.append({
                 ["<code>GET /api/board/templates</code>", "模板清单", "→ 只读元数据（id / name / priority / device_count）", "200", "P0"],
                 ["<code>GET /api/board/templates/{id}</code>", "模板详情", "→ 完整 <code>PlatformDescription</code>", "200/404", "P0"],
                 ["<code>POST …/image</code>", "装载 ELF/BIN", "<code>octet-stream</code> 或 <code>{path,kind}</code> → <code>{entry, segments, isa, sha256}</code>", "200", "P0"],
-                ["<code>POST …/run</code>", "跑到停点", "<code>{steps|prefix, timeout_ms, until}</code> → <code>{stop_reason, executed, pc, console}</code>", "200/504", "P0"],
+                ["<code>POST …/run</code>", "跑到停点", "<code>{steps|timeout_ms, prefix?, until?}</code> → <code>{stop_reason, executed, pc, t_ps, console, breakpoint?}</code>", "200/504", "P0"],
                 ["<code>POST …/step</code>", "精确 n 条", "<code>{n}</code> → <code>{pc, executed}</code>", "200", "P0"],
-                ["<code>POST …/pause</code> · <code>…/reset</code>", "暂停 / 复位", "→ <code>{state}</code>；复位 = 重发 <code>LoadProject(last_project)</code>", "200/202", "P0"],
+                ["<code>POST …/pause</code> · <code>…/reset</code>", "暂停 / 复位", "→ <code>{state}</code>；复位 = 用会话记下的<b>最后一次成功装载</b>的镜像重装（pc 回 entry、计数归零、console 环不裁）", "200/202/409", "P0"],
                 ["<code>GET …/console</code>", "取 console 字节", "<code>?offset&limit</code> → 原始字节 + <code>X-Console-Total</code>", "200", "P0"],
-                ["<code>GET …/state</code> · <code>…/memory</code> · <code>…/symbols</code> · <code>…/disasm</code>", "调试读取面", "见 §3.1 说明", "200", "P0"],
+                ["<code>GET …/state</code> · <code>…/memory</code> · <code>…/symbols</code> · <code>…/disasm</code>", "调试读取面", "<code>state</code> 含 <code>t_ps</code>；<code>memory</code> 可选 <code>format=u32|asc</code>（追加 <code>u32[]</code> / <code>asc</code> 视图，原始字节照旧）", "200", "P0"],
                 ["<code>/…/breakpoints</code>", "断点增删查", "<code>POST {addr|symbol}</code> · <code>DELETE /{id}</code> · <code>GET</code> + 启停开关", "200/201", "P0"],
+                ["<code>…/watchpoints</code>", "观察点增删查", "<code>POST {addr, size?, access?, id?}</code> · <code>DELETE /{id}</code> · <code>GET</code>（走宿主 <code>list_watchpoints</code>，内核无 List 命令）", "200/201", "P0"],
                 ["<code>POST /api/boot</code>", "一把梭（唯一判定口径）", "<code>{path, prefix, steps, timeout_ms, write_to?}</code> → console 原始字节 + meta 头", "200/504", "P0"],
-                ["<code>GET …/events</code>（升级 <code>…/events/ws</code>）", "事件流（已落地）", "WS 一拍一帧 <code>{since,next,lost,frames[{seq,event}]}</code>；会话没了先推 <code>{closed,reason,status}</code> 再关", "101", "P1"],
+                ["<code>GET …/events</code>（升级 <code>…/events/ws</code>）", "事件流（已落地）", "WS 一条事件一帧 <b>M-07 帧</b> <code>{type:event, seq, sessionId, role, reqId, payload}</code>（payload = 契约 Message 的 payload）；丢窗口推 <code>{type:resume, payload:{lost,next}}</code>；会话没了推 close 说明再关", "101", "P1"],
                 ["<code>GET …/events?since&limit</code>", "事件流（REST 回看，已落地）", "→ <code>{frames, next, lost}</code>；<code>limit</code> 默认 256、硬上限 4096", "200", "P1"],
                 ["<code>GET …/trace?source&format&offset&limit</code>", "轨迹导出（已落地）", "<code>source=execution|waveform</code>、<code>format=csv|json|vcd</code> → <code>{chunk,next_offset,total,bytes,overflow_marked}</code>", "200/400", "P1"],
-                ["<code>PUT …/trace/enabled</code>", "轨迹开关（已落地）", "<code>{enabled}</code> → <code>{enabled,len,dropped}</code>", "200", "P1"],
+                ["<code>POST …/trace</code> · <code>PUT …/trace/enabled</code>", "轨迹开关（已落地；POST 为文档口径，PUT 是兼容别名）", "<code>{enabled}</code> → <code>{enabled,len,dropped}</code>", "200", "P1"],
                 ["<code>POST …/snapshot</code>", "采集会话快照（已落地）", "<code>{id?, base_seq?}</code> → <code>{snapshot（六段 SessionSnapshotDto）, bytes}</code>", "200", "P1"],
                 ["<code>POST …/restore</code>", "还原会话快照（已落地）", "体 = <code>SessionSnapshotDto</code> → <code>{restored, pc, executed}</code>；畸形 400 <code>E_SNAP-01/03</code>，超限 413", "200/400/413", "P1"],
                 ["<code>POST …/run {async:true}</code>", "异步 run（已落地）", "→ <b>202</b> <code>{job_id, kind, state, poll}</code>；折算规则与同步共用 <code>plan_run</code>", "202/409", "P1"],
@@ -394,8 +395,18 @@ SECTIONS.append({
               "结果<b>只能</b>由会话线程写（宿主 <code>!Send</code>），HTTP 只读。执行体与同步 <code>run</code> <b>逐行相同</b>（<code>run_until</code> 是停因唯一实现、console 与事件照样搬进会话环），"
               "区别只在回执走槽而不是连接。<b>超时不是 HTTP 失败</b>：异步作业以 <code>stop_reason=timeout</code> 结束并回 <code>done</code>，不套 504；"
               "会话忙时提交仍 409 <code>E_SESS-02</code>；作业 id 形如 <code>job-0000</code>，会话删除即随之消失。"),
+        ("note", "<b>需求收口的落地口径（v1.8）：</b>① <b>复位</b>用会话自己记下的「最后一次成功装载」镜像（name / kind / bytes）重装 —— 同一块板、同一订阅；"
+              "<code>pc</code> 回 entry、<code>executed</code> 归零（<code>LoadProject</code> 重置计数）；console 环<b>不裁</b>（R-06 只追加），回执带 <code>{base,total}</code> 让客户端对齐；没装过镜像 ⇒ <b>409</b> <code>E_SESS-02</code>。"
+              "② <b>前缀</b>：服务端按 <b>1 000 条</b>小窗口推进并逐窗扫 console 字节（内核对 console 内容一无所知）⇒ <code>stop_reason=prefix</code>；"
+              "<b>明口径</b>：<code>executed</code> 相对真实停点最多<b>多算一个窗口</code>；没给 <code>steps</code> 时默认预算 1e6。"
+              "③ <b>until</b>：<code>breakpoint</code> / <code>halt</code>；前者把观察点 / 单步这类「停一下不该收工」的停点跳过，连续跳过 64 次兜底收工。"
+              "④ <b>断点命中</b>：内核 <code>Halted</code> 只带 pc ⇒ 服务端用 <code>ListBreakpoints</code> 的权威表按 pc 找回 <code>{id, addr, kind}</code>（不猜、不另造停因）。"
+              "⑤ <b>观察点</b>：契约<b>没有</b> List 命令（Set / Clear 的回执只有 Tick）⇒ 宿主新增只读访问器 <code>list_watchpoints</code>；<code>POST</code> 缺省 id = 现有最大 + 1，显式给 id 则覆盖（内核语义）。"
+              "⑥ <b>事件帧</b>改用 M-07 帧（<code>{type:event, seq, sessionId, role, reqId, payload}</code>），<code>payload</code> 就是契约 <code>Message</code> 的 payload（不二次包装）；<b>不带</b> <code>crc</code> —— 需求口径只列五个字段，前端解码对「没有 crc」放行。"
+              "⑦ <b>console 推送</b>：WS 每拍顺带推 console 增量（<code>payload = EventPayload::Console</code>，<code>seq</code> = console 绝对偏移）⇒ 与 <code>GET …/console?offset=</code> <b>同一份账</b>；窗口丢失推 <code>resume{lost, base}</code> 而不是静默少字节。"
+              "⑧ <b>「忙」的一瞬假阳性</b>：会话线程先发回执再清忙位 ⇒ <code>submit</code> 加 <b>3 ms</b> 宽限；真在跑的命令照样 409（口径没放宽）—— <code>/api/boot</code> 连续调用踩到过这个缝。"),
         ("note", "<b>读接口的语义要点：</b><code>state</code> 返回 <code>{pc, gpr[32], t_ps}</code> —— <b>pc 单独一个字段</b>，不在 <code>gpr</code> 里，且 <code>gpr[0]</code> 恒 0（需求里踩过的坑就在这）；"
-              "<code>memory</code> 的 <code>len ≤ 4096</code>（契约 <code>DUMP_MAX_BYTES</code>），越界原样拒；<code>symbols</code> 精确命中与候选并存（候选上限 16）；"
+              "<code>memory</code> 的 <code>len ≤ 4096</code>（契约 <code>DUMP_MAX_BYTES</code>），越界原样拒；<code>format=u32|asc</code> 只<b>追加</b>视图（原始字节仍在 <code>bytes</code> 里，两个消费者不必二选一）；<code>symbols</code> 精确命中与候选并存（候选上限 16）；"
               "<code>disasm</code> 允许短于 <code>count</code>（未映射即止，与内核一致）。"),
         ("h3", "sec3-2", "3.2 运行与一把梭的字段"),
         ("caption", "表 7 · <code>run</code> 与 <code>/api/boot</code> 的请求 / 响应字段"),
@@ -823,6 +834,7 @@ SECTIONS.append({
                 ["P0-4", "run / step / pause / reset + console ring（已落地：内核 <code>run_until</code> 是停因唯一实现，服务端只做请求折算与 504 包装）", "AC-01 / AC-05 / AC-07 / AC-09", "P0-3"],
                 ["P0-5", "状态 / 内存 / 符号 / 反汇编 / 断点（已落地：读面全走内核既有命令，符号类断点先 <code>ResolveSymbol</code> 再注册）", "AC-04 / AC-06", "P0-4"],
                 ["P0-6", "<code>/api/boot</code>（临时会话，跑完即删；回原始 console 字节 + <code>X-Boot-*</code> 头）；<code>osz-boot</code> 改走 <code>run_until</code> 并按优先级自动选板（CLI 与退出码不变）（已落地：<code>E_PLT-22</code> 断链已修）", "一条 curl 完成 osz 判定，与 Spike MATCH；<code>--print-memory</code> 链路保持", "P0-5"],
+                ["P1-2", "需求收口：复位 / run 的 <code>prefix</code>+<code>until</code>+<code>t_ps</code>+断点命中 / <code>memory</code> 视图 / 观察点 / M-07 帧 / console 推送 / <code>POST …/trace</code>（<b>已落地</b>，46 项服务端测试通过，HTTP 冒烟全绿）", "R-05 / R-07 / R-08 / R-06 推送面 / R-13 帧形 / R-14 复位逐条兑现", "P1"],
                 ["P1", "事件流（WS + REST）、trace 导出 / 开关、快照采集 / 还原（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；异步 run（作业表 + 结果槽）<b>已落地</b>", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
             ],
         }),
