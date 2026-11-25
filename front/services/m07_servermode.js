@@ -150,6 +150,58 @@ async function requestJson(url, options = {}) {
 }
 
 /**
+ * 同源探测：**页面就是服务端发出来的**（`--front-dir`，一个端口）时，
+ * 地址里根本没有 `?server=` 可写 —— 这一层替用户把它补上。
+ *
+ * 判据是 `GET /api/version` **真的**回了版本三件套（`kernel` 字符串 +
+ * `schema_version` 数字）；随便一个 200 的网页（比如别处的静态服务器回
+ * `index.html`）不算。连不上 / 超时 / 形状不对 ⇒ `null`（= 本地 Worker 模式）。
+ *
+ * ⚠️ **不抛**：探测失败不是错误，只是「这里不是服务端」。要让本地模式因为
+ * 一次探测失败而白屏，就把「降级」写成了「故障」。
+ *
+ * @param {{fetchImpl?: Function, origin?: string, token?: string|null, timeoutMs?: number}} [options]
+ * @returns {Promise<(ServerParams & {detected: true})|null>}
+ */
+export async function detectSameOriginServer(options = {}) {
+    const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    const origin = options.origin ?? globalThis.location?.origin ?? null;
+    // `file://` 没有同源可言；`null` origin 同理。
+    if (!origin || !/^https?:/i.test(origin)) return null;
+    if (typeof fetchImpl !== "function") return null;
+
+    const base = origin.replace(/\/+$/, "");
+    const url = `${base}/api/version`;
+    const controller =
+        typeof globalThis.AbortController === "function" ? new globalThis.AbortController() : null;
+    const timer =
+        controller && typeof globalThis.setTimeout === "function"
+            ? globalThis.setTimeout(
+                  () => controller.abort(),
+                  Math.max(200, Number(options.timeoutMs ?? 2000) || 2000),
+              )
+            : null;
+    try {
+        const init = { method: "GET", credentials: "omit", headers: {} };
+        if (controller) init.signal = controller.signal;
+        const response = await fetchImpl(url, init);
+        const ok = response?.ok ? await response.json() : null;
+        if (typeof ok?.kernel !== "string" || typeof ok?.schema_version !== "number") return null;
+        return {
+            serverUrl: base,
+            sessionId: null,
+            token: options.token ?? null,
+            board: null,
+            /** @type {true} */ detected: true,
+        };
+    } catch (_err) {
+        return null;
+    } finally {
+        if (timer !== null) globalThis.clearTimeout(timer);
+    }
+}
+
+/**
  * 建/验会话（`POST /api/sessions` · `GET /api/sessions/{id}`）。
  *
  * 语义：

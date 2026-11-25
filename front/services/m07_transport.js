@@ -266,6 +266,24 @@ function createWorkerAdapter(options) {
 }
 
 /**
+ * 给事件流地址带上令牌。
+ *
+ * ⚠️ **浏览器的 `WebSocket` 不能带自定义请求头** ⇒ ⇒ 服务端开了 `--token` 时，
+ * `x-auth-token` 这条路在 WS 上根本走不通（REST 那条照旧走头）。服务端只对
+ * **升级请求**放行 `?token=`，这里就是那一半。
+ *
+ * @param {string} url
+ * @param {string|null|undefined} token
+ * @returns {string}
+ */
+export function withStreamToken(url, token) {
+    const value = String(token ?? "").trim();
+    if (!value) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}token=${encodeURIComponent(value)}`;
+}
+
+/**
  * The server's event-stream URL for a session (R-13).
  *
  * `riscv_sim_server` 的端点形状是 `GET /api/sessions/{id}/events/ws`，
@@ -353,6 +371,7 @@ function createWebSocketAdapter(options) {
             error: `${FRONT_ERROR_CODES["E_TRX-03"]} 未配置 WebSocket URL（给 url，或给 serverUrl + sessionId 由它推出 /api/sessions/{id}/events/ws）`,
         };
     }
+    url = withStreamToken(url, options.token);
     if (typeof WebSocket === "undefined") {
         return { ok: false, error: `${FRONT_ERROR_CODES["E_TRX-03"]} 当前环境没有 WebSocket` };
     }

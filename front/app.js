@@ -1176,9 +1176,19 @@ async function bootstrap() {
     // 改成「REST 建/验会话 + WebSocket 只读事件流」：
     //   `?server=http://127.0.0.1:9876[&session=<id>][&token=<tok>][&board=<id>]`
     // 不给 `?server=` 时一个字都不改（本地 Worker 那条照旧）。
-    const serverParams = serverModeApi.parseServerParams(
+    const parsedServerParams = serverModeApi.parseServerParams(
         typeof globalThis.location?.search === "string" ? globalThis.location.search : "",
     );
+    // 同源兜底：页面由**服务端自己**发出来的（`--front-dir`，一个端口）时，
+    // 地址里没有 `?server=` 可写 —— 探测同源的 `GET /api/version`，真回了
+    // 版本三件套就进服务端模式。探测失败 ⇒ `null` ⇒ 老老实实走本地 Worker
+    // （`tools/serve-front.py` 那条路一个字都不变）。
+    const sameOriginToken = new URLSearchParams(
+        typeof globalThis.location?.search === "string" ? globalThis.location.search : "",
+    ).get("token");
+    const serverParams =
+        parsedServerParams ??
+        (await serverModeApi.detectSameOriginServer({ token: sameOriginToken }));
     /** @type {{sessionId: string, created: boolean, restarted: boolean, board: string|null}|null} */
     let serverBinding = null;
     /** @type {(Error & {code?: string})|null} */

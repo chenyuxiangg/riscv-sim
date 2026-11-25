@@ -20,9 +20,9 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.11（2026-11-25；R-13 收成<b>双向</b>：页面在 server-mode 也能下令 —— 新增契约命令端点 "
-           "<code>POST /api/sessions/{id}/command</code>（整条契约 <code>Message</code> 进出，回体是应答帧），前端只换 "
-           "<code>m07_transport</code> 的 <code>send</code> 实现，M-05 一行未动）· 需求基线 docs/requirements/"
+VERSION = ("HTML 版 v1.12（2026-11-25；<b>一个端口</b>：<code>--front-dir</code> 让服务端自己托管页面（同源 ⇒ 无需第二个进程、"
+           "无需 CORS、页面自动进 server 模式）+ <b>R-15 的唯一例外</b>：令牌只对事件流升级请求放行 <code>?token=</code>"
+           "（浏览器 <code>WebSocket</code> 不能带自定义头）+ Dockerfile / compose / <code>deploy.sh</code> 一键部署）· 需求基线 docs/requirements/"
            "Sim_Agent_API_Requirements_v0.1.html · 代码基线 main（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
@@ -246,9 +246,9 @@ SECTIONS.append({
                 ["R-10", "确定性：同输入同输出", "预算按指令条数；量子常量随响应回显；不许随机初值、不许墙钟参与结果", "§5.2", "P0"],
                 ["R-11", "超时与熔断", "每窗口查 deadline；到点停下并回 504；会话仍可 <code>reset</code> 后再用", "§5.4", "P0"],
                 ["R-12", "CI / 脚本友好", "<code>POST /api/boot</code> 是<b>唯一</b>判定口径；<code>osz-boot</code> 改为该端点的<b>客户端</b>（离线 runner 已移除，<code>--print-memory</code> 取回执头 <code>x-boot-ram-window</code>）", "§3.2 §5.2 附录 A", "P0"],
-                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧，<code>payload</code> = <b>完整</b>契约 <code>Message</code> 信封；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点；<b>v1.10 起页面地址带 <code>?server=</code> 就能直接用</b>（REST 建/验会话 + 状态水合）；<b>v1.11 起页面在 server-mode 也能下令</b>（<code>POST …/command</code> 吃整条契约消息，回体是应答帧 ⇒ 事件流仍只往外推）", "§3.6", "P1"],
+                ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧，<code>payload</code> = <b>完整</b>契约 <code>Message</code> 信封；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点；<b>v1.10 起页面地址带 <code>?server=</code> 就能直接用</b>（REST 建/验会话 + 状态水合）；<b>v1.11 起页面在 server-mode 也能下令</b>（<code>POST …/command</code> 吃整条契约消息，回体是应答帧 ⇒ 事件流仍只往外推）；<b>v1.12 起 <code>?server=</code> 也能省</b>（页面由服务端自己托管时，同源探测 <code>GET /api/version</code> 命中即进 server-mode）", "§3.6", "P1"],
                 ["R-14", "快照 / 复位 / trace", "复用 <code>Snapshot</code>/<code>Restore</code>/<code>SetTraceEnabled</code>/<code>ExportTrace</code>；复位的实现是重发 <code>LoadProject</code>", "§5.5", "P1"],
-                ["R-15", "安全边界", "默认只绑回环；镜像路径白名单 + 规范化；非回环需显式开关与 token", "§3.4 §5.4", "P0"],
+                ["R-15", "安全边界", "默认只绑回环；镜像路径白名单 + 规范化；非回环需显式开关与 token；<b>令牌只认头</b>（<code>x-auth-token</code>），唯一例外 = 事件流升级请求可用 <code>?token=</code>（浏览器 <code>WebSocket</code> 不能带自定义头，v1.12）", "§3.4 §5.4", "P0"],
             ],
         }),
         ("callout", "约束", "R-03 的「不得回退到 v0.76 之前的自动选档」是一条<b>结构约束</b>：M-24 的配板动作必须是客户端可见的一次命令，"
@@ -362,6 +362,7 @@ SECTIONS.append({
             "rows": [
                 ["<code>GET /api/version</code>", "版本与 schema 协商", "→ <code>{kernel, schema_version, contract_version}</code>", "200", "P0"],
                 ["<code>GET /healthz</code>", "就绪探针", "→ <code>{status, sessions, session_quota, max_console, max_run_ms, board, bind, uptime_ms}</code>（<code>max_run_ms</code> 让脚本<b>先</b>知道自己的 <code>timeout_ms</code> 会不会被 400 拒）", "200/503", "P0"],
+                ["<code>GET /&lt;路径&gt;</code>（<code>--front-dir</code>，<b>v1.12</b>）", "托管页面（同一端口）", "文件字节 + <code>Content-Type</code>；一律 <code>Cache-Control: no-store</code> + <code>nosniff</code>；只认 <code>GET</code>/<code>HEAD</code>；未知文件 404 文本（<code>/api/…</code> 打错仍是 <code>E_PROTO-08</code>）", "200/404/405", "P1"],
                 ["<code>POST /api/sessions</code>", "新建会话", "<code>{board?}</code> → <code>{session_id, board?, schema_version}</code>", "201", "P0"],
                 ["<code>GET /api/sessions</code>", "列出会话", "→ 数组（含 board / image / state / last_seen）", "200", "P0"],
                 ["<code>DELETE /api/sessions/{id}</code>", "回收", "→ 无体", "204", "P0"],
@@ -462,6 +463,24 @@ SECTIONS.append({
               "⑦ <b>证据</b>：服务端 <b>56</b> 项（+5：解码形状 / Tick 应答号段 / 应答不进流 / 契约装载不代订 / 方向闸门）、前端 <b>828</b> 项（+9：地址、请求体、错误体、回体校验、适配器接线）；"
               "真 Chrome 点两次「单步」⇒ 页面 <code>x5</code> 0 → 2、<code>pc</code> 0 → 8，同时服务端 <code>GET …/state</code> 的 <code>executed</code> 0 → 2 —— "
               "驱动的是<b>原生内核</b>，且计数没有翻倍。"),
+
+        ("note", "<b>一个端口与容器部署（v1.12）：</b>① <b>为什么要有 <code>--front-dir</code></b>：页面与 API 天然是两个 origin ⇒ ⇒ 用户得另起一个静态服务器，"
+              "还要靠 CORS 放行（换主机名就再配一次）。给了 <code>--front-dir</code>，同一个端口既回页面又回 API ⇒ ⇒ <b>同源请求根本不走跨域检查</b>，"
+              "第二个进程与 CORS 白名单一起消失。"
+              "② <b>静态层的三条硬约束</b>：不遮蔽 API（兜底先判 <code>/api…</code> 与 <code>/healthz</code>，再让位于文件）；不出根（路径按段规范化，拒 <code>..</code>、拒反斜杠、拒任何 <code>%</code>，解析后还要 <code>canonicalize</code> 并确认仍在根内 —— 软链接也不行）；"
+              "不许陈旧（一律 <code>no-store</code>：前端是零构建的 ES module，缓存旧模块的后果是「改了没生效」甚至整页空白）。"
+              "启动期就把 <code>--front-dir</code> 规范化并检查 <code>index.html</code> ⇒ ⇒ 打错目录在启动时失败，而不是起好了、浏览器一开却 404。"
+              "③ <b>页面不再需要 <code>?server=</code></b>：前端发一次同源 <code>GET /api/version</code>，真回了 <code>kernel</code> + <code>schema_version</code> 才进 server-mode"
+              "（随便一个 200 的网页不算）；探测失败/超时/形状不对 ⇒ 回本地 Worker 模式，<b>不抛</b>（降级不许被写成故障）。"
+              "④ <b>R-15 的唯一例外</b>：浏览器的 <code>WebSocket</code> 构造函数<b>不能带自定义请求头</b> ⇒ ⇒ 一旦开了 <code>--token</code>（容器部署必然开），"
+              "事件流就永远 401 —— 表现为「命令能下、现场不动」。所以令牌判据改成：<b>头优先</b>，且只对 <code>…/events/ws</code> 的升级请求放行 <code>?token=</code>（解开 <code>%XX</code> 后再比）；"
+              "REST 仍然只认 <code>x-auth-token</code>。这条是<b>对浏览器限制的让步</b>，不是「令牌可以随便进 URL」的许可 ⇒ ⇒ 令牌会出现在访问日志里，反代侧要脱敏。"
+              "⑤ <b>容器</b>：多阶段构建（<code>rust:1-bookworm</code> → <code>debian:bookworm-slim</code>），运行层 <b>非 root</b>（uid 10001）、只装 <code>ca-certificates</code> 与 <code>curl</code>（后者只给 <code>HEALTHCHECK /healthz</code> 用）、"
+              "<code>/data</code> 挂卷当镜像白名单根；<code>compose.yml</code> 给默认板 <code>qemu-virt</code>（否则会话建出来是「无板」，装载会被 <code>E_PLT-22</code> 拒）；<code>deploy.sh</code> 生成随机令牌（权限 600）、起容器、轮询健康状态、打印带令牌的地址。"
+              "⑥ <b>证据与未验证项</b>：服务端 <b>70</b> 项（+12：静态解析/穿越/类型/缓存头/HEAD/写拒 + 令牌判据 + 查询串解码）、前端 <b>838</b> 项（+10：同源探测 6 + 事件流令牌 4）；"
+              "真 Chrome 冒烟（<b>一个端口</b> + 令牌，地址里<b>没有</b> <code>?server=</code>）：状态栏 <code>已连接 · server websocket</code>、点两次「单步」⇒ <code>x5</code> 0 → 2 / <code>pc</code> 0 → 8、服务端 <code>executed</code> 0 → 2、无 console 报错。"
+              "⚠️ <b>镜像本身没有实跑</b>：本轮开发机上没有 Docker 引擎 ⇒ ⇒ <code>Dockerfile</code> / <code>compose.yml</code> / <code>deploy.sh</code> 只做了静态校验（脚本 <code>bash -n</code> / <code>sh -n</code>、compose YAML 解析、路径与参数逐项对照服务端 <code>--help</code>），"
+              "<code>docker build</code> 与容器内启动<b>尚未验证</b> —— 这一点如实登记，别当成已验证。"),
 
         ("note", "<b>读接口的语义要点：</b><code>state</code> 返回 <code>{pc, gpr[32], t_ps}</code> —— <b>pc 单独一个字段</b>，不在 <code>gpr</code> 里，且 <code>gpr[0]</code> 恒 0（需求里踩过的坑就在这）；"
               "<code>memory</code> 的 <code>len ≤ 4096</code>（契约 <code>DUMP_MAX_BYTES</code>），越界原样拒；<code>format=u32|asc</code> 只<b>追加</b>视图（原始字节仍在 <code>bytes</code> 里，两个消费者不必二选一）；<code>symbols</code> 精确命中与候选并存（候选上限 16）；"
@@ -897,6 +916,7 @@ SECTIONS.append({
                 ["P1-3", "R-12 收成单通道（<code>osz-boot</code> 变客户端、<code>x-boot-ram-window</code>、<code>/healthz.max_run_ms</code>）+ R-13 前端 server-mode（URL 推导 / <code>resume</code> 帧 / 只推通道）（<b>已落地</b>，前端 20 项 transport 用例通过，真实端点冒烟收到 M-07 帧）", "R-12 / R-13 的验收两句逐条兑现", "P1"],
                 ["P1-4", "浏览器直连服务端（<code>?server=</code> + CORS 闸门 + 帧信封订正）（<b>已落地</b>，真 Chrome 冒烟：状态栏 <code>已连接 · server websocket</code>、寄存器 <code>x5=0x10000000</code>、终端出现 console 的 <code>A</code>、无 console 报错；前端 819 项、服务端 51 项全绿）", "R-13「指到那就能用」在<b>页面</b>上成立；命令面仍走 REST（未接）", "P1"],
                 ["P1-5", "契约命令端点（<code>POST …/command</code>）：整条契约消息进<b>同一个</b>会话线程，回体是应答帧（首帧带 <code>reqId</code>），其余事件走事件流；前端只换 <code>send</code> 实现（<b>已落地</b>，真 Chrome 点两次「单步」：页面 <code>x5</code> 0 → 2 / <code>pc</code> 0 → 8，服务端 <code>GET …/state</code> 的 <code>executed</code> 0 → 2 同步；前端 828 项、服务端 56 项全绿）", "R-13 双向：页面在 server-mode 能看也能点；无映射表、无第二套执行路径", "P1"],
+                ["P1-6", "一个端口（<code>--front-dir</code>）+ 令牌对事件流的唯一例外 + Docker 一键部署（<b>已落地，镜像未实跑</b>）", "「发布 = 服务端模式」的第一块：一个地址打开即用；镜像构建待在有 Docker 的机器上验", "P1"],
                 ["P1", "事件流（WS + REST）、trace 导出 / 开关、快照采集 / 还原（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；异步 run（作业表 + 结果槽）<b>已落地</b>", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
             ],
         }),

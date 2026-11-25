@@ -76,6 +76,11 @@ pub struct Config {
     /// **默认就放行**（服务默认只绑回环 ⇒ 那一组 origin 只可能是本机页面）；
     /// 这个表只用来补「前端不在本机 / 换了个主机名」的场合。
     pub cors_origins: Vec<String>,
+    /// 前端静态资源目录（`--front-dir`）。`None` ⇒ 不托管页面（只服务 `/api`）。
+    ///
+    /// ⚠️ 给了它，服务端就是**一个端口**：页面与 API 同源 ⇒ 不需要第二个进程，
+    /// 也不需要 CORS 放行（同源请求根本不走跨域检查）。
+    pub front_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -94,6 +99,7 @@ impl Default for Config {
             allow_remote: false,
             token: None,
             cors_origins: Vec::new(),
+            front_dir: None,
         }
     }
 }
@@ -126,6 +132,7 @@ impl Config {
                 "--allow-remote" => "--allow-remote",
                 "--token" => "--token",
                 "--cors-origins" => "--cors-origins",
+                "--front-dir" => "--front-dir",
                 other if other.starts_with('-') => {
                     return Err(format!("unknown option {other}"));
                 }
@@ -253,6 +260,9 @@ impl Config {
                     }
                     cfg.cors_origins = list;
                 }
+                "--front-dir" => {
+                    cfg.front_dir = Some(PathBuf::from(value(&mut it, flag)?));
+                }
                 // 上面已经穷举过；这一支只为让 match 完整（不可达）。
                 _ => return Err(format!("unknown option {flag}")),
             }
@@ -266,19 +276,39 @@ impl Config {
     /// ⚠️ 规范化**必须**发生在启动期：请求期再 `canonicalize` 就等于「先信任
     /// 客户端给的路径再校验」，`..` 穿越会在规范化之前就被当成合法前缀。
     pub fn prepare(&mut self) -> Result<(), String> {
-        let Some(root) = self.allow_image_root.take() else {
-            return Ok(());
-        };
-        let canonical = root
-            .canonicalize()
-            .map_err(|e| format!("bad --allow-image-root {}: {e}", root.display()))?;
-        if !canonical.is_dir() {
-            return Err(format!(
-                "bad --allow-image-root {}: not a directory",
-                canonical.display()
-            ));
+        if let Some(root) = self.allow_image_root.take() {
+            let canonical = root
+                .canonicalize()
+                .map_err(|e| format!("bad --allow-image-root {}: {e}", root.display()))?;
+            if !canonical.is_dir() {
+                return Err(format!(
+                    "bad --allow-image-root {}: not a directory",
+                    canonical.display()
+                ));
+            }
+            self.allow_image_root = Some(canonical);
         }
-        self.allow_image_root = Some(canonical);
+
+        // ⚠️ `--front-dir` 与 `--allow-image-root` **同样**必须在启动期规范化：
+        // 请求期再 `canonicalize` 等于「先信任客户端给的路径再校验」。
+        // 且这里就要求 `index.html` 存在 —— 打错目录要在启动时失败，而不是
+        // 起好了、浏览器打开却是 404。
+        if let Some(dir) = self.front_dir.take() {
+            let canonical = dir
+                .canonicalize()
+                .map_err(|e| format!("bad --front-dir {}: {e}", dir.display()))?;
+            if !canonical.is_dir() {
+                return Err(format!("bad --front-dir {}: not a directory", canonical.display()));
+            }
+            if !canonical.join("index.html").is_file() {
+                return Err(format!(
+                    "bad --front-dir {}: no index.html inside (point it at the front/ directory)",
+                    canonical.display()
+                ));
+            }
+            self.front_dir = Some(canonical);
+        }
+
         Ok(())
     }
 }
@@ -535,5 +565,41 @@ mod tests {
         let mut missing = Config::default();
         missing.allow_image_root = Some(PathBuf::from("/definitely/not/here"));
         assert!(missing.prepare().is_err());
+    }
+
+    #[test]
+    fn front_dir_is_parsed_and_is_off_by_default() {
+        let cfg = Config::parse(&[]).unwrap();
+        assert!(
+            cfg.front_dir.is_none(),
+            "no --front-dir ⇒ the server stays API-only (loopback run is unchanged)"
+        );
+
+        let cfg = Config::parse(&args(&["--front-dir", "front"])).unwrap();
+        assert_eq!(cfg.front_dir, Some(PathBuf::from("front")));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)] // 逐字段推进是本用例的写法
+    fn prepare_requires_an_index_html_inside_front_dir() {
+        // 打错目录要在**启动时**失败，而不是起好了、浏览器一开却是 404。
+        let mut cfg = Config::default();
+        cfg.front_dir = Some(PathBuf::from("/tmp"));
+        assert!(cfg.prepare().is_err(), "/tmp has no index.html");
+
+        let mut missing = Config::default();
+        missing.front_dir = Some(PathBuf::from("/definitely/not/here"));
+        assert!(missing.prepare().is_err());
+
+        let mut real = Config::default();
+        real.front_dir = Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../front")
+                .to_path_buf(),
+        );
+        real.prepare().unwrap();
+        let kept = real.front_dir.clone().expect("kept");
+        assert!(kept.is_absolute(), "canonicalized ⇒ absolute");
+        assert!(kept.join("index.html").is_file());
     }
 }

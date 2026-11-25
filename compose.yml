@@ -1,0 +1,38 @@
+# 一键部署（推荐入口是 ./deploy.sh；这个文件是它调用的编排定义）
+#
+#   ./deploy.sh          # 生成 .env（首次）→ 构建 → 起容器 → 等健康 → 打印地址
+#   ./deploy.sh down     # 停并删容器（保留数据卷）
+#   ./deploy.sh logs     # 跟日志
+#
+# ⚠️ `SIM_TOKEN` 没有默认值：它必须由 `./deploy.sh` 生成（或你自己写进 .env）。
+#    容器绑 `0.0.0.0`，服务端的 `guard_bind` 拒绝「非回环但没令牌」的启动。
+
+name: riscv-sim
+
+services:
+  sim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${SIM_IMAGE:-riscv-sim-server:latest}
+    container_name: ${SIM_CONTAINER:-riscv-sim-server}
+    ports:
+      - "${SIM_HOST_PORT:-8080}:9876"
+    environment:
+      SIM_TOKEN: ${SIM_TOKEN:?SIM_TOKEN missing — run ./deploy.sh once, it writes .env}
+      SIM_BOARD: ${SIM_BOARD:-qemu-virt}
+      SIM_FRONT_DIR: /app/front
+      SIM_IMAGE_ROOT: /data/images
+      SIM_MAX_RUN_MS: ${SIM_MAX_RUN_MS:-60000}
+      SIM_MAX_SESSIONS: ${SIM_MAX_SESSIONS:-8}
+      SIM_MAX_CONSOLE: ${SIM_MAX_CONSOLE:-1048576}
+      SIM_SESSION_TTL: ${SIM_SESSION_TTL:-900}
+    volumes:
+      - sim-data:/data
+    restart: unless-stopped
+    # 内核宿主能执行任意固件 ⇒ 不许容器内再拿新特权（提权逃逸的常见一跳）。
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  sim-data:

@@ -115,6 +115,8 @@ pub struct AppState {
     ///
     /// ⚠️ 回环 origin **不靠这张表**：那是[`origin_is_loopback`]的默认判据。
     pub cors_origins: Vec<String>,
+    /// 前端静态资源根（`--front-dir`）。`None` ⇒ 非 `/api` 路径一律 `E_PROTO-08`。
+    pub front_dir: Option<PathBuf>,
     /// 会话表。
     pub registry: Arc<SessionRegistry>,
 }
@@ -134,6 +136,7 @@ impl AppState {
             max_run_ms: cfg.max_run_ms,
             token: cfg.token.clone(),
             cors_origins: cfg.cors_origins.clone(),
+            front_dir: cfg.front_dir.clone(),
             registry: Arc::new(SessionRegistry::new(
                 cfg.max_sessions,
                 cfg.session_ttl,
@@ -269,7 +272,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/version", get(version))
         .route("/healthz", get(healthz))
         .merge(guarded)
-        .fallback(unknown_route)
+        .fallback(front_or_unknown)
         // ⚠️ CORS 必须在**最外层**：预检（`OPTIONS`）既没有令牌、也不会被路由
         // 认出来 ⇒ ⇒ 放在 `require_token` 里面那一层会被 401/405 拒掉 ⇒ ⇒
         // 浏览器根本读不到「这个 origin 允不允许」。
@@ -1883,12 +1886,91 @@ async fn require_token(
         .headers()
         .get(TOKEN_HEADER)
         .and_then(|value| value.to_str().ok());
-    match presented {
-        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {
-            next.run(req).await
-        }
-        _ => ApiError::unauthorized().into_response(),
+    let path = req.uri().path().to_string();
+    let query_token = query_parameter(req.uri().query(), "token");
+    if token_accepted(Some(expected), presented, query_token.as_deref(), &path) {
+        next.run(req).await
+    } else {
+        ApiError::unauthorized().into_response()
     }
+}
+
+/// 令牌判据：**头优先**，`?token=` 只对事件流的升级请求放行。
+///
+/// ⚠️ 为什么必须留这个口子：浏览器的 `WebSocket` 构造函数**不接受自定义
+/// 请求头** ⇒ 服务端一旦开了 `--token`（容器部署一定开），页面就永远连不上
+/// 事件流 —— 表现为「命令能下、现场不动」。REST 那条仍然只认头（令牌不进
+/// URL 是一般规则），这里是对**浏览器限制**的唯一例外。
+fn token_accepted(
+    expected: Option<&str>,
+    header: Option<&str>,
+    query: Option<&str>,
+    path: &str,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    if let Some(presented) = header {
+        if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+            return true;
+        }
+    }
+    if !path.ends_with("/events/ws") {
+        return false;
+    }
+    match query {
+        Some(value) => constant_time_eq(value.as_bytes(), expected.as_bytes()),
+        None => false,
+    }
+}
+
+/// 从查询串里取一个参数（并做最小 `%XX` 解码 —— 前端用 `encodeURIComponent`
+/// 编过，不解码就会拿编码后的串去比）。
+fn query_parameter(query: Option<&str>, name: &str) -> Option<String> {
+    let query = query?;
+    for pair in query.split('&') {
+        let mut it = pair.splitn(2, '=');
+        let key = it.next().unwrap_or("");
+        let value = it.next().unwrap_or("");
+        if key == name {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+/// 最小 `%XX` 解码（只服务上面那一个参数；`+` 当空格，与表单编码一致）。
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(hi), Some(lo)) => {
+                        out.push((hi * 16 + lo) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// 浏览器跨域（CORS）：页面与服务端天然是**两个 origin**（`front/` 由
@@ -2028,8 +2110,24 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// 兜底 404：保留方法与路径，便于客户端发现是「打错路径」而不是「会话没了」。
-async fn unknown_route(method: Method, uri: axum::http::Uri) -> ApiError {
-    ApiError::unknown_route(method.as_str(), uri.path())
+/// 兜底：**先问是不是 API**，再决定回 JSON 错误还是页面的静态资源。
+///
+/// ⚠️ 两条语义必须分开：`/api/...` 打错是 `E_PROTO-08`（客户端据此知道「不是
+/// 服务没起，是路径打错」）；页面里少了一个文件是**纯 404 文本**（浏览器只
+/// 需要知道「没有」）。混成一种，两种消费者都会被另一半误导。
+async fn front_or_unknown(
+    State(state): State<AppState>,
+    method: Method,
+    uri: axum::http::Uri,
+) -> Response {
+    let path = uri.path();
+    if path == "/api" || path == "/healthz" || path.starts_with("/api/") {
+        return ApiError::unknown_route(method.as_str(), path).into_response();
+    }
+    match state.front_dir.as_deref() {
+        Some(root) => crate::front::serve(root, path, &method).await,
+        None => ApiError::unknown_route(method.as_str(), path).into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -2073,6 +2171,48 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    /// 令牌来源的判据（R-15 + 浏览器 `WebSocket` 的现实约束）。
+    #[test]
+    fn query_token_is_only_for_the_event_stream_upgrade() {
+        let ws = "/api/sessions/sess-000001/events/ws";
+        let rest = "/api/sessions/sess-000001/state";
+
+        // 没配令牌 ⇒ 一律放行（回环开发不必带头）。
+        assert!(token_accepted(None, None, None, rest));
+
+        // 头对了 ⇒ 放行，不管路径。
+        assert!(token_accepted(Some("t0ken"), Some("t0ken"), None, rest));
+        assert!(token_accepted(Some("t0ken"), Some("t0ken"), None, ws));
+
+        // 头不对 ⇒ 走查询串那条判据：只有事件流放行。
+        assert!(token_accepted(Some("t0ken"), None, Some("t0ken"), ws));
+        assert!(
+            !token_accepted(Some("t0ken"), None, Some("t0ken"), rest),
+            "REST 仍然只认头：令牌不进 URL 是一般规则"
+        );
+
+        // 值不对 / 没给 ⇒ 拒。
+        assert!(!token_accepted(Some("t0ken"), Some("wrong"), None, ws));
+        assert!(!token_accepted(Some("t0ken"), None, Some("wrong"), ws));
+        assert!(!token_accepted(Some("t0ken"), None, None, ws));
+    }
+
+    #[test]
+    fn query_parameters_are_read_and_decoded() {
+        assert_eq!(
+            query_parameter(Some("a=1&token=t0ken&b=2"), "token").as_deref(),
+            Some("t0ken")
+        );
+        assert_eq!(
+            query_parameter(Some("token=a%2Db%20c"), "token").as_deref(),
+            Some("a-b c"),
+            "前端用 encodeURIComponent 编过 ⇒ 必须解码后再比"
+        );
+        assert_eq!(query_parameter(Some("token="), "token").as_deref(), Some(""));
+        assert_eq!(query_parameter(Some("a=1"), "token"), None);
+        assert_eq!(query_parameter(None, "token"), None);
     }
 
     /// 回环 origin 认三种写法、任意端口；外站 origin 一律不认。

@@ -12,6 +12,9 @@
 //! 都会拿到 `404 + E_PROTO-08`**，而不是连不上 —— 这样客户端能区分「服务没
 //! 起来」与「路径打错」。
 //!
+//! ⚠️ 例外：给了 `--front-dir <dir>` 时，同一端口的非 `/api` 路径交给静态资源
+//! （`front/` 页面 + API 同源 ⇒ 一个地址打开就能用，见 `front.rs`）。
+//!
 //! ## 退出码
 //!
 //! | 码 | 含义 |
@@ -26,6 +29,7 @@
 mod api;
 mod config;
 mod error;
+mod front;
 mod session;
 mod upload;
 
@@ -55,6 +59,8 @@ usage: riscv_sim_server [options]
   --token <secret>         bearer token checked in remote mode
   --cors-origins <list>    extra browser origins allowed to read the API
                            (comma separated; loopback origins are always allowed)
+  --front-dir <dir>        serve a front/ directory on this port as well
+                           (same-origin page + API: no second process, no CORS)
   -h, --help               print this message
 
   GET    /api/version          kernel / schema_version / contract_version / server / bind
@@ -191,11 +197,15 @@ async fn serve(cfg: Config) -> Result<(), String> {
 
     let state = AppState::new(&cfg, local);
     eprintln!(
-        "riscv_sim_server {} listening on http://{local} (board={}, session_ttl={}s, max_console={}B)",
+        "riscv_sim_server {} listening on http://{local} (board={}, session_ttl={}s, max_console={}B, front={})",
         env!("CARGO_PKG_VERSION"),
         cfg.board.as_deref().unwrap_or("-"),
         cfg.session_ttl.as_secs(),
         cfg.max_console,
+        cfg.front_dir
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string()),
     );
 
     // TTL 回收器：每 min(ttl/2, 30 s) 扫一次。放在单独任务里 ⇒ ⇒ 回收不会

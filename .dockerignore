@@ -1,0 +1,26 @@
+# 构建上下文里不需要的东西。
+#
+# ⚠️ `front/assets/pkg/` **故意不排除**：那是 `tools/build-wasm.sh` 的产物
+#    （不入库）。本机如果构建过，镜像里就带上 WASM ⇒ 容器里也能离线用本地
+#    内核模式；没构建过就只是没有那一档，server 模式不受影响。
+.git
+.gitattributes
+.github
+.dockerignore
+compose.yml
+deploy.sh
+.env
+.env.*
+target
+**/target
+docs
+tests
+tools
+*.md
+.DS_Store
+
+# 前端：测试与开发脚本不进镜像（页面本身照拷）。
+front/tests
+front/dev
+front/package.json
+node_modules
