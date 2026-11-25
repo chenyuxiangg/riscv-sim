@@ -1,0 +1,81 @@
+name: Docker image
+
+# 构建并推送服务端镜像到阿里云个人版 ACR。
+#
+# 触发：
+#   - 推一个 git tag（`v*`）⇒ 顺带打上该 tag 名；
+#   - Actions 页面手动 Run workflow（默认推 latest + sha）。
+#
+# ⚠️ 仓库要先在 ACR 控制台建好（命名空间 / 仓库名 / 公开），CI 只能往里推，不能建仓库。
+#
+# 需要的两个 Secrets（Settings → Secrets and variables → Actions）：
+#   ACR_USERNAME  —— 阿里云账号（个人版 ACR 的用户名就是账号全名）
+#   ACR_PASSWORD  —— ACR 控制台的「固定密码」（不是阿里云登录密码）
+#
+# ⚠️ 镜像是**公开**的：任何人不登录就能 pull。镜像里没有任何密钥 ——
+#    令牌是运行时由 `.env / compose` 注入的（`.dockerignore` 也排除了 `.env`）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      push_latest:
+        description: "同时推 latest（关掉就只推 sha）"
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com
+  IMAGE: crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim
+
+jobs:
+  build:
+    name: build · linux/amd64 → ACR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算 tag（latest / sha / git tag）
+        id: tags
+        run: |
+          set -eu
+          short="${GITHUB_SHA::7}"
+          tags="${IMAGE}:sha-${short}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tags="${tags},${IMAGE}:${GITHUB_REF_NAME}"
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] || [ "${{ inputs.push_latest }}" != "false" ]; then
+            tags="${tags},${IMAGE}:latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "本次推送：${tags}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 回读一次（确认真推上去了，而不是「构建成功但推送失败」）
+        run: |
+          set -eu
+          first="$(echo '${{ steps.tags.outputs.tags }}' | cut -d, -f1)"
+          docker buildx imagetools inspect "$first" | sed -n 1,12p

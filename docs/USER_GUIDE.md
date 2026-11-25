@@ -100,6 +100,40 @@ http://localhost:8080/?token=<随机生成的令牌>
 - **换端口**：`.env` 里改 `SIM_HOST_PORT`（容器内始终 9876）。
 - **对外暴露的风险**：`8080` 默认发布在宿主所有网卡上 ⇒ 令牌等于「谁能执行这个内核」。放到公网前，建议前面再套一层反向代理 + TLS，并限制来源。
 
+### 2.6 用别人构建好的镜像（ACR + CI）
+
+§2.5 的镜像是**在跑脚本那台机器上构建的**，别人拿不到。要「构建一次、到处运行」，镜像得推到一个 registry。本仓的发布形态是 **阿里云个人版 ACR + GitHub Actions 构建**，镜像地址：
+
+```text
+crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim
+```
+
+**发一次版（仓库维护者做，一次性配好）**
+
+1. ACR 控制台建**命名空间** `zyzs` 与**仓库** `riscv_sim`，访问级别设**公开**（不登录也能 pull）。CI 只会往里推，**不会替你建仓库** —— 少了这一步，workflow 会在 `docker push` 那步失败。
+2. GitHub 仓库 → Settings → Secrets and variables → Actions，加两个 secret：
+   - `ACR_USERNAME`：阿里云账号全名（个人版 ACR 的登录名就是它）；
+   - `ACR_PASSWORD`：ACR 控制台里的**固定密码**，**不是**阿里云登录密码。
+3. 触发 `.github/workflows/docker.yml`：手动 Run workflow（默认推 `sha-<7>` + `latest`），或推一个 `v*` tag（额外打上该 tag 名）。
+
+workflow 只构建 `linux/amd64`（服务器基本都是它），并用 `docker buildx imagetools inspect` **回读**一次 —— 构建成功 ≠ 推送成功，这一步是给「假绿」上的锁。
+
+**在服务器上跑（不再本地构建）**
+
+```bash
+git clone <repo> && cd riscv_sim
+SIM_IMAGE=crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim:latest \
+  ./deploy.sh pull
+```
+
+`pull` 做三件事：`docker pull` → `compose up -d --no-build`（**不走 Dockerfile**，省掉 Rust 全量编译）→ 等健康 → 打印带令牌地址。`.env` 会在首次运行时自动生成（随机令牌），和 §2.5 完全一致。
+
+三个提醒：
+
+- **`latest` 会漂**：要可复现就用 `sha-<7>` 或 git tag 名，把它写进 `SIM_IMAGE`。
+- **镜像里没有任何密钥**：令牌是运行时由 `.env` 注入的（`.dockerignore` 也排掉了 `.env`）。镜像公开 ≠ 服务公开 —— 谁拿到 URL 还得有令牌才能下令。
+- **架构要对得上**：镜像是 `linux/amd64`，在 Apple Silicon 上跑会走 QEMU 模拟（能跑，但慢）；本机构建请照 §2.5 走本机架构。
+
 ---
 
 ## 3. 界面导览

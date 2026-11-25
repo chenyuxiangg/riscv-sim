@@ -3,6 +3,7 @@
 #
 #   ./deploy.sh                # 首次：生成 .env（含随机令牌）→ 构建 → 起 → 等健康
 #   ./deploy.sh rebuild        # 全量重建镜像（--no-cache；依赖换了/缓存可疑时用）
+#   ./deploy.sh pull           # 从 registry 拉现成镜像再起（需 SIM_IMAGE，服务器用）
 #   ./deploy.sh down           # 停并删容器（数据卷保留）
 #   ./deploy.sh logs           # 跟日志（Ctrl-C 退出）
 #   ./deploy.sh ps             # 看容器与健康状态
@@ -11,12 +12,12 @@
 #   SIM_HOST_PORT=8080  宿主机端口        SIM_BOARD=qemu-virt   默认板
 #   SIM_MAX_RUN_MS=60000  单次 run 上限   SIM_MAX_SESSIONS=8    并发会话
 #   SIM_TOKEN=...       固定令牌（默认随机生成）  SIM_PLATFORM=linux/amd64  交叉构建
+#   SIM_IMAGE=...       镜像全名（pull 时必填；默认本地 tag riscv-sim-server:latest）
 #   SIM_DATA_VOLUME=... 数据卷名（默认 sim-data，compose 自己建）
 #
 # ⚠️ **令牌是必须的**：容器绑 `0.0.0.0`，服务端拒绝「非回环但没令牌」的启动。
 #    页面地址要带 `?token=`（API 的 `require_token` 只认 `x-auth-token` 头，
 #    页面负责把它从 URL 里取出来带上）。
-
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -145,6 +146,19 @@ case "$cmd" in
         wait_healthy "$container" || exit 1
         print_url
         ;;
+    pull)
+        need_docker
+        ensure_env
+        : "${SIM_IMAGE:?pull 需要 SIM_IMAGE=完整镜像地址，例如 crpi-xxx.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim:latest}"
+        say "==> 拉取 ${SIM_IMAGE}"
+        docker pull "$SIM_IMAGE"
+        docker image inspect --format '摘要：{{index .RepoDigests 0}}' "$SIM_IMAGE" || true
+        # --no-build：镜像就在本地（刚从 registry 拉的）⇒ 不走 Dockerfile。
+        SIM_IMAGE="$SIM_IMAGE" compose up -d --no-build --remove-orphans
+        container="${SIM_CONTAINER:-riscv-sim-server}"
+        wait_healthy "$container" || exit 1
+        print_url
+        ;;
     down)
         need_docker
         compose down
@@ -162,6 +176,6 @@ case "$cmd" in
         sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
-        die "不认识的子命令 ${cmd}（可用：up / rebuild / down / logs / ps）"
+        die "不认识的子命令 ${cmd}（可用：up / rebuild / pull / down / logs / ps）"
         ;;
 esac
