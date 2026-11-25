@@ -20,7 +20,7 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.6（2026-11-25；P0-1～P0-6 与 P1 的事件流 / trace / 快照还原已落地；异步 run 待作业表）· 需求基线 docs/requirements/"
+VERSION = ("HTML 版 v1.7（2026-11-25；P0-1～P0-6 与 P1 全部落地：事件流 / trace / 快照还原 / 异步 run）· 需求基线 docs/requirements/"
            "Sim_Agent_API_Requirements_v0.1.html · 代码基线 sim feature/m24-p0-6（契约 schema v19 / 内核 0.1.0）")
 
 KPI = [
@@ -380,7 +380,8 @@ SECTIONS.append({
                 ["<code>PUT …/trace/enabled</code>", "轨迹开关（已落地）", "<code>{enabled}</code> → <code>{enabled,len,dropped}</code>", "200", "P1"],
                 ["<code>POST …/snapshot</code>", "采集会话快照（已落地）", "<code>{id?, base_seq?}</code> → <code>{snapshot（六段 SessionSnapshotDto）, bytes}</code>", "200", "P1"],
                 ["<code>POST …/restore</code>", "还原会话快照（已落地）", "体 = <code>SessionSnapshotDto</code> → <code>{restored, pc, executed}</code>；畸形 400 <code>E_SNAP-01/03</code>，超限 413", "200/400/413", "P1"],
-                ["异步 run（<code>?async</code> 或 <code>…/jobs</code>）", "长跑不占请求（<b>未落地</b>）", "要一张作业表 + 结果槽", "—", "P1 余项"],
+                ["<code>POST …/run {async:true}</code>", "异步 run（已落地）", "→ <b>202</b> <code>{job_id, kind, state, poll}</code>；折算规则与同步共用 <code>plan_run</code>", "202/409", "P1"],
+                ["<code>GET …/jobs/{job}</code>", "读作业结果（已落地）", "→ <code>{state: running|done|failed, elapsed_ms, report|code}</code>；未知作业 404 <code>E_SESS-01</code>", "200/404", "P1"],
             ],
         }),
         ("note", "<b>快照 / 还原的落地口径（v1.6）：</b>采集走宿主 <code>capture_session</code>（<b>六段</b>：引擎 + 内存页 + 区域图 + 外设 + 中断控制器 + 检查点元数据），"
@@ -389,6 +390,10 @@ SECTIONS.append({
               "<b>口径要点：</b>① 段 0 的 <code>t_virt</code> 由宿主按引擎虚拟时间<b>代填</b>（同一个量不留两个真相）；② <code>executed</code> 是进程内累计指令数，"
               "<b>不是</b>「从快照点起算」，载荷里也没有这个计数 ⇒ 还原后 <code>pc</code> 会退回去、<code>executed</code> 不会；③ 载荷<b>不含</b>断点表 / 探针环 / 波形环 / 轨迹历史"
               "（还原时轨迹与反汇编缓存会作废、符号表保留）；④ 体上限单设 <code>--max-snapshot-bytes</code>（默认 32 MiB），不沿用 <code>--max-image-bytes</code>。"),
+        ("note", "<b>异步 run 的落地口径（v1.7）：</b>作业表住在会话句柄上（每会话上限 32，满则丢最旧的），结果落 <code>Arc&lt;Mutex&gt;</code> 的槽 —— "
+              "结果<b>只能</b>由会话线程写（宿主 <code>!Send</code>），HTTP 只读。执行体与同步 <code>run</code> <b>逐行相同</b>（<code>run_until</code> 是停因唯一实现、console 与事件照样搬进会话环），"
+              "区别只在回执走槽而不是连接。<b>超时不是 HTTP 失败</b>：异步作业以 <code>stop_reason=timeout</code> 结束并回 <code>done</code>，不套 504；"
+              "会话忙时提交仍 409 <code>E_SESS-02</code>；作业 id 形如 <code>job-0000</code>，会话删除即随之消失。"),
         ("note", "<b>读接口的语义要点：</b><code>state</code> 返回 <code>{pc, gpr[32], t_ps}</code> —— <b>pc 单独一个字段</b>，不在 <code>gpr</code> 里，且 <code>gpr[0]</code> 恒 0（需求里踩过的坑就在这）；"
               "<code>memory</code> 的 <code>len ≤ 4096</code>（契约 <code>DUMP_MAX_BYTES</code>），越界原样拒；<code>symbols</code> 精确命中与候选并存（候选上限 16）；"
               "<code>disasm</code> 允许短于 <code>count</code>（未映射即止，与内核一致）。"),
@@ -818,7 +823,7 @@ SECTIONS.append({
                 ["P0-4", "run / step / pause / reset + console ring（已落地：内核 <code>run_until</code> 是停因唯一实现，服务端只做请求折算与 504 包装）", "AC-01 / AC-05 / AC-07 / AC-09", "P0-3"],
                 ["P0-5", "状态 / 内存 / 符号 / 反汇编 / 断点（已落地：读面全走内核既有命令，符号类断点先 <code>ResolveSymbol</code> 再注册）", "AC-04 / AC-06", "P0-4"],
                 ["P0-6", "<code>/api/boot</code>（临时会话，跑完即删；回原始 console 字节 + <code>X-Boot-*</code> 头）；<code>osz-boot</code> 改走 <code>run_until</code> 并按优先级自动选板（CLI 与退出码不变）（已落地：<code>E_PLT-22</code> 断链已修）", "一条 curl 完成 osz 判定，与 Spike MATCH；<code>--print-memory</code> 链路保持", "P0-5"],
-                ["P1", "事件流（WS + REST）、trace 导出 / 开关、快照采集 / 还原（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；异步 run 需要作业表 ⇒ ⇒ 暂列为 P1 余项", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
+                ["P1", "事件流（WS + REST）、trace 导出 / 开关、快照采集 / 还原（<b>已落地</b>：内核 <code>pending_events</code> + <code>take_pending_events</code>，服务端事件环 + 50ms 一拍）；异步 run（作业表 + 结果槽）<b>已落地</b>", "装载后步进能收到 <code>SimStateDelta</code>；<code>trace</code> 回 CSV 且 <code>next_offset</code> 可续读", "P0-6"],
             ],
         }),
         ("h3", "sec9-2", "9.2 五项决策与落地取舍"),
