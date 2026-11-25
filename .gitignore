@@ -27,6 +27,11 @@ target/
 front/assets/pkg/
 front/assets/*.wasm
 front/assets/*.js
+# WASM 构建指纹表：由 tools/build-wasm.sh 在**构建成功后**重算写入，
+# 记录「这份产物是由这版代码构建的」。它只对「本机这份 .wasm」有意义，
+# 而 .wasm 本身不入库 ⇒ 指纹表也不入库（否则会出现「表是新的、产物是旧的」
+# 的假绿：门禁跳过重建，拿旧产物去测新代码）。
+tools/.wasm-code.stamp.json
 
 # Node / JS front-end (we have no npm deps today, but if you add any)
 node_modules/

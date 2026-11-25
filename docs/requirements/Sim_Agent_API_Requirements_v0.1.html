@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>riscv_sim 对外操作接口需求 — 面向 Agent / CI 的仿真与调试 API</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%230B0F14"/><rect x="7" y="7" width="18" height="18" rx="2" fill="none" stroke="%23E6A23C" stroke-width="2"/><path d="M16 11.5 L20.5 16 L16 20.5 L11.5 16 Z" fill="%233EC6A0"/></svg>'>
+<style>
+:root{
+  --bg:#0B0F14; --bg2:#10161D; --bg3:#161E27; --line:#24303B; --line2:#33404E;
+  --ink:#E4E9F0; --ink2:#9AA8B6; --ink3:#677787;
+  --amber:#E6A23C; --amber-soft:rgba(230,162,60,.13);
+  --teal:#3EC6A0; --teal-soft:rgba(62,198,160,.12);
+  --cyan:#5AC8E4; --cyan-soft:rgba(90,200,228,.12);
+  --red:#E4645F; --red-soft:rgba(228,100,95,.13);
+  --ok:#55C97E;
+  --mono:ui-monospace,"SF Mono","Cascadia Code",Consolas,"Liberation Mono","Noto Sans Mono CJK SC",monospace;
+  --sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.68;font-size:15px;-webkit-font-smoothing:antialiased;min-width:0}
+body::before{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
+  background:repeating-linear-gradient(0deg,rgba(255,255,255,.015) 0 1px,transparent 1px 38px),
+             repeating-linear-gradient(90deg,rgba(255,255,255,.015) 0 1px,transparent 1px 38px)}
+a{color:var(--teal);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1140px;margin:0 auto;padding:0 16px 90px}
+
+.topbar{position:sticky;top:0;z-index:60;background:rgba(11,15,20,.94);border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
+.topbar .in{max-width:1140px;margin:0 auto;padding:8px 16px;display:flex;align-items:center;gap:10px}
+.tb-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto}
+.toc{display:flex;gap:4px;overflow-x:auto;padding:0;flex:1 1 auto;min-width:0}
+.toc a{font-size:12px;color:var(--ink2);padding:5px 9px;border:1px solid transparent;border-radius:6px;white-space:nowrap;flex:0 0 auto}
+.toc a:hover{color:var(--ink);border-color:var(--line2);text-decoration:none}
+
+.cover{padding:34px 0 6px}
+.cover .kicker{font-family:var(--mono);font-size:12px;color:var(--amber);letter-spacing:.08em}
+.cover h1{font-size:26px;line-height:1.3;font-weight:800;margin:8px 0 4px}
+.cover .sub{color:var(--ink2);font-size:14px}
+.meta{display:grid;grid-template-columns:1fr;gap:6px;margin-top:16px;font-size:13px;color:var(--ink2);
+  border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--bg2)}
+.meta b{color:var(--ink)}
+
+.sec{padding-top:34px;margin-top:26px;border-top:1px solid var(--line)}
+.sec-num{font-family:var(--mono);font-size:12px;color:var(--amber);letter-spacing:.1em}
+.sec h2{font-size:22px;font-weight:800;margin:3px 0 4px;line-height:1.3}
+.sec .sec-intro{color:var(--ink2);font-size:14px;margin-bottom:12px}
+.sec h3{font-size:17px;font-weight:700;margin:24px 0 10px;padding-left:10px;border-left:3px solid var(--teal);line-height:1.35}
+p{margin:8px 0}
+
+.verdict{border-left:3px solid var(--amber);background:var(--amber-soft);padding:12px 14px;border-radius:0 10px 10px 0;margin:14px 0;font-size:14px}
+.verdict .lead{display:block;font-weight:800;color:#FFF3E0;font-size:15px;letter-spacing:.02em;margin-bottom:5px}
+
+.note{border:1px solid var(--line);background:var(--bg2);border-radius:10px;padding:12px 14px;margin:14px 0;font-size:13.5px;color:var(--ink2)}
+.note b{color:var(--ink)}
+.badbox{border-left:3px solid var(--red);background:var(--red-soft);padding:12px 14px;border-radius:0 10px 10px 0;margin:14px 0;font-size:13.5px}
+
+.stats{display:grid;grid-template-columns:1fr;gap:10px;margin:16px 0}
+.stat{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.stat .v{font-family:var(--mono);font-size:22px;color:var(--teal);font-weight:700;line-height:1.2}
+.stat .l{font-size:12px;color:var(--ink2);margin-top:3px;line-height:1.45}
+.stat.warn .v{color:var(--amber)}
+
+.tw{overflow-x:auto;margin:12px 0;-webkit-overflow-scrolling:touch}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:13px}
+th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+th{background:var(--bg3);color:var(--ink);font-weight:600;white-space:nowrap}
+td{color:var(--ink2)}
+td b,td strong{color:var(--ink)}
+td code,th code{color:var(--cyan)}
+tr:hover td{background:#121a22}
+
+code{font-family:var(--mono);font-size:12.5px;color:var(--cyan);background:rgba(90,200,228,.08);
+  padding:1px 5px;border-radius:4px;word-break:break-word}
+pre{background:#080C11;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:12px 0}
+pre code{background:none;color:#CBD8E6;padding:0;font-size:12.5px;line-height:1.7;display:block;white-space:pre}
+
+.req{border:1px solid var(--line);border-radius:10px;background:var(--bg2);margin:12px 0;overflow:hidden}
+.req .hd{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--bg3)}
+.req .id{font-family:var(--mono);font-size:12px;color:var(--amber);font-weight:700}
+.req .tt{font-size:14px;font-weight:700;color:var(--ink);flex:1 1 200px;min-width:0}
+.chip{font-size:11px;font-family:var(--mono);padding:2px 7px;border-radius:99px;border:1px solid;white-space:nowrap}
+.chip.p0{color:var(--red);border-color:rgba(228,100,95,.5);background:var(--red-soft)}
+.chip.p1{color:var(--amber);border-color:rgba(230,162,60,.5);background:var(--amber-soft)}
+.chip.p2{color:var(--ink2);border-color:var(--line2);background:var(--bg3)}
+.chip.own{color:var(--teal);border-color:rgba(62,198,160,.5);background:var(--teal-soft)}
+.req .bd{padding:11px 13px;font-size:13.5px;color:var(--ink2)}
+.req .bd ul{margin:6px 0 6px 18px}
+.req .bd li{margin:4px 0}
+.req .acc{display:block;margin-top:8px;font-size:12.5px;color:var(--ink3)}
+.req .acc b{color:var(--teal)}
+
+figure{margin:16px 0}
+svg{width:100%;height:auto;display:block}
+.figcap{color:var(--ink3);font-size:12.5px;text-align:center;margin-top:8px}
+
+footer{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);color:var(--ink3);font-size:12.5px;text-align:center}
+
+@media (min-width:640px){
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .meta{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .sec h2{font-size:23px}
+}
+@media (min-width:900px){
+  .stats{grid-template-columns:repeat(4,minmax(0,1fr))}
+  table{font-size:13.5px}
+}
+@media print{
+  body{background:#fff;color:#111}
+  .topbar{display:none}
+  .req,.note,.stat,table{break-inside:avoid}
+  .wrap{padding:0}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar"><div class="in">
+  <span class="tb-title">riscv_sim · 对外操作接口需求</span>
+  <nav class="toc">
+    <a href="#s1">01 现状</a>
+    <a href="#s2">02 需求总览</a>
+    <a href="#s3">03 接口契约</a>
+    <a href="#s4">04 关键语义</a>
+    <a href="#s5">05 复用映射</a>
+    <a href="#s6">06 验收</a>
+    <a href="#s7">07 非目标</a>
+    <a href="#s8">08 待拍板</a>
+    <a href="#s9">09 附录</a>
+  </nav>
+</div></div>
+
+<div class="wrap">
+
+<div class="cover">
+  <div class="kicker">REQUIREMENTS · riscv_sim · v0.1 DRAFT</div>
+  <h1>riscv_sim 对外操作接口需求</h1>
+  <p class="sub">让 Agent / CI 通过 API 配置板级、装载镜像、运行、断点调试并取回结果 —— 而不是去 import <code>front/assets/pkg</code> 的 wasm 产物</p>
+
+  <div class="meta">
+    <div><b>提出方</b>OSZ 侧（内核构建 / Agent 自动化）</div>
+    <div><b>受理方</b>riscv_sim（crates/kernel · crates/server · front）</div>
+    <div><b>文档状态</b>草案，待受理方评审与排期</div>
+    <div><b>日期</b>2026-11-24 · 基线 sim <code>d385239</code></div>
+    <div><b>协议基线</b>契约 schema v18，内核 0.1.0</div>
+    <div><b>首个被验证的客体</b>OSZ RTOS <code>output/image/osz.elf</code></div>
+  </div>
+</div>
+
+<div class="verdict">
+  <span class="lead">一句话需求</span>
+  提供一个<strong>进程级的操作入口</strong>（推荐 <code>riscv-sim-server</code>：HTTP + WebSocket，默认 <code>127.0.0.1:9876</code>），把内核已有的全部命令（装载 / 运行 / 步进 / 断点 / 寄存器 / 内存 / 反汇编 / console 字节流）以<strong>稳定的 API 形态</strong>暴露出来；客户端不接触 wasm 产物、不接触 <code>front/</code> 目录结构。
+</div>
+
+<div class="stats">
+  <div class="stat warn"><div class="v">placeholder</div><div class="l"><code>crates/server/src/main.rs</code> 目前只打印两行「P1 会在这里接线」</div></div>
+  <div class="stat warn"><div class="v">骨架</div><div class="l">M-07 的 server-mode 适配器：有 <code>WebSocket</code> 分支，但无 URL 时只报 <code>E_TRX-03</code></div></div>
+  <div class="stat"><div class="v">v18</div><div class="l">契约命令已覆盖装载 / 运行 / 调试 / 观测，缺的只是传输与会话管理</div></div>
+  <div class="stat"><div class="v">31 B</div><div class="l">osz 跑到 shell 的 console 字节数，可作为验收黄金值</div></div>
+</div>
+
+<!-- ============================================================ -->
+<section class="sec" id="s1">
+  <div class="sec-num">01</div>
+  <h2>现状与为什么要提这个需求</h2>
+  <p class="sec-intro">kernel 能力不缺，缺的是「外部进程怎么调它」。</p>
+
+  <h3>1.1 三条事实证据</h3>
+  <div class="tw">
+  <table>
+    <tr><th>位置</th><th>现状</th><th>后果</th></tr>
+    <tr><td><code>crates/server/src/main.rs</code></td><td>文档写着「将托管 kernel、暴露 WebSocket <code>127.0.0.1:9876</code>、POST <code>/api/project</code>」，实现只有 <code>eprintln!</code> placeholder</td><td>没有任何进程级入口</td></tr>
+    <tr><td><code>front/services/m07_transport.js</code></td><td>server-mode 分支存在，但「未配置 WebSocket URL」即降级为 <code>E_TRX-03</code>，注释明确 P1 仅骨架</td><td>前端也只能跑 Worker 形态</td></tr>
+    <tr><td><code>crates/kernel/src/wasm_api.rs</code></td><td>会话住在 <code>thread_local! + RefCell</code>，<strong>一个 wasm 实例 = 一个会话</strong></td><td>要并发 / 隔离，只能在进程层起多个实例</td></tr>
+  </table>
+  </div>
+
+  <h3>1.2 现在的唯一可用路径，以及它为什么不够</h3>
+  <p>当前 Agent 侧实际可行的做法是：在 Node 里 <code>import front/assets/pkg/riscv_sim_kernel.js</code>，把 ELF 字节塞进 <code>LoadProject</code>，再用 <code>StepN</code> 轮询 console。这条路<strong>能跑通</strong>（已实测：150 万条指令进 shell，与 Spike 逐字节一致），但它是把「前端构建产物」当成「对外接口」在用：</p>
+
+  <div class="badbox">
+    <b>七个硬约束，全都不是 API 该有的样子：</b>
+    <ul style="margin:8px 0 0 20px;line-height:1.8">
+      <li><b>耦合构建产物路径</b>：<code>front/assets/pkg/</code> 是 <code>tools/build-wasm.sh</code> 的输出，改名/换布局/未构建就全断。</li>
+      <li><b>没有进程边界</b>：guest 死循环 = 宿主进程卡死，杀不掉、也没法限时。</li>
+      <li><b>没有预算与超时的服务端语义</b>：客户端自己切 <code>StepN</code> 分片算「预算」，每个客户端各写一套。</li>
+      <li><b>wasm 单会话</b>：一次并发调试两枚 ELF，就得自己起 N 个实例、自己管生命周期。</li>
+      <li><b>非 JS 客户端不可用</b>：Python / Rust / shell 侧无法接入。</li>
+      <li><b>错误只在内核事件流里</b>：<code>E_PLT-22</code> 这类码没有 HTTP 状态/退出码的落点，脚本判错得自己扫 JSON。</li>
+      <li><b>无版本协商</b>：<code>schema_version</code> 只能靠 import 后现算，缓存里放了一份旧 wasm 就会静默错配。</li>
+    </ul>
+  </div>
+
+  <div class="note">
+    <b>连带问题（同一批要一起解决）：</b><code>tools/boot-osz.sh</code> 的候选侧现在跑不通 —— 因为 v0.76（STAGE-52 · B1）取消了「无板自动选档」，而 <code>osz-boot</code> 仍是「直接 <code>LoadProject</code>」，于是 <code>--print-memory</code> 一上来就撞 <code>E_PLT-22</code>，脚本在参数校验阶段退出。<br>
+    本需求把它当作<strong>验收对象之一</strong>：headless 判定不该由两个 CLI 各写一套，应当由同一个 API 提供。
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s2">
+  <div class="sec-num">02</div>
+  <h2>需求总览</h2>
+  <p class="sec-intro">P0 = 没有它，Agent/CI 无法以工程化方式使用；P1 = 调试完整体验；P2 = 观测面。<code>own</code> 标记的条目是「需受理方拍板实现形态」。</p>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-01</span><span class="tt">进程级入口与版本协商</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>可执行 <code>riscv-sim-server</code>，参数含 <code>--bind</code>（默认 <code>127.0.0.1</code>）、<code>--port</code>（默认 <code>9876</code>）、<code>--board</code>（默认板模板 id）、<code>--session-ttl</code>。</li>
+        <li><code>GET /api/version</code> → <code>{ kernel, schema_version, contract_version }</code>；<code>GET /healthz</code> → 就绪状态。</li>
+        <li>启动即打印实际绑定的地址与版本（便于脚本马上开始发请求，不必重试盲猜）。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>冷启动 &lt; 2 s；<code>curl /api/version</code> 的 <code>schema_version</code> 必须等于 <code>protocol_schema_version()</code>。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-02</span><span class="tt">会话生命周期与隔离</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li><code>POST /api/sessions</code> → <code>{ session_id }</code>；<code>GET /api/sessions</code> 列出（含板、镜像、状态）；<code>DELETE /api/sessions/{id}</code> 回收。</li>
+        <li>每个会话一份独立内核状态（等价一个 wasm 实例语义）：<strong>会话之间零共享</strong>，一侧跑飞不影响另一侧。</li>
+        <li>会话内<strong>命令串行化</strong>（同一时刻只有一个 run/step 在推进）；并发请求返回明确的忙状态而不是交错执行。</li>
+        <li>空闲 TTL 与显式回收都要释放线程/内存；<code>DELETE</code> 后再次访问返回 <code>404 + E_SESS-01</code>。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>两个会话并行跑同一条 <code>prefix</code>，控制台字节各归各；删一侧后另一侧继续可跑。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-03</span><span class="tt">板级配置（保持「无板不装载」纪律）</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>板来源三种：内置模板 id（<code>POST …/board {"template":"qemu-virt"}</code>）、完整 <code>PlatformDescription</code>（<code>{"description":{…}}</code>）、服务启动参数默认板。</li>
+        <li><strong>不得回退到 v0.76 之前的自动选档</strong>：没配板就装载，必须原样返回 <code>E_PLT-22</code>，并保留现有中文引导文案。</li>
+        <li>配板返回 <code>revision</code>；装载时若镜像地址落在板外，返回 <code>E_PLT-17</code>，detail 里保留「第一个落不在的区间」。</li>
+        <li>模板清单/模板详情各给一个只读端点（<code>GET /api/board/templates</code>、<code>GET /api/board/templates/{id}</code>），<strong>不要</strong>让客户端抄一份地址表。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>不配板直接装 ELF → <code>409 + E_PLT-22</code>；<code>osz.elf</code> + <code>qemu-virt</code> → 装载成功且 entry <code>0x80000000</code>。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-04</span><span class="tt">镜像装载</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>支持 ELF 与原始 BIN 两种（<code>kind</code> 可省略则按扩展名推断，与前端 <code>image-loader</code> 同口径；<code>.hex/.ihex</code> 继续明确拒绝）。</li>
+        <li>两种投递方式：<strong>服务端路径</strong>（<code>{"path":"…/osz.elf"}</code>，受 <code>--allow-image-root</code> 约束）与<strong>请求体字节</strong>（<code>application/octet-stream</code>，避免 200 KB 级 JSON 数字数组）。</li>
+        <li>返回装载摘要：<code>entry</code>、<code>segments</code>（各自 base/size）、总字节数、以及 ELF 的 ISA（供与板 <code>mcu.isa</code> 做门禁）。</li>
+        <li>装载本身<strong>不运行</strong>；装载失败时机器状态不变（与内核既有次序纪律一致）。</li>
+      </ul>
+      <span class="acc"><b>验收：</b><code>osz.elf</code> 走向上传：返回 entry <code>0x80000000</code>、段数与 <code>readelf -l</code> 一致；坏 ELF 返回 <code>422 + 既有 E_PLT/E_PROTO 码</code>。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-05</span><span class="tt">运行与停止：预算、前缀、超时、断点四个停因</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li><code>POST …/run</code> 一次请求描述「跑到什么时候停」，服务端自己分段推进，客户端不必切 <code>StepN</code>：<code>{steps?:N, prefix?:"OSZ$ ", timeout_ms?, until?:breakpoint|halt}</code>。</li>
+        <li>同步返回：<code>{ stop_reason, executed, pc, t_ps, console:{from,to} }</code>；<code>stop_reason ∈ {budget, prefix, breakpoint, halt, timeout, paused}</code>。</li>
+        <li>同时提供 <code>POST …/step {n}</code>（精确 n 条，调试语义）与 <code>POST …/pause</code>、<code>POST …/reset</code>；异步模式（<code>async:true</code>）可选，P1。</li>
+        <li><strong>停点与 console 的一致性</strong>：响应返回时，停点之前的 console 字节必须已经可读（先 flush console，再返回停因）。</li>
+      </ul>
+      <span class="acc"><b>验收：</b><code>run {prefix:"OSZ$ ", timeout_ms:30000}</code> → <code>stop_reason=prefix</code>、<code>executed</code> 在一个<strong>与实现无关的区间内可复现</strong>、<code>pc</code> 可从后续 state 读回。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-06</span><span class="tt">console 字节流：增量、单调、原样</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li><code>GET …/console?offset=N&amp;limit=M</code> → 原始字节（<code>application/octet-stream</code>），响应头带 <code>X-Console-Total</code> 与本次 <code>offset</code>。</li>
+        <li><strong>只追加不改写</strong>：offset 单调，已发出的字节永远不变；ANSI 转义、<code>\r</code>、半截 UTF-8 一律不加工（Spike 对拍依赖这一点）。</li>
+        <li>保留上限可配（<code>--max-console</code>），溢出时明确报「已截断 + 丢弃区间」，不静默丢。</li>
+        <li>P1 同时提供 WS 推送（<code>sim.console</code> 主题原样转发），拉取与推送<strong>共用同一份 offset</strong>，不能两个真相。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>osz 到 shell 的 console 31 字节，与 Spike stdout <code>cmp</code> 逐字节相同；翻页两次拼接后与一次性读取一致。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-07</span><span class="tt">状态、内存、符号：读得到、看得懂</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li><code>GET …/state</code> → <code>{pc, registers[0..32], t_ps}</code>；寄存器读要区分「x0 恒 0」与「PC 不属于 GPR」这一基本事实（上一轮我就踩过：把 <code>values[0]</code> 当 PC）。</li>
+        <li><code>GET …/memory?addr=&amp;len=</code> → 原始字节 + 可选 <code>format=u32|asc</code> 视图；越界/未映射返回明确码。</li>
+        <li><code>GET …/symbols?name=|prefix=</code> → 精确命中与候选列表（复用 <code>ResolveSymbol</code>），供「按符号打断点」「按符号读内存」用。</li>
+        <li><code>GET …/disasm?addr=&amp;count=</code> → 反汇编窗口，允许短于 count（未映射即止，与内核一致）。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>装载后 <code>state.pc</code> = ELF entry；在 shell 停住时按 <code>main</code>/<code>shell</code> 之类符号能解析出地址。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-08</span><span class="tt">断点与观察点</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li><code>POST …/breakpoints {addr|symbol}</code>、<code>DELETE …/breakpoints/{id}</code>、<code>GET …/breakpoints</code>；支持启停开关。</li>
+        <li>命中即在 <code>run</code> 的返回里体现（<code>stop_reason=breakpoint</code> + 命中的断点 id 与地址），P1 另有 <code>Hit</code> 事件。</li>
+        <li>观察点（watchpoint）按内核既有能力暴露，语义与 <code>SetWatchpoint</code> 一致。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>在 <code>main</code> 首条指令下断点 → <code>run</code> 停在断点地址、<code>executed</code> 与步进到同址的条数一致。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-09</span><span class="tt">错误契约：码 + detail 原样透出</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>统一错误体 <code>{ code:"E_PLT-22", detail:"…", status:409 }</code>；<code>code</code> 必须是契约层既有码，<strong>不新造同义词</strong>。</li>
+        <li>HTTP 状态映射固定：用法/载荷 → 400；会话/资源不存在 → 404；状态冲突（无板、忙、修订号不符） → 409；内核拒绝（门禁不过、镜像畸形） → 422；超时 → 504；内部 → 500 且必须带 detail。</li>
+        <li>禁止「500 无 detail」与「成功但 body 里藏错」；装载失败不得返回 200。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>表里 12 个码各有一条用例，断言 <code>status</code> 与 <code>code</code> 均正确。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-10</span><span class="tt">确定性：同输入同输出</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>预算以<strong>指令条数</strong>计，不以墙钟计；墙钟只作为熔断，不参与结果。</li>
+        <li>同一 ELF + 同一板 + 同一预算 ⇒ console 字节流、<code>stop_reason</code>、<code>pc</code> 完全一致（两次运行可直接 <code>cmp</code>）。</li>
+        <li>不引入「随机初始寄存器 / 依赖真实时间」的行为；<code>t_ps</code> 只由指令推进产生。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>同参数连跑 3 次，console 与 <code>pc</code> 三次一致。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-11</span><span class="tt">超时与熔断：跑飞必须杀得掉</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>每请求可带 <code>timeout_ms</code>；服务端到点必须让 guest 停下并返回 <code>504 + stop_reason=timeout</code>，且会话仍可用（可再 <code>reset</code>）。</li>
+        <li>会话级预算上限 + 服务级并发上限；超限给出 429 与剩余额度，不排队到无限。</li>
+        <li>进程退出/被 kill 时不得留下孤儿线程与半初始化会话。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>跑到「死循环」的镜像，<code>timeout_ms=3000</code> 秒回 <code>timeout</code>；随后同会话 <code>reset</code> 后仍能正常装载运行。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-12</span><span class="tt">CI / 脚本友好</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>零浏览器依赖、离线可用（不下载 npm/wasm；二进制自带 wasm 或原生内核）。</li>
+        <li>便捷端点 <code>POST /api/boot</code>：<code>{path, prefix, steps, timeout_ms}</code> → 一次调用完成「配板 → 装载 → 跑到前缀 → 返回 console 字节（或写文件）」，等价 <code>osz-boot</code> 的判定口径；退出码概念用 <code>stop_reason</code> 表达。</li>
+        <li><code>POST /api/boot</code> 的 stdout/返回体<strong>只放 console 字节</strong>，统计信息走 <code>meta</code> 字段 —— 这样与 Spike 的 <code>cmp</code> 不用再写 sed。</li>
+        <li><code>tools/boot-osz.sh</code> 与 <code>osz-boot</code> 改为调用该端点（顺带修掉现在的 <code>E_PLT-22</code> 断链），仓内只保留一份判定口径。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>一条 <code>curl</code> 完成 osz 判定；<code>--out</code> 产物与 Spike 逐字节相同。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-13</span><span class="tt">事件流（WebSocket，复用 M-07 帧）</span><span class="chip p1">P1</span></div>
+    <div class="bd">
+      <ul>
+        <li><code>GET /api/sessions/{id}/events</code> 升级为 WS，帧格式<strong>直接复用</strong> <code>front/lib/frame.js</code> 的 <code>{type, seq, sessionId, role, reqId, payload}</code>，内核事件不做二次包装。</li>
+        <li><code>Subscribe/Unsubscribe</code> 在会话上生效（<code>sim.console</code> / <code>sim.state.delta</code> / <code>debug.trace</code> / <code>sim.waveform</code> …）。</li>
+        <li>背压：客户端跟不上时可丢帧，但必须显式报「丢了多少、从哪个 seq 起」，不允许静默断流。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>前端 <code>m07_transport</code> 的 server-mode 分支指到该端点即可工作（不再只在 Worker 模式可用）。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-14</span><span class="tt">快照 / 复位 / trace（闭环调试）</span><span class="chip p1">P1</span></div>
+    <div class="bd">
+      <ul>
+        <li><code>POST …/snapshot</code> 与 <code>POST …/restore</code>（复用 <code>Snapshot/Restore</code>）：先存一份「坏现场」，再反复回放。</li>
+        <li><code>POST …/reset</code>：回到当前工程的装载起点（与前端「复位 = 重新装载当前工程」同口径）。</li>
+        <li><code>POST …/trace {enabled}</code> + <code>GET …/trace?offset=</code>：分页取轨迹，供 Agent 事后分析。</li>
+      </ul>
+      <span class="acc"><b>验收：</b>快照 → 跑 1 万条 → restore → 再跑同一万条，两次 console 与 PC 一致。</span>
+    </div>
+  </div>
+
+  <div class="req">
+    <div class="hd"><span class="id">R-15</span><span class="tt">安全边界</span><span class="chip p0">P0</span></div>
+    <div class="bd">
+      <ul>
+        <li>默认只绑 <code>127.0.0.1</code>；绑定非回环地址必须显式 <code>--allow-remote</code> 并配 token（P2 再做鉴权，但开关先留好）。</li>
+        <li>镜像路径读取受 <code>--allow-image-root</code> 约束，默认只允许仓库根与显式传入的目录；拒绝 <code>..</code> 穿越。</li>
+        <li>API 不提供任意文件写入；console 落盘只在显式 <code>--out</code> 时发生。</li>
+      </ul>
+      <span class="acc"><b>验收：</b><code>{"path":"/etc/passwd"}</code> → <code>403 + E_IO-xx</code>；默认 <code>curl</code> 从非本机 IP 连不上。</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s3">
+  <div class="sec-num">03</div>
+  <h2>接口契约（建议形态）</h2>
+  <p class="sec-intro">形态建议而非定案：字段名可改，但<strong>能力集合与语义约束</strong>不要打折。</p>
+
+  <figure>
+    <svg viewBox="0 0 1120 260" role="img" aria-label="一次完整会话的调用时序">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3EC6A0"/></marker>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#E6A23C"/></marker>
+      </defs>
+      <rect x="0" y="0" width="1120" height="260" fill="none"/>
+      <text x="40" y="30" font-size="13" fill="#9AA8B6" font-family="monospace">Client (Agent / CI)</text>
+      <text x="470" y="30" font-size="13" fill="#9AA8B6" font-family="monospace">riscv-sim-server</text>
+      <text x="900" y="30" font-size="13" fill="#9AA8B6" font-family="monospace">kernel (native)</text>
+      <line x1="40" y1="42" x2="1080" y2="42" stroke="#24303B"/>
+
+      <line x1="200" y1="80" x2="560" y2="60" stroke="#3EC6A0" marker-end="url(#a1)"/>
+      <text x="210" y="72" font-size="11.5" fill="#E4E9F0" font-family="monospace">POST /api/sessions</text>
+      <line x1="560" y1="72" x2="200" y2="92" stroke="#24303B" stroke-dasharray="4 3"/>
+      <text x="212" y="110" font-size="11" fill="#9AA8B6" font-family="monospace">201 {session_id}</text>
+
+      <line x1="200" y1="140" x2="560" y2="120" stroke="#3EC6A0" marker-end="url(#a1)"/>
+      <text x="210" y="132" font-size="11.5" fill="#E4E9F0" font-family="monospace">PUT board {template}</text>
+      <line x1="200" y1="176" x2="560" y2="156" stroke="#3EC6A0" marker-end="url(#a1)"/>
+      <text x="210" y="168" font-size="11.5" fill="#E4E9F0" font-family="monospace">POST image (elf)</text>
+      <line x1="560" y1="156" x2="880" y2="150" stroke="#E6A23C" marker-end="url(#a2)"/>
+      <text x="590" y="146" font-size="11" fill="#E6A23C" font-family="monospace">SetMemoryMap / LoadProject</text>
+
+      <line x1="200" y1="212" x2="560" y2="192" stroke="#3EC6A0" marker-end="url(#a1)"/>
+      <text x="210" y="204" font-size="11.5" fill="#E4E9F0" font-family="monospace">POST run {prefix, timeout_ms}</text>
+      <line x1="560" y1="192" x2="880" y2="186" stroke="#E6A23C" marker-end="url(#a2)"/>
+      <text x="590" y="182" font-size="11" fill="#E6A23C" font-family="monospace">StepN 循环</text>
+      <line x1="560" y1="204" x2="200" y2="224" stroke="#24303B" stroke-dasharray="4 3"/>
+      <text x="212" y="242" font-size="11" fill="#9AA8B6" font-family="monospace">{stop_reason, executed, pc}</text>
+
+      <line x1="200" y1="252" x2="1080" y2="252" stroke="#24303B"/>
+      <text x="40" y="252" font-size="11" fill="#677787" font-family="monospace">GET console?offset=0</text>
+    </svg>
+    <div class="figcap">一次会话：建会话 → 配板 → 装镜像 → 运行到停点 → 取 console（会话内命令串行）</div>
+  </figure>
+
+  <h3>3.1 端点表</h3>
+  <div class="tw">
+  <table>
+    <tr><th>方法 / 路径</th><th>作用</th><th>关键载荷 / 返回</th><th>优先级</th></tr>
+    <tr><td><code>GET /api/version</code></td><td>版本与 schema 协商</td><td><code>{kernel, schema_version}</code></td><td>P0</td></tr>
+    <tr><td><code>POST /api/sessions</code></td><td>新建会话</td><td><code>{board?}</code> → <code>{session_id}</code></td><td>P0</td></tr>
+    <tr><td><code>DELETE /api/sessions/{id}</code></td><td>回收</td><td>204</td><td>P0</td></tr>
+    <tr><td><code>PUT /api/sessions/{id}/board</code></td><td>配板（模板或完整描述）</td><td><code>{template|description}</code> → <code>{revision}</code></td><td>P0</td></tr>
+    <tr><td><code>POST /api/sessions/{id}/image</code></td><td>装载 ELF/BIN</td><td><code>octet-stream</code> 或 <code>{path,kind}</code> → <code>{entry, segments, isa}</code></td><td>P0</td></tr>
+    <tr><td><code>POST /api/sessions/{id}/run</code></td><td>跑到停点</td><td><code>{steps|prefix, timeout_ms}</code> → <code>{stop_reason, executed, pc}</code></td><td>P0</td></tr>
+    <tr><td><code>POST /api/sessions/{id}/step</code></td><td>精确 n 条</td><td><code>{n}</code> → <code>{pc}</code></td><td>P0</td></tr>
+    <tr><td><code>GET /api/sessions/{id}/console</code></td><td>取 console 字节</td><td><code>?offset&amp;limit</code> → 原始字节 + <code>X-Console-Total</code></td><td>P0</td></tr>
+    <tr><td><code>GET /api/sessions/{id}/state</code></td><td>PC / GPR / t_ps</td><td>JSON</td><td>P0</td></tr>
+    <tr><td><code>GET /api/sessions/{id}/memory</code></td><td>读内存</td><td><code>?addr&amp;len</code></td><td>P0</td></tr>
+    <tr><td><code>/api/sessions/{id}/breakpoints</code></td><td>断点增删查</td><td><code>{addr|symbol}</code></td><td>P0</td></tr>
+    <tr><td><code>POST /api/boot</code></td><td>一把梭：配板+装载+跑到前缀+取字节</td><td>见 R-12</td><td>P0</td></tr>
+    <tr><td><code>GET /api/sessions/{id}/events</code> (WS)</td><td>事件流</td><td>M-07 帧</td><td>P1</td></tr>
+    <tr><td><code>/api/sessions/{id}/snapshot|restore|trace|disasm|symbols</code></td><td>调试配套</td><td>复用既有命令</td><td>P1</td></tr>
+  </table>
+  </div>
+
+  <h3>3.2 错误体与状态映射</h3>
+  <div class="tw">
+  <table>
+    <tr><th>HTTP</th><th>典型 code</th><th>场景</th></tr>
+    <tr><td>400</td><td><code>E_PROTO-08</code></td><td>载荷形状不对 / 未知字段被拒</td></tr>
+    <tr><td>404</td><td><code>E_SESS-01</code></td><td>会话不存在或已回收</td></tr>
+    <tr><td>409</td><td><code>E_PLT-22</code> / <code>E_PLT-13</code> / busy</td><td>无板装载 / 修订号不符 / 会话正忙</td></tr>
+    <tr><td>422</td><td><code>E_PLT-17</code>、镜像畸形</td><td>地址落在板外 / ELF 解析失败 / ISA 门禁不过</td></tr>
+    <tr><td>504</td><td><code>stop_reason=timeout</code></td><td>墙钟超时（guest 已被停下）</td></tr>
+    <tr><td>500</td><td>内部</td><td>必须带 <code>detail</code>，禁止空错误</td></tr>
+  </table>
+  </div>
+  <div class="note"><b>注意：</b>内核已有错误码体系（<code>E_PLT-xx</code>、<code>E_PROTO-xx</code>、<code>E_TRX-xx</code> 等）。API 层<strong>只做透出与状态映射</strong>，不再造一套 <code>E_API-xx</code> 跟它并行 —— 否则同一个故障会有两个码，客户端无法判断该信哪个。</div>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s4">
+  <div class="sec-num">04</div>
+  <h2>关键语义（容易实现跑偏的地方）</h2>
+
+  <h3>4.1 console 是字节，不是字符串</h3>
+  <p>幂等要求很硬：ANSI 序列、<code>\r</code>、半截 UTF-8 必须原样保留，否则与 Spike 的逐字节对拍立刻失效。取回接口的 <code>offset</code> 单调、只追加；「转发时顺便美化」一律禁止。</p>
+
+  <h3>4.2 停因先于判定，console 先于返回</h3>
+  <p>「跑到 <code>prefix</code> 就停」这条判定必须由服务端做（客户端逐段 <code>StepN</code> 会把预算口径打散）。返回停因之前，把已产生的 console 落进会话缓冲；否则客户端会遇到「说有 31 字节，取回只有 24 字节」这类时序 bug。</p>
+
+  <h3>4.3 板不自动选，但可以给默认值</h3>
+  <p>v0.76 的「无板不装载」是纪律，不要在 API 层用「贴心兜底」把它绕过去。可行的折中是：<code>--board qemu-virt</code> 作为<strong>显式默认</strong>在会话创建时配好，等价于客户端自己调一次 <code>PUT board</code>，语义仍可追溯。</p>
+
+  <h3>4.4 单会话串行，跨会话并行</h3>
+  <figure>
+    <svg viewBox="0 0 1120 190" role="img" aria-label="会话隔离">
+      <rect x="20" y="20" width="330" height="150" rx="10" fill="#10161D" stroke="#24303B"/>
+      <text x="40" y="46" font-size="12.5" fill="#3EC6A0" font-family="monospace">session A</text>
+      <rect x="40" y="60" width="290" height="42" rx="8" fill="#161E27" stroke="#33404E"/>
+      <text x="56" y="86" font-size="11.5" fill="#E4E9F0" font-family="monospace">kernel 实例 · osz.elf</text>
+      <text x="40" y="126" font-size="11" fill="#9AA8B6" font-family="monospace">命令串行 · console 缓冲 A</text>
+      <text x="40" y="148" font-size="11" fill="#9AA8B6" font-family="monospace">板 A · 断点表 A · 停顿状态 A</text>
+
+      <rect x="395" y="20" width="330" height="150" rx="10" fill="#10161D" stroke="#24303B"/>
+      <text x="415" y="46" font-size="12.5" fill="#3EC6A0" font-family="monospace">session B</text>
+      <rect x="415" y="60" width="290" height="42" rx="8" fill="#161E27" stroke="#33404E"/>
+      <text x="431" y="86" font-size="11.5" fill="#E4E9F0" font-family="monospace">kernel 实例 · 另一枚 ELF</text>
+      <text x="415" y="126" font-size="11" fill="#9AA8B6" font-family="monospace">命令串行 · console 缓冲 B</text>
+      <text x="415" y="148" font-size="11" fill="#9AA8B6" font-family="monospace">板 B · 断点表 B · 停顿状态 B</text>
+
+      <rect x="770" y="20" width="330" height="150" rx="10" fill="#10161D" stroke="#24303B"/>
+      <text x="790" y="46" font-size="12.5" fill="#E6A23C" font-family="monospace">共享的只有</text>
+      <text x="790" y="76" font-size="11.5" fill="#9AA8B6" font-family="monospace">· 服务级并发/预算上限</text>
+      <text x="790" y="98" font-size="11.5" fill="#9AA8B6" font-family="monospace">· 只读板模板库</text>
+      <text x="790" y="120" font-size="11.5" fill="#9AA8B6" font-family="monospace">· 日志/指标</text>
+      <text x="790" y="146" font-size="11" fill="#677787" font-family="monospace">不得共享会话状态</text>
+    </svg>
+    <div class="figcap">一个会话 = 一份独立内核状态；跨会话零共享（wasm 侧 thread_local 单会话约束由此解开）</div>
+  </figure>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s5">
+  <div class="sec-num">05</div>
+  <h2>与现有实现的映射：几乎不用新增协议</h2>
+  <p class="sec-intro">契约 v18 的命令已经够用，本需求<strong>基本只要求一层传输与会话管理</strong>。</p>
+  <div class="tw">
+  <table>
+    <tr><th>需求</th><th>已有落点</th><th>说明</th></tr>
+    <tr><td>R-03 配板</td><td><code>ListPlatformTemplates</code> / <code>GetPlatformTemplate</code> / <code>SetMemoryMap</code></td><td>已有，含 <code>expected_revision</code> 并发保护</td></tr>
+    <tr><td>R-04 装载</td><td><code>LoadProject(Project{images})</code> · <code>m06_elf</code></td><td>已有 ELF 解析；API 只换成 octet-stream 投递</td></tr>
+    <tr><td>R-05 运行</td><td><code>StepN</code> / <code>Continue</code> / <code>Pause</code></td><td>服务端把「prefix/budget/timeout」编成 StepN 循环（<code>osz-boot</code> 里已有等价逻辑，可上收）</td></tr>
+    <tr><td>R-06 console</td><td><code>Subscribe(sim.console)</code> · <code>EventPayload::Console</code></td><td>事件已有；API 补一层 offset 缓冲</td></tr>
+    <tr><td>R-07 状态/内存/符号/反汇编</td><td><code>ReadRegisters</code> · <code>ReadMemory</code> · <code>ResolveSymbol</code> · <code>Disasm</code> · <code>Snapshot</code></td><td>全有</td></tr>
+    <tr><td>R-08 断点</td><td><code>SetBreakpoint</code> / <code>ClearBreakpoint</code> / <code>ListBreakpoints</code> / <code>SetWatchpoint</code></td><td>全有，含启停开关</td></tr>
+    <tr><td>R-13 事件流</td><td><code>Session</code> 的 <code>Subscribe/Unsubscribe</code> + M-07 帧</td><td>前端已有帧编解码，服务端复用同一份</td></tr>
+    <tr><td>R-14 trace</td><td><code>SetTraceEnabled</code> / <code>ExportTrace</code></td><td>已有分页</td></tr>
+  </table>
+  </div>
+  <div class="verdict"><span class="lead">结论</span>这是<strong>接线活儿</strong>，不是重新设计：新增的只有 <code>crates/server</code> 的 HTTP/WS 宿主、会话表、console 缓冲与错误映射；内核与契约层可以零改动（若必须改动，只允许「只增不改」）。</div>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s6">
+  <div class="sec-num">06</div>
+  <h2>验收用例（第一条就是 OSZ 的黄金值）</h2>
+  <p class="sec-intro">前四条用真实 OSZ ELF；数值是上一轮实测得到的，可作为回归基线。</p>
+  <div class="tw">
+  <table>
+    <tr><th>#</th><th>动作</th><th>期望</th></tr>
+    <tr><td>AC-01</td><td><code>POST /api/boot {path: osz.elf, prefix:"OSZ$ ", timeout_ms:30000}</code></td><td><code>stop_reason=prefix</code>；console <b>31 字节</b>，内容含 <code>==== Enter Main ====</code> 与 <code>OSZ$ </code>；<code>meta.pc</code> ≈ <code>0x80006a7c</code></td></tr>
+    <tr><td>AC-02</td><td>平台侧 console 与 <code>spike --isa=rv32imc_zicsr_zicclsm_zifencei_zicntr -m2147479552:4096,2147483648:134217728 osz.elf</code> 的 stdout 做 <code>cmp</code></td><td>逐字节相同（MATCH）</td></tr>
+    <tr><td>AC-03</td><td>不配板直接 <code>POST image</code></td><td><code>409 + E_PLT-22</code>，detail 保留「先从模板导入 default / minimal / qemu-virt」</td></tr>
+    <tr><td>AC-04</td><td>装载后 <code>GET state</code></td><td><code>pc = 0x80000000</code>（ELF entry），x0 = 0 且 <code>registers</code> 索引与 ABI 一致</td></tr>
+    <tr><td>AC-05</td><td><code>step {n:1}</code> 连续两次</td><td>pc 每条都有变化（或明确 <code>halt</code>），不是恒 0</td></tr>
+    <tr><td>AC-06</td><td>在 <code>main</code> 首条下断点后 <code>run</code></td><td><code>stop_reason=breakpoint</code>，地址与符号解析一致</td></tr>
+    <tr><td>AC-07</td><td>对死循环镜像 <code>run {timeout_ms:3000}</code></td><td>约 3 s 返回 <code>timeout</code>，随后同会话 <code>reset</code> 仍可用</td></tr>
+    <tr><td>AC-08</td><td>两会话并行跑同一镜像</td><td>各得 31 字节；删 A 后 B 仍可 <code>run</code></td></tr>
+    <tr><td>AC-09</td><td>console 分两页取（<code>limit=16</code> 再取余下）</td><td>拼接结果与一次取全一致，<code>X-Console-Total</code> 恒为 31</td></tr>
+    <tr><td>AC-10</td><td>同参数 <code>run</code> 连跑 3 次</td><td>console、<code>stop_reason</code>、最终 pc 三次一致</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s7">
+  <div class="sec-num">07</div>
+  <h2>非目标（明确不做）</h2>
+  <div class="tw">
+  <table>
+    <tr><th>不做</th><th>理由</th></tr>
+    <tr><td>替代浏览器工作台</td><td>前端仍是主要交互面；API 是给 Agent/CI 的第二个入口，两者共用内核与契约</td></tr>
+    <tr><td>在 API 层改内核语义（自动选板、自动改地址、自动重试装载）</td><td>会把 v0.76 的门禁纪律绕空，故障现场被抹掉</td></tr>
+    <tr><td>支持 IHEX</td><td>与产品入口保持一致（明确拒绝，不静默降级）</td></tr>
+    <tr><td>多板并行于同一会话</td><td>一个会话一个生效板；要多板就多会话</td></tr>
+    <tr><td>远程鉴权体系（P2 再说）</td><td>本批只留开关，不引入账号体系</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s8">
+  <div class="sec-num">08</div>
+  <h2>待受理方拍板的 5 项</h2>
+  <p class="sec-intro">这五项会改变实现形态，需要 sim 侧决定；其余条目按需求直达。</p>
+  <div class="tw">
+  <table>
+    <tr><th>#</th><th>决策点</th><th>选项</th><th>OSZ 侧倾向</th></tr>
+    <tr><td>D1</td><td>传输形态</td><td>① REST + WS 混合；② 纯 WS 单通道（全部命令走帧）</td><td>①：请求-响应用 REST 便于 <code>curl</code>/CI，流用 WS 复用 M-07 帧</td></tr>
+    <tr><td>D2</td><td>镜像投递</td><td>① 只接受本地路径；② 只接受上传；③ 两者</td><td>③，路径受 <code>--allow-image-root</code> 白名单约束</td></tr>
+    <tr><td>D3</td><td><code>run</code> 语义</td><td>① 同步阻塞到停点；② 立即返回 + 事件回调</td><td>① 默认，② 作为 P1 可选；CI 要的是「一次调用拿到结果」</td></tr>
+    <tr><td>D4</td><td>默认板</td><td>① 不提供；② <code>--board</code> 会话创建时显式配好</td><td>②，但必须是「显式配置」的可追溯动作，不是自动兜底</td></tr>
+    <tr><td>D5</td><td><code>/api/boot</code> 与 <code>osz-boot</code> 的关系</td><td>① CLI 保留、各自实现；② CLI 变为 API 的薄客户端（判定唯一的落点）</td><td>②，顺带修掉 <code>E_PLT-22</code> 断链，避免两套判定</td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section class="sec" id="s9">
+  <div class="sec-num">09</div>
+  <h2>附录：最小可脚本化序列</h2>
+  <p class="sec-intro">给受理方做「能不能一条命令跑完」的可行性参照。</p>
+  <pre><code># 1) 版本协商
+curl -s http://127.0.0.1:9876/api/version
+
+# 2) 建会话 + 配板 + 装镜像（三行，任一步失败都带 code/detail）
+SID=$(curl -s -X POST http://127.0.0.1:9876/api/sessions | jq -r .session_id)
+curl -s -X PUT  "http://127.0.0.1:9876/api/sessions/$SID/board" -d '{"template":"qemu-virt"}'
+curl -s -X POST "http://127.0.0.1:9876/api/sessions/$SID/image" \
+     -H 'Content-Type: application/octet-stream' --data-binary @output/image/osz.elf
+
+# 3) 跑到 shell，拿停因
+curl -s -X POST "http://127.0.0.1:9876/api/sessions/$SID/run" \
+     -d '{"prefix":"OSZ$ ","timeout_ms":30000}'
+# → {"stop_reason":"prefix","executed":1500000,"pc":2147506812}
+
+# 4) 取 console 原始字节（与 spike stdout 直接 cmp）
+curl -s "http://127.0.0.1:9876/api/sessions/$SID/console?offset=0" > platform.bin
+PATH=/opt/homebrew/bin:$PATH spike --isa=rv32imc_zicsr_zicclsm_zifencei_zicntr \
+     -m2147479552:4096,2147483648:134217728 output/image/osz.elf > spike.bin
+cmp platform.bin spike.bin && echo MATCH
+
+# 5) 或者一把梭
+curl -s -X POST http://127.0.0.1:9876/api/boot \
+     -d '{"path":"output/image/osz.elf","prefix":"OSZ$ ","timeout_ms":30000}' \
+     -o console.bin -D meta.txt</code></pre>
+
+  <div class="note"><b>客户端侧承诺：</b>API 一旦可用，OSZ 侧把 <code>tools/sim/run_on_platform.mjs</code>（import wasm 产物的过渡方案）退役，改为纯 HTTP 客户端；文档里的运行验证命令同步改成 API 形态。在 API 落地之前，该脚本只作为「平台能跑通 osz」的证据保留，不作为推荐用法。</div>
+</section>
+
+<footer>
+  riscv_sim 对外操作接口需求 · v0.1 草案 · 2026-11-24 · 提出方 OSZ 侧（Agent 自动化）<br>
+  待受理方评审：§08 五项的形态决定，以及是否把 <code>/api/boot</code> 作为唯一判定口径
+</footer>
+
+</div>
+</body>
+</html>
