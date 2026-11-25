@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use riscv_sim_contract::model::{ImageKind, ImageRef, ImageSource, Project, ProjectVersion};
 use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::{CommandPayload, EventPayload, HaltReason, Message};
+use riscv_sim_contract::session::{CheckpointMetaDto, SessionSnapshotDto};
 use riscv_sim_contract::SCHEMA_VERSION;
 use riscv_sim_kernel::kernel_host::{KernelHost, RunStop};
 
@@ -245,6 +246,20 @@ enum Job {
         since: u64,
         /// 最多多少帧。
         limit: usize,
+        /// 回执通道。
+        reply: Sender<JobReply>,
+    },
+    /// 采集会话快照（P1）：走宿主 `capture_session`（六段齐全）。
+    Snapshot {
+        /// 检查点元数据（`t_virt` 由宿主按引擎虚拟时间**代填**）。
+        meta: CheckpointMetaDto,
+        /// 回执通道（一整个 `SessionSnapshotDto` 的 JSON）。
+        reply: Sender<JobReply>,
+    },
+    /// 还原会话快照（P1）：走宿主 `restore_session`（校验先于应用）。
+    Restore {
+        /// 会话载荷。
+        payload: Box<SessionSnapshotDto>,
         /// 回执通道。
         reply: Sender<JobReply>,
     },
@@ -507,6 +522,22 @@ impl SessionHandle {
     /// trace 导出（P1）：`ExportTrace`。
     pub fn export_trace(&self, command: CommandPayload) -> Result<serde_json::Value, ApiError> {
         self.debug(command)
+    }
+
+    /// 采集会话快照（P1）。
+    pub fn snapshot(&self, meta: CheckpointMetaDto) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Snapshot { meta, reply },
+            crate::error::snapshot_failure,
+        )
+    }
+
+    /// 还原会话快照（P1）。
+    pub fn restore(&self, payload: Box<SessionSnapshotDto>) -> Result<serde_json::Value, ApiError> {
+        self.submit(
+            |reply| Job::Restore { payload, reply },
+            crate::error::snapshot_failure,
+        )
     }
 
     /// 读事件流（P1）。
@@ -838,6 +869,26 @@ impl SessionRegistry {
     ) -> Result<serde_json::Value, ApiError> {
         let handle = self.handle_for(id)?;
         handle.export_trace(command)
+    }
+
+    /// 采集会话快照（P1）。
+    pub fn snapshot(
+        &self,
+        id: &str,
+        meta: CheckpointMetaDto,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.snapshot(meta)
+    }
+
+    /// 还原会话快照（P1）。
+    pub fn restore(
+        &self,
+        id: &str,
+        payload: Box<SessionSnapshotDto>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.restore(payload)
     }
 
     /// 读事件流（P1）。
@@ -1328,6 +1379,32 @@ fn spawn_worker(
                                 }),
                             });
                         }
+                        Job::Snapshot { meta, reply } => {
+                            let payload = host.capture_session(meta);
+                            let bytes = serde_json::to_vec(&payload)
+                                .map(|raw| raw.len())
+                                .unwrap_or(0);
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "snapshot": serde_json::to_value(&payload)
+                                    .unwrap_or(serde_json::Value::Null),
+                                "bytes": bytes,
+                            })));
+                        }
+                        Job::Restore { payload, reply } => {
+                            // ⚠️ `restore_session` **校验先于应用**：畸形载荷一个字节都不
+                            //    会改（第 0 步 validate 失败即返回）⇒ ⇒ 失败时如实报码。
+                            let _ = reply.send(match host.restore_session(&payload) {
+                                Ok(()) => Ok(serde_json::json!({
+                                    "restored": true,
+                                    "pc": host.pc(),
+                                    "executed": host.total_executed(),
+                                })),
+                                Err(err) => Err(KernelFailure {
+                                    code: format!("{}-{:02}", err.family.as_str(), err.scenario),
+                                    message: err.message,
+                                }),
+                            });
+                        }
                         Job::Events {
                             since,
                             limit,
@@ -1459,6 +1536,35 @@ mod tests {
             pc: Some(0),
             t_ps: 0,
         }
+    }
+
+    #[test]
+    fn snapshot_then_restore_round_trips_a_session() {
+        let registry = registry();
+        let info = registry
+            .create(Some("default".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        // 采集：六段齐全，宿主代填 `t_virt`。
+        let taken = registry
+            .snapshot(&id, CheckpointMetaDto::default())
+            .expect("fresh session 必须能采集快照");
+        let payload = taken.get("snapshot").expect("回执必须带 snapshot").clone();
+        assert!(payload.get("m12_engine").is_some());
+        assert!(payload.get("m13_state").is_some());
+
+        // 还原：同一份载荷必须能被吃回去（校验通过 ⇒ 应用）。
+        let restored: SessionSnapshotDto =
+            serde_json::from_value(payload).expect("回执必须是合法的 SessionSnapshotDto");
+        let reply = registry
+            .restore(&id, Box::new(restored))
+            .expect("合法快照必须能还原");
+        assert_eq!(reply.get("restored"), Some(&serde_json::Value::Bool(true)));
+
+        // 畸形载荷 ⇒ **失败**（而不是静默接受）。
+        let mut broken = SessionSnapshotDto::default();
+        broken.schema_version = 999;
+        assert!(registry.restore(&id, Box::new(broken)).is_err());
     }
 
     #[test]

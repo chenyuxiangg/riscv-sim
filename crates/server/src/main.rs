@@ -49,6 +49,7 @@ usage: riscv_sim_server [options]
   --max-sessions <n>       concurrent session quota (default 8)
   --allow-image-root <dir> whitelist root for image paths (default: uploads only)
   --max-image-bytes <n>    per-upload image byte cap (default 16777216)
+  --max-snapshot-bytes <n> per-restore snapshot body cap (default 33554432)
   --max-run-ms <ms>        wall-clock cap for one run (default 5000)
   --allow-remote           allow a non-loopback bind (needs --token too)
   --token <secret>         bearer token checked in remote mode
@@ -80,6 +81,8 @@ usage: riscv_sim_server [options]
   GET    /api/sessions/<id>/events/ws  WebSocket: {since, next, lost, frames} 一帧一拍
   GET    /api/sessions/<id>/trace   ?source(execution|waveform)&format(csv|json|vcd)&offset&limit
   PUT    /api/sessions/<id>/trace/enabled {enabled} -> {enabled, len, dropped}
+  POST   /api/sessions/<id>/snapshot  {id?, base_seq?} -> {snapshot, bytes} 六段齐全
+  POST   /api/sessions/<id>/restore   SessionSnapshotDto -> {restored, pc, executed}
 ";
 
 fn main() -> ExitCode {
@@ -142,20 +145,19 @@ fn main() -> ExitCode {
 async fn shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
-        let mut term = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(signal) => signal,
-            Err(err) => {
-                // 装不上 SIGTERM 处理器不是致命错误：退化成只认 ctrl-c，
-                // 但要**说出来**（否则用户以为 SIGTERM 生效了）。
-                eprintln!(
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(err) => {
+                    // 装不上 SIGTERM 处理器不是致命错误：退化成只认 ctrl-c，
+                    // 但要**说出来**（否则用户以为 SIGTERM 生效了）。
+                    eprintln!(
                     "riscv_sim_server: cannot hook SIGTERM ({err}); only ctrl-c stops the server"
                 );
-                let _ = tokio::signal::ctrl_c().await;
-                return "ctrl-c";
-            }
-        };
+                    let _ = tokio::signal::ctrl_c().await;
+                    return "ctrl-c";
+                }
+            };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => "ctrl-c",
             _ = term.recv() => "SIGTERM",

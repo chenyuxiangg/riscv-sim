@@ -26,6 +26,12 @@ pub const DEFAULT_MAX_SESSIONS: usize = 8;
 /// 会被解析器当畸形，报出来的错跟真原因（太大）对不上。
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
+/// 一次 `restore` 的默认载荷上限（32 MiB）。
+///
+/// 快照含整页 RAM（六段），比镜像大得多；两个界分开设，避免为了快照把
+/// 镜像的上限一起放大。
+pub const DEFAULT_MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+
 /// `run` 的墙钟上限默认值（毫秒）。R-11：不给上限就等于允许「一个请求把
 /// 进程占死」。
 pub const DEFAULT_MAX_RUN_MS: u64 = 5_000;
@@ -53,6 +59,11 @@ pub struct Config {
     pub allow_image_root: Option<PathBuf>,
     /// 单次上传的镜像字节上限（`--max-image-bytes`）。
     pub max_image_bytes: usize,
+    /// 一次 `restore` 的载荷上限（`--max-snapshot-bytes`）。
+    ///
+    /// ⚠️ **不能**沿用 `--max-image-bytes`：快照带整页 RAM，比镜像大两三个
+    /// 数量级 ⇒ ⇒ 两个界分开设。
+    pub max_snapshot_bytes: usize,
     /// `run` 一次请求的墙钟上限（`--max-run-ms`）。
     pub max_run_ms: u64,
     /// 是否允许绑定非回环地址。默认 `false`。
@@ -72,6 +83,7 @@ impl Default for Config {
             max_sessions: DEFAULT_MAX_SESSIONS,
             allow_image_root: None,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_snapshot_bytes: DEFAULT_MAX_SNAPSHOT_BYTES,
             max_run_ms: DEFAULT_MAX_RUN_MS,
             allow_remote: false,
             token: None,
@@ -154,7 +166,9 @@ impl Config {
                         .parse::<usize>()
                         .map_err(|_| format!("bad --max-console value {raw:?}: not bytes"))?;
                     if bytes == 0 {
-                        return Err("bad --max-console value 0: buffer must be positive".to_string());
+                        return Err(
+                            "bad --max-console value 0: buffer must be positive".to_string()
+                        );
                     }
                     cfg.max_console = bytes;
                 }
@@ -164,7 +178,9 @@ impl Config {
                         .parse::<usize>()
                         .map_err(|_| format!("bad --max-sessions value {raw:?}: not a count"))?;
                     if sessions == 0 {
-                        return Err("bad --max-sessions value 0: quota must be positive".to_string());
+                        return Err(
+                            "bad --max-sessions value 0: quota must be positive".to_string()
+                        );
                     }
                     cfg.max_sessions = sessions;
                 }
@@ -173,15 +189,27 @@ impl Config {
                 }
                 "--max-image-bytes" => {
                     let raw = value(&mut it, flag)?;
-                    let bytes = raw.parse::<usize>().map_err(|_| {
-                        format!("bad --max-image-bytes value {raw:?}: not bytes")
-                    })?;
+                    let bytes = raw
+                        .parse::<usize>()
+                        .map_err(|_| format!("bad --max-image-bytes value {raw:?}: not bytes"))?;
                     if bytes == 0 {
                         return Err(
                             "bad --max-image-bytes value 0: limit must be positive".to_string()
                         );
                     }
                     cfg.max_image_bytes = bytes;
+                }
+                "--max-snapshot-bytes" => {
+                    let raw = value(&mut it, flag)?;
+                    let bytes = raw.parse::<usize>().map_err(|_| {
+                        format!("bad --max-snapshot-bytes value {raw:?}: not bytes")
+                    })?;
+                    if bytes == 0 {
+                        return Err(
+                            "bad --max-snapshot-bytes value 0: limit must be positive".to_string()
+                        );
+                    }
+                    cfg.max_snapshot_bytes = bytes;
                 }
                 "--max-run-ms" => {
                     let raw = value(&mut it, flag)?;
@@ -273,7 +301,10 @@ mod tests {
         let cfg = Config::parse(&[]).unwrap();
         assert_eq!(cfg.bind, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(cfg.port, DEFAULT_PORT);
-        assert_eq!(cfg.session_ttl, Duration::from_secs(DEFAULT_SESSION_TTL_SECS));
+        assert_eq!(
+            cfg.session_ttl,
+            Duration::from_secs(DEFAULT_SESSION_TTL_SECS)
+        );
         assert_eq!(cfg.max_console, DEFAULT_MAX_CONSOLE);
         assert_eq!(cfg.max_sessions, DEFAULT_MAX_SESSIONS);
         assert!(cfg.board.is_none());
@@ -320,18 +351,18 @@ mod tests {
     #[test]
     fn parse_rejects_bad_input_without_panicking() {
         for bad in [
-            args(&["--port"]),                       // 缺值
-            args(&["--port", "0"]),                  // 0 不是合法端口
-            args(&["--port", "70000"]),              // 越界
-            args(&["--port", "x"]),                  // 不是数
-            args(&["--session-ttl", "0"]),           // TTL 为 0
-            args(&["--max-console", "0"]),           // 缓冲为 0
-            args(&["--max-sessions", "0"]),          // 配额为 0
-            args(&["--token", "   "]),               // 空令牌
-            args(&["--port", "1", "--port", "1"]),   // 重复旗标
-            args(&["--nope"]),                       // 未知旗标
-            args(&["osz.elf"]),                      // 位置参数
-            args(&["--bind", "localhost"]),          // 主机名不是 IP 字面量
+            args(&["--port"]),                     // 缺值
+            args(&["--port", "0"]),                // 0 不是合法端口
+            args(&["--port", "70000"]),            // 越界
+            args(&["--port", "x"]),                // 不是数
+            args(&["--session-ttl", "0"]),         // TTL 为 0
+            args(&["--max-console", "0"]),         // 缓冲为 0
+            args(&["--max-sessions", "0"]),        // 配额为 0
+            args(&["--token", "   "]),             // 空令牌
+            args(&["--port", "1", "--port", "1"]), // 重复旗标
+            args(&["--nope"]),                     // 未知旗标
+            args(&["osz.elf"]),                    // 位置参数
+            args(&["--bind", "localhost"]),        // 主机名不是 IP 字面量
         ] {
             assert!(
                 Config::parse(&bad).is_err(),

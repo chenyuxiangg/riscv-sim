@@ -13,8 +13,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use riscv_sim_contract::error::{
-    ErrorFamily, E_SESS_01_NOT_FOUND, E_SESS_02_BUSY, E_SESS_03_POISONED,
-    E_SESS_05_QUOTA_EXCEEDED, E_SESS_06_TIMEOUT, E_SESS_07_UNAUTHORIZED,
+    ErrorFamily, E_SESS_01_NOT_FOUND, E_SESS_02_BUSY, E_SESS_03_POISONED, E_SESS_05_QUOTA_EXCEEDED,
+    E_SESS_06_TIMEOUT, E_SESS_07_UNAUTHORIZED,
 };
 use serde::Serialize;
 
@@ -124,7 +124,9 @@ impl ApiError {
         Self::new(
             StatusCode::NOT_FOUND,
             format!("E_{}-22", ErrorFamily::Platform.as_str()),
-            format!("no builtin board template {id:?}; GET /api/board/templates lists the known ids"),
+            format!(
+                "no builtin board template {id:?}; GET /api/board/templates lists the known ids"
+            ),
         )
     }
 
@@ -223,14 +225,18 @@ pub fn debug_failure(code: &str, detail: &str) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, code, detail)
 }
 
+/// 快照发生点：`capture_session` / `restore_session` 的失败 ⇒ **400**。
+///
+/// ⚠️ 快照族的码（`E_SNAP-01` 版本不支持、队列不合法…）都是「**载荷本身**
+/// 不对」⇒ ⇒ 400 而不是 409。**409 只留给并发的修订号冲突**（`E_PLT-13`）。
+pub fn snapshot_failure(code: &str, detail: &str) -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, code, detail)
+}
+
 /// 会话族的码**从契约常量拼出来**，不在这里抄字面量 —— 抄一份就是第二个
 /// 真相，改名时必漂。
 fn session_code(scenario: u16) -> String {
-    format!(
-        "E_{}-{:02}",
-        ErrorFamily::Session.as_str(),
-        scenario
-    )
+    format!("E_{}-{:02}", ErrorFamily::Session.as_str(), scenario)
 }
 
 impl IntoResponse for ApiError {

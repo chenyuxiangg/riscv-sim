@@ -21,6 +21,7 @@ use axum::{Json, Router};
 use riscv_sim_contract::model::{Breakpoint, BreakpointKind, TraceFormat, TraceSource};
 use riscv_sim_contract::platform::PlatformDescription;
 use riscv_sim_contract::protocol::CommandPayload;
+use riscv_sim_contract::session::{CheckpointMetaDto, SessionSnapshotDto};
 use riscv_sim_kernel::kernel_host::platform;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -82,6 +83,8 @@ pub struct AppState {
     pub allow_image_root: Option<PathBuf>,
     /// 单次上传的镜像字节上限（`--max-image-bytes`）。
     pub max_image_bytes: usize,
+    /// 一次 `restore` 的载荷上限。
+    pub max_snapshot_bytes: usize,
     /// `run` 一次请求的墙钟上限（`--max-run-ms`）。
     pub max_run_ms: u64,
     /// 远程模式令牌；`None` ⇒ 不校验。
@@ -101,6 +104,7 @@ impl AppState {
             max_console: cfg.max_console,
             allow_image_root: cfg.allow_image_root.clone(),
             max_image_bytes: cfg.max_image_bytes,
+            max_snapshot_bytes: cfg.max_snapshot_bytes,
             max_run_ms: cfg.max_run_ms,
             token: cfg.token.clone(),
             registry: Arc::new(SessionRegistry::new(
@@ -197,6 +201,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/events/ws", get(events_ws))
         .route("/api/sessions/{id}/trace", get(read_trace))
         .route("/api/sessions/{id}/trace/enabled", put(set_trace_enabled))
+        .route("/api/sessions/{id}/snapshot", post(take_snapshot))
+        .route("/api/sessions/{id}/restore", post(restore_snapshot))
         .route("/api/sessions/{id}/state", get(session_state))
         .route("/api/sessions/{id}/memory", get(read_memory_range))
         .route("/api/sessions/{id}/symbols", get(list_symbols))
@@ -713,6 +719,71 @@ async fn set_trace_enabled(
     Json(body): Json<TraceEnabledBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let reply = state.registry.set_trace(&id, body.enabled)?;
+    Ok(Json(reply))
+}
+
+/// `POST /api/sessions/{id}/snapshot` —— 采集会话快照（六段齐全）。
+///
+/// 请求体可省：`{id?, base_seq?}` 只影响检查点元数据；**`t_virt` 由宿主
+/// 按引擎虚拟时间代填**（同一个量不能有两个真相）。
+async fn take_snapshot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<SnapshotRequest>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let request = body.map(|Json(request)| request).unwrap_or_default();
+    let meta = CheckpointMetaDto {
+        id: request.id,
+        // 宿主会把它覆盖成引擎的虚拟时间；这里给 0 只是占位。
+        t_virt: 0,
+        t_host: state.started.elapsed().as_millis() as u64,
+        base_seq: request.base_seq,
+        version: riscv_sim_contract::session::SESSION_SNAPSHOT_SCHEMA_VERSION,
+    };
+    let reply = state.registry.snapshot(&id, meta)?;
+    Ok(Json(reply))
+}
+
+/// 一次快照采集的请求体（全可选）。
+#[derive(Debug, Default, Deserialize)]
+struct SnapshotRequest {
+    /// 检查点 id（缺省 0）。
+    #[serde(default)]
+    id: u32,
+    /// 稀疏输入流的基线序号（缺省 0）。
+    #[serde(default)]
+    base_seq: u32,
+}
+
+/// `POST /api/sessions/{id}/restore` —— 还原会话快照。
+///
+/// ⚠️ 体是 `SessionSnapshotDto` 的 JSON。**上限**由 `--max-snapshot-bytes`
+/// 管（默认 32 MiB）：快照含整页 RAM ⇒ 比镜像大得多，不能沿用
+/// `--max-image-bytes`。
+async fn restore_snapshot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.len() > state.max_snapshot_bytes {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "E_SNAP-04",
+            format!(
+                "snapshot body is {} bytes, over the {} byte limit (--max-snapshot-bytes)",
+                body.len(),
+                state.max_snapshot_bytes
+            ),
+        ));
+    }
+    let payload: Box<SessionSnapshotDto> = serde_json::from_slice(&body).map_err(|err| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "E_SNAP-03",
+            format!("snapshot body is not a valid SessionSnapshotDto: {err}"),
+        )
+    })?;
+    let reply = state.registry.restore(&id, payload)?;
     Ok(Json(reply))
 }
 
