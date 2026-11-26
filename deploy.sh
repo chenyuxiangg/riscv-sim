@@ -9,7 +9,7 @@
 #   ./deploy.sh ps             # 看容器与健康状态
 #
 # 常用变量（写进 .env 或在命令行前给）：
-#   SIM_HOST_PORT=8080  宿主机端口        SIM_BOARD=qemu-virt   默认板
+#   SIM_HOST_PORT=8876  宿主机端口        SIM_BOARD=qemu-virt   默认板
 #   SIM_MAX_RUN_MS=60000  单次 run 上限   SIM_MAX_SESSIONS=8    并发会话
 #   SIM_TOKEN=...       固定令牌（默认随机生成）  SIM_PLATFORM=linux/amd64  交叉构建
 #   SIM_IMAGE=...       镜像全名（pull 时必填；默认本地 tag riscv-sim-server:latest）
@@ -56,7 +56,7 @@ ensure_env() {
     token="$(random_token)"
     cat > .env <<EOF
 # 由 ./deploy.sh 生成（不要提交；.gitignore 已经忽略 .env）
-SIM_HOST_PORT=${SIM_HOST_PORT:-8080}
+SIM_HOST_PORT=${SIM_HOST_PORT:-8876}
 SIM_BOARD=${SIM_BOARD:-qemu-virt}
 SIM_MAX_RUN_MS=${SIM_MAX_RUN_MS:-60000}
 SIM_MAX_SESSIONS=${SIM_MAX_SESSIONS:-8}
@@ -99,7 +99,7 @@ print_url() {
     local port token
     port="$(sed -n 's/^SIM_HOST_PORT=//p' .env | head -1)"
     token="$(sed -n 's/^SIM_TOKEN=//p' .env | head -1)"
-    port="${port:-8080}"
+    port="${port:-8876}"
     say ""
     say "页面（带令牌，点开即用）："
     say "  http://localhost:${port}/?token=${token}"

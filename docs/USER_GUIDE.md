@@ -84,12 +84,12 @@ python3 tools/serve-front.py
 它会做四件事：生成 `.env`（权限 `600`，里面是随机令牌）→ 构建镜像 → `up -d` → 轮询 `HEALTHCHECK` 直到 `healthy` → 打印带令牌的地址：
 
 ```
-http://localhost:8080/?token=<随机生成的令牌>
+http://localhost:8876/?token=<随机生成的令牌>
 ```
 
 常用子命令：`./deploy.sh rebuild`（改了代码/前端后重建）、`down`（停，数据卷保留）、`logs`、`ps`。
 
-整张图在 [`docs/architecture/deploy-view.svg`](./architecture/deploy-view.svg)（同名 `.png` 供直接看）：浏览器 → 宿主 `8080` → 容器 `9876` → 进程（静态托管 / API / 会话线程 / 内核），以及卷与健康检查的位置。
+整张图在 [`docs/architecture/deploy-view.svg`](./architecture/deploy-view.svg)（同名 `.png` 供直接看）：浏览器 → 宿主 `8876` → 容器 `9876` → 进程（静态托管 / API / 会话线程 / 内核），以及卷与健康检查的位置。
 
 几个必须知道的点：
 
@@ -98,7 +98,7 @@ http://localhost:8080/?token=<随机生成的令牌>
 - **镜像里默认没有 WASM 内核**：容器形态是「内核在容器里（native）」；要在容器里也能离线跑本地 Worker 模式，先在本机构建 `tools/build-wasm.sh`，再 `./deploy.sh rebuild`（`front/assets/pkg` 会被拷进镜像）。
 - **数据卷 `sim-data`**：挂在 `/data`，`SIM_IMAGE_ROOT=/data/images` ⇒ 放进这个目录的 `.elf` / `.bin` 可以用 `{"path": "...}` 装载（路径白名单就是它）。
 - **换端口**：`.env` 里改 `SIM_HOST_PORT`（容器内始终 9876）。
-- **对外暴露的风险**：`8080` 默认发布在宿主所有网卡上 ⇒ 令牌等于「谁能执行这个内核」。放到公网前，建议前面再套一层反向代理 + TLS，并限制来源。
+- **对外暴露的风险**：`8876` 默认发布在宿主所有网卡上 ⇒ 令牌等于「谁能执行这个内核」。放到公网前，建议前面再套一层反向代理 + TLS，并限制来源。
 
 ### 2.6 用别人构建好的镜像（ACR + CI）
 
@@ -139,15 +139,15 @@ TOKEN=$(openssl rand -hex 24)
 docker run -d --name riscv-sim \
   --restart unless-stopped \
   --security-opt no-new-privileges:true \
-  -p 8080:9876 \
+  -p 8876:9876 \
   -e SIM_TOKEN="$TOKEN" \
   -e SIM_BOARD=qemu-virt \
   -v riscv-sim-data:/data \
   crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim@sha256:375f75db7016b250ee715bdc7b5e617cb022b93b28998833327a5c0d98dcd0bf
-echo "http://<host>:8080/?token=$TOKEN"
+echo "http://<host>:8876/?token=$TOKEN"
 ```
 
-参数逐条对着 `compose.yml`：`-p 8080:9876`（宿主 8080 → 容器内 9876）、`-e SIM_TOKEN`（**必填**，没它不启动）、`-v /data`（放 `.elf`/`.bin` 的镜像目录）、`no-new-privileges` 与 `--restart` 与编排里同值。`SIM_FRONT_DIR=/app/front`、`SIM_IMAGE_ROOT=/data/images` 以及各项配额已经写进镜像 `ENV`，不用再传。
+参数逐条对着 `compose.yml`：`-p 8876:9876`（宿主 8876 → 容器内 9876）、`-e SIM_TOKEN`（**必填**，没它不启动）、`-v /data`（放 `.elf`/`.bin` 的镜像目录）、`no-new-privileges` 与 `--restart` 与编排里同值。`SIM_FRONT_DIR=/app/front`、`SIM_IMAGE_ROOT=/data/images` 以及各项配额已经写进镜像 `ENV`，不用再传。
 
 用**摘要**（`@sha256:...`）而不是 tag：`latest` 会漂，`v0.1.0` 这种 tag 也可以被覆盖，只有摘要不可变。
 
