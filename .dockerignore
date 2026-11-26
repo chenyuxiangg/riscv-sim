@@ -21,6 +21,10 @@ tools
 
 # 前端：测试与开发脚本不进镜像（页面本身照拷）。
 front/tests
-front/dev
 front/package.json
+# ⚠️ `front/dev` **不能排除**（2026-11-26 真机事故）：`front/app.js` 里是**静态**
+#    `import { buildMockProject } from "./dev/mock-project.js"` ⇒ ⇒ 镜像里少了这个
+#    文件 ⇒ ⇒ ES module 的**链接期**整图失败 ⇒ ⇒ **app.js 一行都不执行** ⇒ ⇒
+#    页面只剩静态 HTML，用户看到「脚本没启动，请硬刷新」而硬刷新永远没用。
+#    （dev/ 一共 43 KB：mock-project / mock-kernel / demo-firmware）
 node_modules
