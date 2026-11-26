@@ -114,23 +114,26 @@ jobs:
       - name: 构建 ② 只编译（cargo / 编译错误会在这里红）
         run: |
           set -eu
+          # 只读缓存：cache-to 统一放在 ③（整镜像）那一段，避免同一次跑里
+          # 两个 exporter 抢同一个 gha 缓存键。
           docker buildx build --target build --platform linux/amd64 \
-            --cache-from type=gha --cache-to type=gha,mode=max \
-            -o type=cacheonly .
+            --cache-from type=gha -o type=cacheonly .
 
-      - name: 构建 ③ 整镜像并推送
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: 构建 ③ 整镜像（运行层：apt / COPY / chmod，红在这里就是 Dockerfile 问题）
+        run: |
+          set -eu
+          docker buildx build --platform linux/amd64 \
+            --cache-from type=gha --cache-to type=gha,mode=max \
+            --load -t riscv-sim:probe .
+
+      - name: 构建 ④ 打标签并推 ACR（红在这里就是 registry / 权限问题）
+        run: |
+          set -eu
+          short="${GITHUB_SHA::7}"
+          for t in "sha-${short}" "${GITHUB_REF_NAME}" latest; do
+            docker tag riscv-sim:probe "${IMAGE}:${t}"
+            docker push "${IMAGE}:${t}"
+          done
 
       - name: 回读一次（确认真推上去了，而不是「构建成功但推送失败」）
         run: |
