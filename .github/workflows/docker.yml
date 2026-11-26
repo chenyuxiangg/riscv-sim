@@ -53,35 +53,46 @@ jobs:
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
           echo "本次推送：${tags}"
 
-      # 预检：1 秒内把「Secrets 有没有」「仓库存不存在 / 能不能写」问清楚，
-      # 别等到 10 分钟 Rust 编译完才在 push 那一步报 NAME_UNKNOWN。
-      - name: 预检 ACR（secrets 是否到位 · 仓库是否存在且可写）
+      # 预检拆成三步：日志要管理员权限才能下，但「哪个 step 红了」谁都看得见 ⇒
+      # 这样能一眼分出「没配 secret」「凭据不对」「仓库不存在」三种情况，
+      # 不用等 10 分钟 Rust 编译完才在 push 那一步报 NAME_UNKNOWN。
+      - name: 预检 ① secrets 是否到位
+        env:
+          ACR_U: ${{ secrets.ACR_USERNAME }}
+          ACR_P: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          if [ -z "${ACR_U}" ] || [ -z "${ACR_P}" ]; then
+            echo "::error::ACR_USERNAME / ACR_PASSWORD 至少一个为空 ⇒ 确认加在 Secrets（不是 Variables），名字大小写照抄，且没挂在某个 Environment 上"
+            exit 1
+          fi
+          echo "secret 都在：用户名长度 ${#ACR_U}，密码长度 ${#ACR_P}"
+
+      - name: 预检 ② 凭据换 token
         env:
           ACR_U: ${{ secrets.ACR_USERNAME }}
           ACR_P: ${{ secrets.ACR_PASSWORD }}
         run: |
           set -eu
-          repo="zyzs/riscv_sim"
           svc="registry.aliyuncs.com:cn-heyuan:26842"
-          if [ -z "${ACR_U}" ] || [ -z "${ACR_P}" ]; then
-            echo "::error::ACR_USERNAME / ACR_PASSWORD 有一个是空的（确认加在 Secrets，不是 Variables；名字大小写照抄）"
-            exit 1
-          fi
-          echo "secrets 都在（用户名长度 ${#ACR_U}，密码长度 ${#ACR_P}）"
           resp="$(curl -sf -u "${ACR_U}:${ACR_P}" --get \
               --data-urlencode "service=${svc}" \
-              --data-urlencode "scope=repository:${repo}:pull,push" \
+              --data-urlencode "scope=repository:zyzs/riscv_sim:pull,push" \
               "https://dockerauth-cn-heyuan.aliyuncs.com/auth")" \
-            || { echo "::error::ACR 拒了这组账号密码（个人版：账号全名 + 控制台「固定密码」，不是登录密码）"; exit 1; }
-          tok="$(echo "${resp}" | jq -r '.access_token // .token // empty')"
-          if [ -z "${tok}" ]; then echo "::error::ACR 没给 token（这组凭据没有 ${repo} 的权限）"; exit 1; fi
+            || { echo "::error::ACR 拒了这组账号密码 ⇒ 个人版要「账号全名」+ 控制台「固定密码」，不是阿里云登录密码"; exit 1; }
+          echo "${resp}" | jq -r '.access_token // .token // empty' > /tmp/acr.tok
+          if [ ! -s /tmp/acr.tok ]; then echo "::error::ACR 给了 token 但内容为空"; exit 1; fi
+          echo "token 长度 $(wc -c < /tmp/acr.tok)"
+
+      - name: 预检 ③ 仓库存在且可写
+        run: |
+          set -eu
           code="$(curl -s -o /tmp/probe.json -w '%{http_code}' -X POST \
-              -H "Authorization: Bearer ${tok}" \
-              "https://${REGISTRY}/v2/${repo}/blobs/uploads/")"
+              -H "Authorization: Bearer $(cat /tmp/acr.tok)" \
+              "https://${REGISTRY}/v2/zyzs/riscv_sim/blobs/uploads/")"
           echo "仓库探针 HTTP ${code}"
-          cat /tmp/probe.json || true
+          head -c 200 /tmp/probe.json || true
           if [ "${code}" != "202" ]; then
-            echo "::error::仓库 ${repo} 不存在或不可写 ⇒ 到 ACR 控制台确认：命名空间 zyzs 下有没有名为 riscv_sim 的仓库、访问级别是不是公开"
+            echo "::error::仓库 zyzs/riscv_sim 不存在或不可写 ⇒ 到 ACR 控制台确认命名空间 zyzs 下有 riscv_sim 这个仓库、访问级别是公开"
             exit 1
           fi
 
