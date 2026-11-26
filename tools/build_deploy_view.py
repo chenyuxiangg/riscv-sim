@@ -71,23 +71,23 @@ svg.append(card(470, 170, 330, 132, "部署入口", [
     "./deploy.sh            (up，带缓存)",
     "./deploy.sh rebuild    (--no-cache)",
     ".env：SIM_TOKEN（随机，chmod 600）",
-    "SIM_HOST_PORT=8080 · SIM_BOARD=qemu-virt",
+    "SIM_HOST_PORT=8876 · SIM_BOARD=qemu-virt",
 ], fill="#f2f7ff", stroke="#b8cdf0", mono_lines=(0,))) 
 
 # 镜像
-svg.append(card(830, 170, 300, 140, "镜像（本地 tag）", [
-    "riscv-sim-server:latest",
-    "由 ./deploy.sh 构建（Dockerfile 多阶段）",
+svg.append(card(830, 170, 300, 140, "镜像（本地 tag + 已发布）", [
+    "riscv-sim-server:latest（本机构建）",
+    "ACR: …/zyzs/riscv_sim · v0.1.0 / sha-*",
     "rust:1-bookworm → debian:bookworm-slim",
-    "只装 ca-certificates + curl",
-    "（镜像尚未在这台机器上构建）",
+    "只装 ca-certificates + curl · amd64 36MB",
+    "本机无 Docker 引擎 ⇒ 未本机构建；由 CI 构建",
 ], fill="#fff7e8", stroke="#e8c98a", size=11.2))
 
 # 端口映射
 svg.append(card(1160, 170, 340, 140, "端口映射（compose 发布）", [
-    "宿主机 8080  →  容器 9876",
-    "默认发布在所有网卡（0.0.0.0:8080）",
-    "⚠ 谁能访问 8080 就等于谁能执行内核",
+    "宿主机 8876  →  容器 9876",
+    "默认发布在所有网卡（0.0.0.0:8876）",
+    "⚠ 谁能访问 8876 就等于谁能执行内核",
 ], fill="#fdeeee", stroke="#e3adad", size=11.2))
 
 # ---------------------------------------------------------------- 容器
@@ -143,7 +143,6 @@ svg.append(card(810, 850, 320, 88, "卷 sim-data → /data", [
     "重启容器后仍在；数据卷不随 down 删除",
 ], fill="#f6f8fb", stroke="#cdd5e0", size=11.0))
 svg.append(card(1150, 850, 350, 88, "未做 / 后续（虚线）", [
-    "registry（GHCR / ACR）→ docker pull",
     "反向代理 + TLS + 来源限流",
     "SQLite：板 / 工程状态持久化",
 ], fill="#fbfbfc", stroke="#c8ced8", dash="6 4", size=11.0))
@@ -152,7 +151,7 @@ svg.append(card(1150, 850, 350, 88, "未做 / 后续（虚线）", [
 svg.append(arrow(390, 210, 432, 210, "HTTP/WS", lx=412, ly=228, anchor="middle"))
 svg.append(arrow(800, 245, 828, 245))
 svg.append(arrow(1130, 245, 1158, 245))
-svg.append(arrow(1330, 320, 1330, 360, "8080 → 9876", lx=1352, ly=345, anchor="start"))
+svg.append(arrow(1330, 320, 1330, 360, "8876 → 9876", lx=1352, ly=345, anchor="start"))
 svg.append(arrow(800, 291, 800, 360, None))
 svg.append(text(792, 318, "启动容器", 10.5, 500, "#5b6b7f", anchor="end"))
 svg.append(arrow(970, 815, 970, 850, None, dash="5 3"))
@@ -162,7 +161,7 @@ svg.append(text(886, 566, "同源", 10.5, 500, "#5b6b7f"))
 
 # 图例
 svg.append(text(60, 360, "读法", 12.5, 700))
-svg.append(text(60, 384, "1. 浏览器只认一个地址：http://host:8080/?token=…", 11.5, 400, "#5a6878"))
+svg.append(text(60, 384, "1. 浏览器只认一个地址：http://host:8876/?token=…", 11.5, 400, "#5a6878"))
 svg.append(text(60, 404, "2. 服务端把页面与 API 一起回 → 同源，无 CORS、无第二个进程", 11.5, 400, "#5a6878"))
 svg.append(text(60, 424, "3. 内核在容器里（native），命令与事件都回到这一份会话状态", 11.5, 400, "#5a6878"))
 

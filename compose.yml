@@ -17,7 +17,7 @@ services:
     image: ${SIM_IMAGE:-riscv-sim-server:latest}
     container_name: ${SIM_CONTAINER:-riscv-sim-server}
     ports:
-      - "${SIM_HOST_PORT:-8080}:9876"
+      - "${SIM_HOST_PORT:-8876}:9876"
     environment:
       SIM_TOKEN: ${SIM_TOKEN:?SIM_TOKEN missing — run ./deploy.sh once, it writes .env}
       SIM_BOARD: ${SIM_BOARD:-qemu-virt}
