@@ -126,6 +126,12 @@ jobs:
             --cache-from type=gha --cache-to type=gha,mode=max \
             --load -t riscv-sim:probe .
 
+      # 镜像冒烟：起容器 → 抓前端模块图。少一个文件就红（2026-11-26 真机事故：
+      # .dockerignore 排掉 front/dev ⇒ app.js 静态 import 的 mock-project.js 404
+      # ⇒ 整张模块图链接失败 ⇒ 页面只剩「脚本没启动，请硬刷新」）。
+      - name: 构建 ③b 镜像冒烟（前端模块图不许缺文件）
+        run: python3 tools/check_image_front.py riscv-sim:probe
+
       - name: 构建 ④ 打标签并推 ACR（红在这里就是 registry / 权限问题）
         run: |
           set -eu
