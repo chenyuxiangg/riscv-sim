@@ -130,15 +130,37 @@ workflow 只构建 `linux/amd64`（服务器基本都是它），并用 `docker 
 
 workflow 里的 build 被拆成四段（拉基础镜像 / 只编译 / 整镜像 / 推 ACR）：GitHub 的 job 日志要管理员权限才能下载 ⇒ 用「红了哪个 step」代替读日志来定位。四段的意义是分类，不是额外开销 —— 第三段吃第二段的 GHA 缓存，实测只要 7 秒。
 
-**在服务器上跑（不再本地构建）**
+**在服务器上跑：不需要源码，一条 `docker run`**
+
+服务器只用得上**镜像**；`deploy.sh` / `compose.yml` 是**构建侧**的脚手架，拉到服务器上属于多此一举（还得为它 `git clone` 整个仓）。最小形态就是：
 
 ```bash
-git clone <repo> && cd riscv_sim
-SIM_IMAGE=crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim:latest \
+TOKEN=$(openssl rand -hex 24)
+docker run -d --name riscv-sim \
+  --restart unless-stopped \
+  --security-opt no-new-privileges:true \
+  -p 8080:9876 \
+  -e SIM_TOKEN="$TOKEN" \
+  -e SIM_BOARD=qemu-virt \
+  -v riscv-sim-data:/data \
+  crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim@sha256:375f75db7016b250ee715bdc7b5e617cb022b93b28998833327a5c0d98dcd0bf
+echo "http://<host>:8080/?token=$TOKEN"
+```
+
+参数逐条对着 `compose.yml`：`-p 8080:9876`（宿主 8080 → 容器内 9876）、`-e SIM_TOKEN`（**必填**，没它不启动）、`-v /data`（放 `.elf`/`.bin` 的镜像目录）、`no-new-privileges` 与 `--restart` 与编排里同值。`SIM_FRONT_DIR=/app/front`、`SIM_IMAGE_ROOT=/data/images` 以及各项配额已经写进镜像 `ENV`，不用再传。
+
+用**摘要**（`@sha256:...`）而不是 tag：`latest` 会漂，`v0.1.0` 这种 tag 也可以被覆盖，只有摘要不可变。
+
+⚠️ **卷名不一样**：compose 起的卷带项目前缀，叫 `riscv-sim_sim-data`；上面这条直接叫 `riscv-sim-data`。从 compose 换过来时旧数据不会自动跟过来。
+
+**如果你就在仓库里（开发机 / 要自己重建镜像）**，才需要 `deploy.sh`：
+
+```bash
+SIM_IMAGE=crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim:sha-fa64345 \
   ./deploy.sh pull
 ```
 
-`pull` 做三件事：`docker pull` → `compose up -d --no-build`（**不走 Dockerfile**，省掉 Rust 全量编译）→ 等健康 → 打印带令牌地址。`.env` 会在首次运行时自动生成（随机令牌），和 §2.5 完全一致。
+`pull` = `docker pull` → `compose up -d --no-build` → 等健康 → 打印带令牌地址（`.env` 首次自动生成，随机令牌）。
 
 三个提醒：
 
