@@ -118,6 +118,18 @@ crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim
 
 workflow 只构建 `linux/amd64`（服务器基本都是它），并用 `docker buildx imagetools inspect` **回读**一次 —— 构建成功 ≠ 推送成功，这一步是给「假绿」上的锁。
 
+**第一次发布的实证（2026-11-26，run 45737895110，全绿）**
+
+| 项 | 值 |
+| --- | --- |
+| 推上去的 tag | `latest` / `v0.1.0` / `sha-fa64345` |
+| manifest 摘要 | `sha256:375f75db7016b250ee715bdc7b5e617cb022b93b28998833327a5c0d98dcd0bf` |
+| 平台 / 层数 / 体积 | `linux/amd64` · 8 层 · 压缩后 **36.0 MB** |
+| 运行时配置 | `User=sim`（非 root）· `ExposedPorts 9876/tcp` · `Healthcheck` 已设 |
+| 公开性 | **匿名** token 就能 `pull`（不需要登录） |
+
+workflow 里的 build 被拆成四段（拉基础镜像 / 只编译 / 整镜像 / 推 ACR）：GitHub 的 job 日志要管理员权限才能下载 ⇒ 用「红了哪个 step」代替读日志来定位。四段的意义是分类，不是额外开销 —— 第三段吃第二段的 GHA 缓存，实测只要 7 秒。
+
 **在服务器上跑（不再本地构建）**
 
 ```bash
