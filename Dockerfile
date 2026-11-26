@@ -25,7 +25,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 RUN cargo build --locked --release -p riscv_sim_server \
- && strip target/release/riscv_sim_server || true
+ && { strip target/release/riscv_sim_server 2>/dev/null || true; }
 
 # ---------------------------------------------------------------------------
 # 2) 运行层

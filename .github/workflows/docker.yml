@@ -104,7 +104,22 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - uses: docker/build-push-action@v6
+      # 日志要管理员权限才下得动，所以把 build 拆成三段：红在哪一段就知道是哪一类问题。
+      - name: 构建 ① 拉基础镜像（Docker Hub 限流 / 网络会在这里红）
+        run: |
+          set -eu
+          docker pull rust:1-bookworm
+          docker pull debian:bookworm-slim
+
+      - name: 构建 ② 只编译（cargo / 编译错误会在这里红）
+        run: |
+          set -eu
+          docker buildx build --target build --platform linux/amd64 \
+            --cache-from type=gha --cache-to type=gha,mode=max \
+            -o type=cacheonly .
+
+      - name: 构建 ③ 整镜像并推送
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
