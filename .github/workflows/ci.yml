@@ -24,11 +24,18 @@ jobs:
         if: failure()
         run: |
           {
-            echo "### cargo clippy 失败（报错/告警按文件行号）"
+            echo "### cargo clippy 失败（前若干条按文件行号转成注解）"
             echo '```'
             grep -E '^(error|warning)' /tmp/clippy.log | head -40 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # 日志要 admin 才下得动 ⇒ 把前 10 条转成 check-run 注解（公开可读）。
+          grep -E '^(error|warning)' /tmp/clippy.log | head -10 | while IFS= read -r line; do
+            file=$(echo "$line" | cut -d: -f1)
+            lnum=$(echo "$line" | cut -d: -f2)
+            msg=$(echo "$line" | cut -d: -f4- | head -c 900)
+            echo "::error file=$file,line=$lnum::$msg"
+          done
       - name: cargo test
         run: cargo test --workspace
 
