@@ -39,7 +39,9 @@ ACCEPT = ",".join([
 ])
 
 
-def token(scope="pull,push,delete"):
+def token(scope="pull,push"):
+    # ⚠️ 只申请 pull,push：registry 的删除动作吃的是 push 权限；scope 里写
+    #    `delete` 会被 ACR 的 token 服务当成非法 scope 直接 401（踩过一次）。
     user, pw = os.environ["ACR_USERNAME"], os.environ["ACR_PASSWORD"]
     basic = base64.b64encode(f"{user}:{pw}".encode()).decode()
     url = "https://dockerauth-cn-heyuan.aliyuncs.com/auth?" + urllib.parse.urlencode({
@@ -71,7 +73,11 @@ def release_tag(t):
 
 def main():
     cur_sha = f"sha-{sys.argv[1]}" if len(sys.argv) > 1 else None
-    tok = token()
+    try:
+        tok = token()
+    except urllib.error.HTTPError as e:
+        print(f"⚠️ 取 token 失败 HTTP {e.code} {e.read()[:160]!r}：跳过清理")
+        return 0
     _, _, body = api(f"/v2/{REPO}/tags/list", tok=tok, accept=None)
     tags = json.loads(body)["tags"]
 
