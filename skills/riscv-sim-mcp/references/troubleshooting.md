@@ -53,6 +53,9 @@
 | `x5` 恒为 0 | 只跑了 1 条（第 2 条才写 3），或装的是 `.hex` 文本被当原始字节 |
 | `load_image` 回 `E_PROTO-08` | 给了 Intel HEX 文本；改成裸 `.bin` 或 `.elf` |
 | `entry` 不是期望值 | `.bin` 是 RawHex，没有 ELF 头 ⇒ 一律从 0 开始；要真实入口就给 `.elf` |
+| 陷阱后 console 停住、后续用例全丢 | 默认策略「交付即停」；要跑 handler 就先 `stop_policy {stop_on_trap:false, max_trap_events:N}` |
+| `stop_reason=budget`，pc 在 idle 的 `wif/jal` 循环 | 预算用尽（前缀模式缺省 1e6 条），回体 `budget_exhausted:true`；给 `steps` 再来，不是死锁 |
+| 换了固件 `inspect kind=console offset=0` 读到空/旧串 | 装载会清 console（偏移不归零）；按回体 `console.base` 重新对齐，旧 offset 会 `E_SESS-04` |
 
 ## 7. 找不到破坏性工具
 

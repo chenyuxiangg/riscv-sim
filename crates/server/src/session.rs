@@ -96,6 +96,17 @@ impl ConsoleRing {
         }
     }
 
+    /// 清内容、**不**归零偏移（D-3：换固件时用）。
+    ///
+    /// ⚠️ **只 `clear` 不 `reset`**：`total` 继续记账、`base` 推到 `total`
+    /// ⇒ ⇒ 拿着旧 `offset` 的客户端落在窗口之前 ⇒ ⇒ 回 `Err(base)` 让它
+    /// **重新对齐**，而不是把新固件的输出当成旧固件的延续（那才是真的
+    /// 「console 突然变空」）。
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.base = self.total;
+    }
+
     /// 读 `[offset, offset + limit)`。
     ///
     /// 早于 `base` ⇒ `Err(base)`（窗口丢了，告诉客户端从哪重新读）；
@@ -1632,6 +1643,14 @@ fn execute_run(
             "bytes": console.total.saturating_sub(run_base),
             "total": console.total,
         },
+        // ---- D-1：预算用尽要**明说** ----
+        //
+        // ⚠️ 前缀模式的缺省预算（1e6 条）跑满时，PC 常常停在 idle 的
+        //   `wif/jal` 循环里 ⇒ ⇒ 客户端只看到 `stop_reason = "budget"` 会
+        //   把它读成「卡死」。这里把「预算用尽」写成**独立字段**，并回显
+        //   上限，让调用方知道该给 `steps` 而不是继续等。
+        "budget_exhausted": stop == "budget",
+        "budget_steps": RUN_PREFIX_DEFAULT_BUDGET,
     });
     // 断点命中：按 pc 去权威表里找（`Halted` 只带 pc，不带 id）。
     if body.get("stop_reason").and_then(|v| v.as_str()) == Some("breakpoint") {
@@ -2178,6 +2197,13 @@ fn spawn_worker(
                                     },
                                 ));
                                 events_ring.push(&restored);
+                                // ---- D-3：换固件 ⇒ console 清内容、偏移不归零 ----
+                                //
+                                // ⚠️ 不清的话上一份固件的尾巴会留在 `[0, total)` 里
+                                //   ⇒ ⇒ 客户端从头读会读成「这一份的输出」，误判成
+                                //   「新固件没打印」。偏移继续记账 ⇒ ⇒ 旧 offset 回
+                                //   `E_SESS-04` + base，客户端据此重新对齐。
+                                console.clear();
                                 // 记住这份工程：复位（R-14）要原样重装一遍。
                                 last_image = Some((project_name, kind, bytes));
                             }
@@ -2506,6 +2532,22 @@ mod tests {
         let lost = ring.read(0, 8).expect_err("丢失的窗口必须报错");
         assert_eq!(lost, 2);
         // 晚于 total 的偏移 ⇒ 空，不是错（只是还没产生）。
+        assert_eq!(ring.read(6, 8).expect("未产生不算丢"), b"");
+    }
+
+    /// D-3：`clear` 清内容但**不**归零偏移 ⇒ ⇒ 旧 offset 被如实拒绝。
+    #[test]
+    fn console_ring_clear_keeps_the_offset_accounting() {
+        let mut ring = ConsoleRing::new(64);
+        ring.push(b"old");
+        ring.clear();
+        assert_eq!(ring.total, 3, "total 是**写过**的记账，不因清空而回退");
+        assert_eq!(ring.base, 3, "base 推到 total ⇒ 旧窗口全部作废");
+        // 旧 offset ⇒ 报 base（客户端重新对齐），不是「变空了」。
+        assert_eq!(ring.read(0, 8).expect_err("旧窗口必须报错"), 3);
+        // 从新 base 起读 ⇒ 只有新字节。
+        ring.push(b"new");
+        assert_eq!(ring.read(3, 8).expect("新窗口"), b"new");
         assert_eq!(ring.read(6, 8).expect("未产生不算丢"), b"");
     }
 

@@ -59,6 +59,21 @@ poll_job {"job":"<上一步的 job>"}          → 重复到终态
 判据：作业终态出现，且 `executed` 与预期量级一致。
 `poll_job` 空转超过 3 次仍无进展 ⇒ 用 `inspect {"kind":"state"}` 确认它是不是卡在某个 `pc`。
 
+## R4b · 验异常路径（R-1：崩溃后继续跑完）
+
+```
+stop_policy {"stop_on_trap":false,"max_trap_events":1024}
+run {"prefix":"[SZTEST] end","steps":8000000}
+```
+
+判据：`stop_reason` 不是 `trap`，而是 `prefix`（哨兵出现）或 `budget`；
+事件流里有 `TrapSummary`，且 `first_cause` / `first_mepc` 与固件里那条肇事指令对得上。
+
+- 默认策略下**没有** `TrapSummary` —— 它缺席是正常的（AC1 基线）
+- 回默认：`stop_policy {"stop_on_trap":true}`（或换工程 / 卸载）
+- `false` 忘给配额 ⇒ 内核 `E_PROTO-08` / MCP `E_MCP-07`（提前拦）
+- `run` 回 `budget_exhausted:true` ⇒ 指令预算用尽（缺省 1e6 条），给 `steps` 再来
+
 ## R5 · 定位「pc 为什么停这儿」
 
 ```

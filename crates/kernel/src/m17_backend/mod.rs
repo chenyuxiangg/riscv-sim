@@ -31,7 +31,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use riscv_sim_contract::csr::{
-    irq_clear_mask_targets, pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MIE, CSR_MIP, CSR_MSTATUS,
+    irq_clear_mask_targets, pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC, CSR_MIE,
+    CSR_MIP, CSR_MSTATUS,
 };
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
@@ -313,6 +314,53 @@ pub(crate) struct IssExecutorDeps<'a> {
     /// 全部原地卡死（断点表里只有地址 / 使能 / 条件 / 计数，**没有**「刚
     /// 报过」这个状态）。
     pub resume_skip_pc: &'a mut Option<u32>,
+    /// R-1 · 会话级停止策略（见 [`TrapPolicy`]）。
+    pub policy: &'a mut TrapPolicy,
+}
+
+/// R-1 · **会话级停止策略 + 本窗口陷阱记账**。
+///
+/// ⚠️ 它**必须挂在后端**、由执行器**借用**（`&mut`）：执行器每批次新建
+/// ⇒ 挂在执行器上 ⇒ 策略与计数每个批次都被重造一次 ⇒ `max_trap_events`
+/// 的配额永远到不了上限。与 `last_poll_ps` 是同一条理由（裁决 I）。
+pub(crate) struct TrapPolicy {
+    /// 同步异常交付之后**停不停**（`true` = 与改动前逐字节一致）。
+    stop_on_trap: bool,
+    /// 本窗口的陷阱上限（`stop_on_trap = false` 时必填）。
+    max_trap_events: Option<u32>,
+    /// 本窗口已交付的陷阱数（中断**不计**）。
+    count: u32,
+    /// 本窗口**第一个**陷阱的 `(mcause, mepc, mtvec_target)`。
+    first: Option<(u32, u32, u32)>,
+}
+
+impl Default for TrapPolicy {
+    fn default() -> Self {
+        Self {
+            stop_on_trap: true,
+            max_trap_events: None,
+            count: 0,
+            first: None,
+        }
+    }
+}
+
+impl TrapPolicy {
+    /// 配额是否用满（`None` = 不限）。
+    fn quota_reached(&self) -> bool {
+        match self.max_trap_events {
+            Some(max) => self.count >= max,
+            None => false,
+        }
+    }
+
+    /// 记一次陷阱交付（先记「第一个」，再累加总数）。
+    fn note(&mut self, cause: u32, mepc: u32, target: u32) {
+        if self.first.is_none() {
+            self.first = Some((cause, mepc, target));
+        }
+        self.count = self.count.saturating_add(1);
+    }
 }
 
 /// 一条指令的执行顺序（M-08 LLD §3.2 / M-17 LLD）：
@@ -343,6 +391,9 @@ pub struct IssExecutor<'a> {
     step_over_return: Option<u32>,
     /// **断点恢复放过位**（与后端共享同一份）。
     resume_skip_pc: &'a mut Option<u32>,
+    /// R-1 · **会话级停止策略**（与后端共享同一份）：交付后停不停、配额、
+    /// 本窗口记账。**不复制** —— 执行器每批次新建，复制会把策略回退到默认。
+    policy: &'a mut TrapPolicy,
 }
 
 impl<'a> IssExecutor<'a> {
@@ -365,6 +416,7 @@ impl<'a> IssExecutor<'a> {
             last_poll_ps: deps.last_poll_ps,
             step_over_return,
             resume_skip_pc: deps.resume_skip_pc,
+            policy: deps.policy,
         }
     }
 
@@ -709,10 +761,35 @@ impl InstructionExecutor for IssExecutor<'_> {
         }
 
         if trapped {
-            return Ok(ExecOutcome::Stop {
-                reason: HaltReason::Trap,
-                consumed: true,
-            });
+            // ---- R-1：陷阱交付策略 ----------------------------------------
+            //
+            // 交付本身在 M-13 已经做完（`enter_trap` 写 `mepc`/`mcause`/
+            // `mtval`、按 `medeleg` 判委托、跳 `mtvec`）；这里只判
+            // **「这一批要不要因此收尾」**。
+            //
+            // ⚠️ 三个值都在 `enter_trap` **刚写完**时读（不是另算）：
+            //    `mcause` / `mepc` 是它写进 CSR 的原始值，`mtvec_target`
+            //    是它算出的新 `pc`（handler 入口）⇒ ⇒ `TrapSummary` 与
+            //    交付值天然一致（需求单 AC4）。
+            let cause = csr_read(state, CSR_MCAUSE);
+            let mepc = csr_read(state, CSR_MEPC);
+            let target = state.pc;
+            self.policy.note(cause, mepc, target);
+
+            // 停的条件只有两条：策略要求「交付即停」，或本窗口配额用满。
+            if self.policy.stop_on_trap || self.policy.quota_reached() {
+                return Ok(ExecOutcome::Stop {
+                    reason: HaltReason::Trap,
+                    consumed: true,
+                });
+            }
+
+            // 不停 ⇒ 这条指令**算执行了**（被取指、译码、触发），但
+            // **不推进虚拟时钟**（没退休，见下面 (5)）；且 `last_stop`
+            // **不写** `Trap` —— 这一批根本没停，写了宿主就分不清
+            // 「跑满预算」与「被陷阱停下」（R-1 实现约束第 3 条）。
+            // 观察点判定也跳过：这条指令已经陷进去了，不要再判一次。
+            return Ok(ExecOutcome::Advanced);
         }
 
         // store 边界命中的观察式条目 ⇒ **停**（原因复用 `Watchpoint`，
@@ -813,6 +890,17 @@ pub struct SelfIssBackend<B: EventBus, I: InterruptSink> {
     /// ⚠️ 与 [`Self::last_poll_ps`] 同一条理由：执行器**每批次新建** ⇒
     /// 跨批次的状态**必须**挂在后端上。
     resume_skip_pc: Option<u32>,
+    /// R-1 · **会话级停止策略 + 本窗口陷阱记账**（见 [`TrapPolicy`]）。
+    ///
+    /// ⚠️ `true`（默认）= 与改动前逐字节一致（交付完就 `Halted{Trap}`）；
+    /// `false` = 交付后**继续**在 `mtvec` 取指，交给 guest 的 handler。
+    ///
+    /// ⚠️ **只作用于同步异常**：中断走 `InterruptTaken`，本来就不停批次
+    /// ⇒ ⇒ 这里改的是一个与中断无关的分支。
+    ///
+    /// ⚠️ 挂在**后端**上而不是执行器上，理由同 [`Self::last_poll_ps`]：
+    /// 执行器**每批次新建**，策略却是会话级的。
+    trap_policy: TrapPolicy,
 }
 
 impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
@@ -837,9 +925,54 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
             intc_port: Box::new(NullInterruptPort),
             last_poll_ps: 0,
             resume_skip_pc: None,
+            trap_policy: TrapPolicy::default(),
         };
         backend.install_watch_hook();
         backend
+    }
+
+    // -- R-1：陷阱交付策略 -------------------------------------------------
+
+    /// R-1：设置**会话级**停止策略（`KernelHost` 的命令派发点调用）。
+    ///
+    /// ⚠️ 同时**清空本窗口的计数**：换策略之后「这一窗口交付了几个陷阱」
+    /// 从零算，否则 `TrapSummary` 的 `count` 会把旧策略下的数字带上来。
+    pub fn set_stop_policy(&mut self, stop_on_trap: bool, max_trap_events: Option<u32>) {
+        self.trap_policy.stop_on_trap = stop_on_trap;
+        self.trap_policy.max_trap_events = max_trap_events;
+        self.reset_trap_window();
+    }
+
+    /// R-1：当前策略 `(stop_on_trap, max_trap_events)`。
+    pub fn stop_policy(&self) -> (bool, Option<u32>) {
+        (
+            self.trap_policy.stop_on_trap,
+            self.trap_policy.max_trap_events,
+        )
+    }
+
+    /// R-1：`stop_on_trap` 是否还开着（开着 ⇒ 事件序列与改动前一致）。
+    pub fn stop_on_trap(&self) -> bool {
+        self.trap_policy.stop_on_trap
+    }
+
+    /// R-1：**本窗口**归零（`on_run_inner` 开头调用）。
+    ///
+    /// ⚠️ 口径是「一次批处理窗口」，不是「一条命令」：`Continue` 的窗口
+    /// 循环会多次进来 ⇒ ⇒ 每个窗口的配额各自算。
+    pub fn reset_trap_window(&mut self) {
+        self.trap_policy.count = 0;
+        self.trap_policy.first = None;
+    }
+
+    /// R-1：本窗口交付的陷阱数（中断**不计**）。
+    pub fn traps_this_window(&self) -> u32 {
+        self.trap_policy.count
+    }
+
+    /// R-1：本窗口**第一个**陷阱的 `(mcause, mepc, mtvec_target)`。
+    pub fn first_trap_this_window(&self) -> Option<(u32, u32, u32)> {
+        self.trap_policy.first
     }
 
     /// Replace the memory bus (M-14) and re-install the watchpoint hook.
@@ -1294,6 +1427,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             last_poll_ps,
             step_over_return,
             resume_skip_pc,
+            trap_policy,
             ..
         } = self;
 
@@ -1324,6 +1458,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 last_poll_ps,
                 pause_requested,
                 resume_skip_pc,
+                policy: trap_policy,
             },
             *step_over_return,
         );
@@ -1529,6 +1664,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
             last_poll_ps,
             step_over_return,
             resume_skip_pc,
+            trap_policy,
             ..
         } = self;
 
@@ -1546,6 +1682,7 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 last_poll_ps,
                 pause_requested,
                 resume_skip_pc,
+                policy: trap_policy,
             },
             *step_over_return,
         );
@@ -3255,4 +3392,78 @@ mod tests {
             "条件断点本身不能被 stepOver 删除"
         );
     }
+    // -----------------------------------------------------------------
+    // R-1 · 陷阱交付策略（需求单 AC3 / AC4）
+    // -----------------------------------------------------------------
+
+    /// 固件：`auipc` 先拿走**自己的基址**（不写死地址 ⇒ 谁映射到哪都成立），
+    /// 把 `mtvec` 设到 `基址 + 0x10`，然后在 **0x0c** 上执行一条非法指令
+    /// （全零）；handler（0x10）**也是**非法指令 ⇒ ⇒ **陷阱连环**：每交付
+    /// 一次就再陷一次，`mepc` 与落点都落在 0x10。
+    const TRAP_LOOP_FIRMWARE: [u8; 20] = [
+        0x97, 0x02, 0x00, 0x00, // 0x00  auipc x5, 0        → x5 = pc
+        0x93, 0x82, 0x02, 0x01, // 0x04  addi  x5, x5, 16   → x5 = handler
+        0x73, 0x90, 0x52, 0x30, // 0x08  csrrw x0, mtvec, x5
+        0x00, 0x00, 0x00, 0x00, // 0x0c  非法指令（全零）
+        0x00, 0x00, 0x00, 0x00, // 0x10  非法指令（handler 自己也陷）
+    ];
+
+    /// **默认策略不回归**：第一条陷阱就把这一批收掉，`TrapSummary` 的
+    /// 三个值必须是 `enter_trap` 实际写下的（AC4）。
+    #[test]
+    fn the_default_policy_still_stops_on_the_first_trap() {
+        let mut backend = backend_with_program(&TRAP_LOOP_FIRMWARE);
+        backend.step_n(4).expect("step");
+
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Trap),
+            "默认策略下交付即停 —— 与改动前逐字节一致（AC1）"
+        );
+        assert_eq!(backend.traps_this_window(), 1, "只该交付一个陷阱");
+        let (cause, mepc, target) = backend.first_trap_this_window().expect("必须记下第一个陷阱");
+        assert_eq!(cause, 2, "非法指令的 mcause 是 2");
+        assert_eq!(mepc, 0x0c, "mepc 是肇事那条指令的地址");
+        assert_eq!(target, 0x10, "mtvec 落点是 handler 入口");
+    }
+
+    /// **关掉策略 ⇒ 继续跑；跑到配额才停**（AC3）。计数停在**配额那一个**
+    /// 上，pc 站在 handler 里（不是停在肇事指令上）。
+    #[test]
+    fn policy_off_continues_through_traps_until_the_quota() {
+        let mut backend = backend_with_program(&TRAP_LOOP_FIRMWARE);
+        backend.set_stop_policy(false, Some(8));
+
+        backend.step_n(40).expect("step");
+
+        assert_eq!(
+            backend.last_stop_reason(),
+            Some(HaltReason::Trap),
+            "配额到数才停，停因仍是 Trap"
+        );
+        assert_eq!(backend.traps_this_window(), 8, "停在第 8 个陷阱上");
+        let (cause, mepc, target) = backend.first_trap_this_window().expect("必须记下第一个陷阱");
+        assert_eq!((cause, mepc, target), (2, 0x0c, 0x10), "第一个陷阱的三项与交付值一致");
+        assert_eq!(
+            backend.snapshot().expect("snapshot").pc,
+            0x10,
+            "继续之后 pc 站在 handler 里（不是肇事指令）"
+        );
+    }
+
+    /// **关掉策略、没给配额 ⇒ 不会因陷阱停**（这一层只管记账；「没配额就
+    /// 拒绝命令」是宿主侧的判据，见 `tests_r1_stop_policy`）。不设上限时
+    /// 兜底就只剩 `run` 的指令预算。
+    #[test]
+    fn policy_off_without_a_quota_does_not_stop_on_traps() {
+        let mut backend = backend_with_program(&TRAP_LOOP_FIRMWARE);
+        backend.set_stop_policy(false, None);
+        backend.step_n(4).expect("step");
+        assert_eq!(
+            backend.traps_this_window(),
+            1,
+            "没有配额 ⇒ 计数照记（宿主侧会先拒掉这种命令，这一层只测记账）"
+        );
+    }
+
 }

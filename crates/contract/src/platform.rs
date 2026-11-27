@@ -2536,9 +2536,11 @@ mod tests {
     /// ⇒ ⇒ 线上少 3 条命令 + 1 条事件 ⇒ ⇒ 同理）。
     /// ⚠️ **v0.144**（契约 v19）moved it **18 → 19**（装载回执
     /// `ImageLoaded` 上线 ⇒ ⇒ 线上**多一个事件变体 + 一个 DTO** ⇒ ⇒ 同理）。
+    /// ⚠️ **R-1**（契约 v20）moved it **19 → 20**（`SetStopPolicy` 命令 +
+    /// `TrapSummary` 事件 ⇒ ⇒ 线上**多一条命令 + 一个事件变体** ⇒ ⇒ 同理）。
     #[test]
-    fn s16_a1_the_contract_schema_version_is_nineteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 19);
+    fn s16_a1_the_contract_schema_version_is_twenty() {
+        assert_eq!(crate::SCHEMA_VERSION, 20);
     }
     /// **STAGE-16 A-2** — the **description format**'s version is still
     /// `1`.

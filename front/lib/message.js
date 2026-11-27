@@ -152,7 +152,7 @@
 //   1 条事件 + 2 个 DTO）；**v19**：装载回执 `EventPayload::ImageLoaded`
 //   上线（v0.144 · M-24 · R-04 · 多 1 条事件 + 1 个 DTO `ImageSegment`）
 //   ⇒ ⇒ 前端镜像跟契约层**同批**。
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -406,6 +406,8 @@ export const TRACE_FORMAT = Object.freeze({
 export const EVENT_TOPIC = Object.freeze({
     Tick: "tick",
     Halted: "halted",
+    // 契约 v20 新增：陷阱交付的汇总（只在非默认策略下发）。
+    TrapSummary: "trap.summary",
     Error: "error",
     MemoryRead: "memory.read",
     // 契约 v6 新增：当前生效的板级内存图（前端内存映射表的数据源）。
@@ -604,6 +606,24 @@ export const Command = Object.freeze({
     backtrace: () => "Backtrace",
     /** `CommandPayload::ListLocals`（STAGE-55 真相候选列表批 · 只读）. */
     listLocals: () => "ListLocals",
+    /**
+     * `CommandPayload::SetStopPolicy { stop_on_trap, max_trap_events }`
+     * （契约 v20 · R-1 陷阱交付策略）。
+     *
+     * ⚠️ 前端**不主动发**：默认策略就是「交付即停」，与改动前一致。这条
+     * 镜像存在的意义是**契约一致性门禁**，以及给「要看异常路径」的调试面
+     * 留口子（内核侧要求 `stop_on_trap = false` 时**必须**给
+     * `max_trap_events`，否则 `E_PROTO-08`）。
+     */
+    setStopPolicy: (stopOnTrap, maxTrapEvents = null) => ({
+        SetStopPolicy: {
+            stop_on_trap: Boolean(stopOnTrap),
+            max_trap_events:
+                maxTrapEvents === null || maxTrapEvents === undefined
+                    ? null
+                    : Number(maxTrapEvents) >>> 0,
+        },
+    }),
     /** `CommandPayload::SetWatchpoint(Watchpoint)`. */
     setWatchpoint: (watchpoint) => ({ SetWatchpoint: watchpoint }),
     /** `CommandPayload::ClearWatchpoint { id }`. */
@@ -946,6 +966,22 @@ export const Event = Object.freeze({
             trigger_addr: triggerAddr === null || triggerAddr === undefined
                 ? null
                 : Number(triggerAddr) >>> 0,
+        },
+    }),
+    /**
+     * `EventPayload::TrapSummary { count, first_cause, first_mepc,
+     * first_mtvec_target }`（契约 v20 · R-1）。
+     *
+     * ⚠️ **只在 `stop_on_trap = false` 时发** —— 默认策略下事件序列与改动前
+     * 逐字节一致（需求单 AC1）。三个 `first_*` 是 `enter_trap` 实际写下的
+     * `mcause` / `mepc` 与它算出的落点（AC4）。
+     */
+    trapSummary: (count, firstCause, firstMepc, firstMtvecTarget) => ({
+        TrapSummary: {
+            count: Number(count),
+            first_cause: Number(firstCause) >>> 0,
+            first_mepc: Number(firstMepc) >>> 0,
+            first_mtvec_target: Number(firstMtvecTarget) >>> 0,
         },
     }),
     /** `EventPayload::Error { code, message }`. */

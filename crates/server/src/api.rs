@@ -518,7 +518,7 @@ pub struct RunRequest {
 pub fn plan_run(request: RunRequest, max_run_ms: u64) -> Result<RunSpec, ApiError> {
     if let (Some(_), Some(_)) = (request.steps, request.timeout_ms) {
         return Err(ApiError::bad_request(
-            "give either `steps` or `timeout_ms`, not both (step semantics are exact-n)",
+            "give either `steps` or `timeout_ms`, not both (step semantics are exact-n);              omit both to run to the next stop, where the default budget is 1,000,000 instructions              (pass `steps` when the guest needs more)",
         ));
     }
     if let Some(steps) = request.steps {

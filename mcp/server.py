@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sim-mcp —— 把 riscv_sim 的 HTTP 面收成 9 个 MCP 工具（只依赖标准库）。
+"""sim-mcp —— 把 riscv_sim 的 HTTP 面收成 10 个 MCP 工具（只依赖标准库）。
 
 设计口径（与 docs/architecture/mcp-view.svg 对齐）：
   1. 凭据两层：客户端只持 `SIM_MCP_TOKEN`；`SIM_TOKEN` 只活在本进程 env 里。
@@ -107,6 +107,59 @@ def _decode(blob: bytes):
         return json.loads(blob)
     except json.JSONDecodeError:
         return {"raw": blob.decode("utf-8", "replace")}
+
+
+# --------------------------------------------------------------------------- 契约命令通道
+# ⚠️ `SetStopPolicy` 是**契约命令**（不是 REST 资源），走 `POST …/command`：整条
+#    `Message` 进内核，服务端不翻译。信封的 `schema_version` 从 `/api/version`
+#    读 ⇒ ⇒ MCP 里**不**留第二份硬编码版本号。
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_CACHE: dict = {}
+
+
+def _schema_version() -> int:
+    with _SCHEMA_LOCK:
+        cur = _SCHEMA_CACHE.get("v")
+    if cur:
+        return cur
+    _, body, _ = _http("GET", "/api/version")
+    v = int(body.get("schema_version") or 0)
+    if v <= 0:
+        raise SimError("E_MCP-10", "/api/version 没给 schema_version", 502)
+    with _SCHEMA_LOCK:
+        _SCHEMA_CACHE["v"] = v
+    return v
+
+
+def _frames_events(frames: list):
+    """把应答帧剥到 `(变体名, 载荷)`；不懂的帧跳过。"""
+    for frame in frames or []:
+        inner = (frame.get("payload") or {}).get("payload") or {}
+        if isinstance(inner, dict) and len(inner) == 1 and next(iter(inner)) in ("Event", "Command"):
+            inner = next(iter(inner.values())) or {}
+        if not isinstance(inner, dict) or len(inner) != 1:
+            continue
+        kind, value = next(iter(inner.items()))
+        yield kind, value
+
+
+def _contract_command(sid: str, payload: dict, req_id: int = 1) -> dict:
+    """发一条契约命令；内核回的 `Error` 事件**当异常抛**（不默默吞掉）。"""
+    msg = {
+        "schema_version": _schema_version(),
+        "direction": "Command",
+        "seq": req_id,
+        "payload": {"Command": payload},
+    }
+    _, body, _ = _http("POST", f"/api/sessions/{sid}/command",
+                       body={"message": msg, "reqId": req_id})
+    frames = body.get("frames") or []
+    for kind, value in _frames_events(frames):
+        if kind == "Error":
+            code = (value or {}).get("code") or "E_MCP-10"
+            detail = (value or {}).get("message") or "内核拒绝了这条命令"
+            raise SimError(code, detail, 400)
+    return body
 
 
 # --------------------------------------------------------------------------- 会话归属
@@ -278,6 +331,36 @@ def t_run(client: str, args: dict) -> dict:
         "text": (f"{note}执行 {body.get('executed')} 条 · pc={body.get('pc')} · "
                  f"t_ps={body.get('t_ps')} · 停因 {body.get('stop_reason')}"),
         "data": body,
+    }
+
+
+def t_stop_policy(client: str, args: dict) -> dict:
+    sid = OWNER.sid(client)
+    if args.get("stop_on_trap") is None:
+        raise SimError("E_MCP-07",
+                       "要显式给 stop_on_trap（true=陷阱交付即停；false=继续跑，但要配额）", 400)
+    stop_on_trap = bool(args["stop_on_trap"])
+    quota = args.get("max_trap_events")
+    if quota is not None:
+        quota = int(quota)
+        if quota < 1:
+            raise SimError("E_MCP-07", "max_trap_events 必须 >= 1", 400)
+    if not stop_on_trap and quota is None:
+        raise SimError("E_MCP-07",
+                       "stop_on_trap=false 必须同时给 max_trap_events"
+                       "（否则 handler 死循环会烧穿预算）", 400)
+    body = _contract_command(sid, {"SetStopPolicy": {
+        "stop_on_trap": stop_on_trap,
+        "max_trap_events": quota,
+    }})
+    if stop_on_trap:
+        text = "停止策略：陷阱**交付即停**（默认 · 与改动前逐字节一致）"
+    else:
+        text = (f"停止策略：陷阱**不**停，最多跑 {quota} 个后停"
+                "（只算同步异常；中断不进这条逻辑）")
+    return {
+        "text": text + " · 会话级粘性：换工程 / 卸载回默认",
+        "data": {"stop_on_trap": stop_on_trap, "max_trap_events": quota, "frames": body.get("frames")},
     }
 
 
@@ -482,6 +565,22 @@ TOOLS = [
         "fn": t_run,
     },
     {
+        "name": "stop_policy",
+        "description": ("会话级陷阱交付策略（R-1）：stop_on_trap=true 交付即停（默认），"
+                        "false 则陷阱继续跑、按 max_trap_events 配额停（**必须**同时给配额）。"
+                        "只作用同步异常（野指针 / 非法指令 / 缺页），中断不进这条逻辑；"
+                        "换工程 / 卸载回默认。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "stop_on_trap": {"type": "boolean", "description": "true=交付即停（默认）；false=继续跑"},
+                "max_trap_events": {"type": "integer", "description": "配额（一次批处理窗口内最多几个陷阱）；stop_on_trap=false 时必填"},
+            },
+            "required": ["stop_on_trap"],
+        },
+        "fn": t_stop_policy,
+    },
+    {
         "name": "poll_job",
         "description": "读一条异步作业（run(background=true) 的返回里有 job）。",
         "inputSchema": {
@@ -587,7 +686,7 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         return _rpc_result(msg_id, {
             "protocolVersion": PROTOCOL if asked != PROTOCOL else asked,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "sim-mcp", "version": "0.1.2"},
+            "serverInfo": {"name": "sim-mcp", "version": "0.1.3"},
             "instructions": ("先 boot，再 load_image(hex=原始字节的十六进制)，然后 advance(n)。"
                              "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"),
         })
@@ -642,7 +741,7 @@ def _client_id(token: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "sim-mcp/0.1.2"
+    server_version = "sim-mcp/0.1.3"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:  # 默认 access log 太吵，审计另有

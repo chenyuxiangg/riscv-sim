@@ -378,7 +378,20 @@ pub mod snapshot;
 ///   的状态位（**不**被本事件取代：一个说状态，一个说动作）；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `3`、`PLATFORM_SCHEMA_VERSION`
 ///   stays `1`。
-pub const SCHEMA_VERSION: u32 = 19;
+///
+/// Contract **v20** adds the **陷阱交付策略**（R-1 · 需求单 v2）：
+///
+/// - 新命令 `CommandPayload::SetStopPolicy { stop_on_trap, max_trap_events }`
+///   —— 会话级粘性，`LoadProject` 重置为默认；
+/// - 新事件 `EventPayload::TrapSummary { count, first_cause, first_mepc,
+///   first_mtvec_target }` —— **只在 `stop_on_trap = false` 时**发，默认
+///   策略下事件序列与改动前逐字节一致；
+/// - ⇒ ⇒ 线上**多一条命令 + 一个事件变体** ⇒ ⇒ `SCHEMA_VERSION` 19 → 20；
+/// - ⚠️ **`HaltReason` 一个变体都不加**（前端 JS 镜像硬编码枚举）：`Trap`
+///   仍是「因陷阱而停」，`stop_on_trap = false` 时只是**不产生**它；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `3`、`PLATFORM_SCHEMA_VERSION`
+///   stays `1`（快照与描述格式都没变）。
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// 契约 crate 自身的版本号 —— 供 `GET /api/version` 回给客户端（M-24 · R-01）。
 ///

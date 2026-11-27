@@ -7,7 +7,7 @@
     1. 不给 SIM_MCP_TOKEN 时只是服务端（老行为）—— 这一条由 check_image_front.py 守
     2. 给了 SIM_MCP_TOKEN ⇒ 9876 与 8877 都 /healthz 200
     3. 前端模块图完整（少文件就白屏的那次事故）
-    4. MCP 的 tools/list 至少 9 个工具，且 boot 在
+    4. MCP 的 tools/list 至少 10 个工具，且 boot / stop_policy 在
     5. MCP 的 /healthz 报的是**容器内**上游（127.0.0.1:9876），不是宿主端口
 
 为什么单独一个脚本：合成镜像比单进程镜像多两个失效面 —— 「页面能开但 AI 连不上」
@@ -91,11 +91,11 @@ def main() -> int:
         tools = mcp_post(MCP_PORT, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = [t["name"] for t in tools["result"]["tools"]]
         print(f"tools：{len(names)} 个 → {names}")
-        if len(names) < 9 or "boot" not in names:
+        if len(names) < 10 or "boot" not in names or "stop_policy" not in names:
             print("工具面不对", file=sys.stderr)
             return 1
 
-        print("✅ 单镜像冒烟通过：页面模块图完整 + MCP 9 工具 + 上游指向容器内 9876")
+        print("✅ 单镜像冒烟通过：页面模块图完整 + MCP 10 工具 + 上游指向容器内 9876")
         return 0
     finally:
         sh("docker", "rm", "-f", NAME)

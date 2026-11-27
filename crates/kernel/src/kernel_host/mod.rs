@@ -171,7 +171,8 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, E_HMS_02_FATAL_TERMINATED, E_PLT_22_NO_BOARD, PLATFORM_FAMILY,
+    ErrorFamily, PlatformError, E_HMS_02_FATAL_TERMINATED, E_PLT_22_NO_BOARD, E_PROTO_08_BAD_MESSAGE,
+    PLATFORM_FAMILY, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{Project, SIM_STATE_SCHEMA_VERSION};
 use riscv_sim_contract::platform::PlatformDescription;
@@ -1091,6 +1092,27 @@ impl KernelHost {
             CommandPayload::StepN { n } => self.on_run(Some(n)),
             CommandPayload::StepOver => self.on_step_over(),
             CommandPayload::Pause => self.on_pause(),
+            // R-1：设会话级停止策略。
+            //
+            // ⚠️ **`stop_on_trap = false` 且没给上限 ⇒ 拒绝**：handler 自己
+            // 死循环时，不设上限会把整轮指令预算烧穿，还丢掉「这是异常
+            // 循环」的诊断（需求单明写「不能省略」）。拒绝比默默烧穿好：
+            // 调用方当场知道参数不全。
+            CommandPayload::SetStopPolicy {
+                stop_on_trap,
+                max_trap_events,
+            } => {
+                if !stop_on_trap && max_trap_events.is_none() {
+                    return vec![self.error_from(&PlatformError::new(
+                        PROTO_FAMILY,
+                        E_PROTO_08_BAD_MESSAGE,
+                        "SetStopPolicy: stop_on_trap=false 必须同时给 max_trap_events\
+                         （handler 死循环时会烧穿整轮指令预算）",
+                    ))];
+                }
+                self.backend.set_stop_policy(stop_on_trap, max_trap_events);
+                vec![self.tick()]
+            }
             CommandPayload::SetBreakpoint(bp) => match self
                 .backend
                 .set_breakpoint_with_id_and_names(bp, &HostNames(&self.index))
@@ -1483,6 +1505,11 @@ mod tests_v057_debug;
 /// `loadImage` 段 ⇒ ⇒ 三段**分层**钉。
 #[cfg(test)]
 mod tests_v059_reset;
+
+/// R-1 · **陷阱交付策略**（`SetStopPolicy` / `TrapSummary`）：关掉「交付即
+/// 停」之后 guest 的 handler 才有机会跑（需求单 v2 · AC1/AC3/AC4）。
+#[cfg(test)]
+mod tests_r1_stop_policy;
 
 /// STAGE-43 · v0.66 批 —— **内核侧中间层**的宿主侧门禁（K 组）。
 ///

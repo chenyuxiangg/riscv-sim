@@ -19,7 +19,7 @@
 <text x="71" y="184" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">AI 客户端（任选一个）</text>
 <text x="71" y="201" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#243043" text-anchor="start" opacity="1">Claude Code / Cursor / 自研 agent 都行</text>
 <text x="71" y="218" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">Streamable HTTP（或本地 stdio 桥）</text>
-<text x="71" y="235" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">只持 SIM_MCP_TOKEN：也只能调 9 个工具</text>
+<text x="71" y="235" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">只持 SIM_MCP_TOKEN：也只能调 10 个工具</text>
 <text x="71" y="252" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">对仿真器一无所知：不拼 curl、不认识 8876</text>
 <text x="71" y="269" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">换客户端只改 config，工具面不动</text>
 <rect x="58" y="306" width="388" height="108" rx="10" ry="10" fill="#eef3f9" stroke="#a9b9cd" stroke-width="1.4" opacity="1"/>
@@ -57,12 +57,13 @@
 <text x="941" y="237" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">client_id → session_id，一客户端 1 个</text>
 <text x="941" y="254" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">boot 只建自己的，空闲 5 min 主动 DELETE</text>
 <text x="941" y="271" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">对客户端永不暴露 /api/sessions 列表</text>
-<rect x="584" y="314" width="328" height="128" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
-<text x="597" y="336" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">工具层 · 9 个（写细分 / 读合并）</text>
-<text x="597" y="353" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">boot · load_image · advance · run · poll_job</text>
-<text x="597" y="370" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">inspect(kind) · disasm · breakpoints · events</text>
-<text x="597" y="387" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">读合并、写细分；只认 Command 变体（不认路由）</text>
-<text x="597" y="404" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">返回人读摘要 + 机器字段（不倒 32 个寄存器）</text>
+<rect x="584" y="314" width="328" height="156" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
+<text x="597" y="336" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">工具层 · 10 个（写细分 / 读合并）</text>
+<text x="597" y="353" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">boot · load_image · advance · run</text>
+<text x="597" y="370" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">stop_policy · poll_job · inspect(kind)</text>
+<text x="597" y="387" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">disasm · breakpoints · events</text>
+<text x="597" y="404" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">读合并、写细分；只认 Command 变体（不认路由）</text>
+<text x="597" y="421" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">返回人读摘要 + 机器字段（不倒 32 个寄存器）</text>
 <rect x="928" y="314" width="328" height="128" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" opacity="1"/>
 <text x="941" y="336" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">闸门与审计</text>
 <text x="941" y="353" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">破坏性工具默认不注册（要显式开环境变量）</text>
@@ -98,7 +99,7 @@
 <text x="1341" y="324" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">两条令牌，两种权限</text>
 <text x="1341" y="341" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#243043" text-anchor="start" opacity="1">SIM_TOKEN（fc63f4c6…） 全权：建/删/查所有会话</text>
 <text x="1341" y="358" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">⇒ 只给 sim-mcp 进程，永不进客户端</text>
-<text x="1341" y="375" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">SIM_MCP_TOKEN  只能调 9 个工具，且只见自己的会话</text>
+<text x="1341" y="375" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">SIM_MCP_TOKEN  只能调 10 个工具，且只见自己的会话</text>
 <rect x="1328" y="442" width="316" height="112" rx="10" ry="10" fill="#fbfbfc" stroke="#c8ced8" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
 <text x="1341" y="464" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">为什么先走隧道</text>
 <text x="1341" y="481" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">工具面没冻结前不开口子，少一次公网暴露</text>
@@ -111,8 +112,8 @@
 <text x="1341" y="639" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">MCP 仍是 python 旁挂进程，没并进 Rust 单二进制</text>
 <text x="1341" y="656" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">远程审计日志没有轮转与保留策略</text>
 <rect x="40" y="754" width="1620" height="92" rx="10" ry="10" fill="#f6f3fd" stroke="#b9a8dd" stroke-width="1.8" opacity="1"/>
-<text x="60" y="782" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="14.5" font-weight="700" fill="#3f2f66" text-anchor="start" opacity="1">唯一接缝 · crates/contract（schema v19）—— 工具面的唯一来源，也是升版时唯一要谈的地方</text>
-<text x="60" y="806" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11.4" font-weight="400" fill="#4a3f66" text-anchor="start" opacity="1">Command 信封 20 个变体 ⇒ 9 个工具：写操作细分（可审计、可分级），读操作合并（省上下文）；MCP 层不重新设计能力面。</text>
+<text x="60" y="782" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="14.5" font-weight="700" fill="#3f2f66" text-anchor="start" opacity="1">唯一接缝 · crates/contract（schema v20）—— 工具面的唯一来源，也是升版时唯一要谈的地方</text>
+<text x="60" y="806" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11.4" font-weight="400" fill="#4a3f66" text-anchor="start" opacity="1">Command 信封 39 个变体 ⇒ 10 个工具：写操作细分（可审计、可分级），读操作合并（省上下文）；MCP 层不重新设计能力面。</text>
 <text x="60" y="828" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11.4" font-weight="400" fill="#4a3f66" text-anchor="start" opacity="1">server 升 schema ⇒ sim-mcp 的 contract 冒烟必须变红。工具面对 HTTP 路由无知：传输可换（stdio / Streamable HTTP / 内嵌 Rust），换个壳不用重写工具。</text>
 <rect x="40" y="862" width="520" height="150" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" opacity="1"/>
 <text x="53" y="884" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">一、四条不变量（破了就等于没有这一层）</text>
