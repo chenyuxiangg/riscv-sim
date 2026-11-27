@@ -648,7 +648,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server 的命名
         path = urlparse(self.path).path
         if path == "/healthz":
-            self._json(200, {"ok": True, "tools": len(TOOLS), "destructive": ALLOW_DESTRUCTIVE})
+            # 只报「我在跑」是不够的：上游地址配错时，进程活着但每个工具都 502。
+            # 探针要能抓到这种「起得来、干不了活」的状态。
+            try:
+                with urllib.request.urlopen(SIM_BASE + "/healthz", timeout=2) as resp:
+                    upstream_ok = resp.status == 200
+                detail = ""
+            except Exception as err:  # noqa: BLE001
+                upstream_ok = False
+                detail = str(err)
+            self._json(200 if upstream_ok else 503, {
+                "ok": upstream_ok, "tools": len(TOOLS), "base": SIM_BASE,
+                "destructive": ALLOW_DESTRUCTIVE,
+                **({} if upstream_ok else {"upstream_error": detail}),
+            })
             return
         if path.startswith("/mcp"):
             self.send_response(405)

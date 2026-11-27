@@ -18,6 +18,8 @@ services:
     container_name: ${SIM_CONTAINER:-riscv-sim-server}
     ports:
       - "${SIM_HOST_PORT:-8876}:9876"
+      # MCP 只发布到宿主回环：公网没有 8877，AI 走 ssh -L 进来。
+      - "127.0.0.1:${SIM_MCP_PORT:-8877}:8877"
     environment:
       SIM_TOKEN: ${SIM_TOKEN:?SIM_TOKEN missing — run ./deploy.sh once, it writes .env}
       SIM_BOARD: ${SIM_BOARD:-qemu-virt}
@@ -27,6 +29,9 @@ services:
       SIM_MAX_SESSIONS: ${SIM_MAX_SESSIONS:-8}
       SIM_MAX_CONSOLE: ${SIM_MAX_CONSOLE:-1048576}
       SIM_SESSION_TTL: ${SIM_SESSION_TTL:-900}
+      # 没给就是老行为（只起服务端）；给了就同时起 sim-mcp。
+      SIM_MCP_TOKEN: ${SIM_MCP_TOKEN:-}
+      SIM_MCP_ALLOW_DESTRUCTIVE: ${SIM_MCP_ALLOW_DESTRUCTIVE:-0}
     volumes:
       - sim-data:/data
     restart: unless-stopped
@@ -35,27 +40,8 @@ services:
       - no-new-privileges:true
 
 
-  # AI 接入层（可选）：`docker compose --profile mcp up -d mcp`
-  #
-  # ⚠️ `network_mode: host` 是有意的：本服务只监听 127.0.0.1:8877，
-  #    不在宿主上发布端口 ⇒ 公网看不到它（AI 走 SSH 隧道进来）。
-  #    `SIM_BASE` 用**宿主端口**（不是容器内 9876）：host 网络下回环就是宿主。
-  mcp:
-    build:
-      context: ./mcp
-    image: ${SIM_MCP_IMAGE:-sim-mcp:0.1.0}
-    container_name: ${SIM_MCP_CONTAINER:-sim-mcp}
-    network_mode: host
-    profiles: ["mcp"]
-    environment:
-      SIM_BASE: http://127.0.0.1:${SIM_HOST_PORT:-8876}
-      SIM_TOKEN: ${SIM_TOKEN:?SIM_TOKEN missing — run ./deploy.sh once, it writes .env}
-      SIM_MCP_TOKEN: ${SIM_MCP_TOKEN:?SIM_MCP_TOKEN missing — 给客户端的那条，别用 SIM_TOKEN}
-      SIM_MCP_HOST: 127.0.0.1
-      SIM_MCP_PORT: ${SIM_MCP_PORT:-8877}
-      SIM_MCP_IDLE_SECS: ${SIM_MCP_IDLE_SECS:-300}
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+
+# ⚠️ 曾经的独立 mcp 服务已并入 sim（单镜像双进程）；
+#    mcp/Dockerfile 仍然保留，供「只想要 MCP、不要页面」的部署。
 volumes:
   sim-data:
