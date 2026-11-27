@@ -124,7 +124,7 @@ svg.append(text(MX + 20, MY + 28, "A · 你的 Mac（客户端 + 隧道）", 14.
 svg.append(card(MX + 18, MY + 44, MW - 36, 132, "AI 客户端（任选一个）", [
     "Claude Code / Cursor / 自研 agent 都行",
     "Streamable HTTP（或本地 stdio 桥）",
-    "只持 SIM_MCP_TOKEN：也只能调 9 个工具",
+    "只持 SIM_MCP_TOKEN：也只能调 10 个工具",
     "对仿真器一无所知：不拼 curl、不认识 8876",
     "换客户端只改 config，工具面不动",
 ], fill="#eef3f9", stroke="#a9b9cd"))
@@ -177,9 +177,10 @@ svg.append(card(BX + 376, BY + 80, 328, 104, "会话归属表（隔离的唯一�
     "对客户端永不暴露 /api/sessions 列表",
 ], fill="#ffffff", stroke="#c3cedb", size=10.5))
 
-svg.append(card(BX + 32, BY + 196, 328, 128, "工具层 · 9 个（写细分 / 读合并）", [
-    "boot · load_image · advance · run · poll_job",
-    "inspect(kind) · disasm · breakpoints · events",
+svg.append(card(BX + 32, BY + 196, 328, 156, "工具层 · 10 个（写细分 / 读合并）", [
+    "boot · load_image · advance · run",
+    "stop_policy · poll_job · inspect(kind)",
+    "disasm · breakpoints · events",
     "读合并、写细分；只认 Command 变体（不认路由）",
     "返回人读摘要 + 机器字段（不倒 32 个寄存器）",
 ], fill="#ffffff", stroke="#c3cedb", size=10.5, dash="6 4", mono_lines=(0, 1)))
@@ -230,7 +231,7 @@ svg.append(card(CX2 + 16, CY + 44, CW2 - 32, 128, "三个端口，三种暴露�
 svg.append(card(CX2 + 16, CY + 184, CW2 - 32, 128, "两条令牌，两种权限", [
     "SIM_TOKEN（fc63f4c6…） 全权：建/删/查所有会话",
     "⇒ 只给 sim-mcp 进程，永不进客户端",
-    "SIM_MCP_TOKEN  只能调 9 个工具，且只见自己的会话",
+    "SIM_MCP_TOKEN  只能调 10 个工具，且只见自己的会话",
 ], fill="#fff7e8", stroke="#e8c98a", size=10.2))
 
 svg.append(card(CX2 + 16, CY + 324, CW2 - 32, 112, "为什么先走隧道", [
@@ -248,8 +249,8 @@ svg.append(card(CX2 + 16, CY + 448, CW2 - 32, 140, "还没做（如实登记）"
 
 # ------------------------------------------------------------------ D. 契约带
 svg.append(rect(40, 754, 1620, 92, "#f6f3fd", "#b9a8dd", sw=1.8))
-svg.append(text(60, 782, "唯一接缝 · crates/contract（schema v19）—— 工具面的唯一来源，也是升版时唯一要谈的地方", 14.5, 700, "#3f2f66"))
-svg.append(text(60, 806, "Command 信封 20 个变体 ⇒ 9 个工具：写操作细分（可审计、可分级），读操作合并（省上下文）；MCP 层不重新设计能力面。", 11.4, 400, "#4a3f66"))
+svg.append(text(60, 782, "唯一接缝 · crates/contract（schema v20）—— 工具面的唯一来源，也是升版时唯一要谈的地方", 14.5, 700, "#3f2f66"))
+svg.append(text(60, 806, "Command 信封 39 个变体 ⇒ 10 个工具：写操作细分（可审计、可分级），读操作合并（省上下文）；MCP 层不重新设计能力面。", 11.4, 400, "#4a3f66"))
 svg.append(text(60, 828, "server 升 schema ⇒ sim-mcp 的 contract 冒烟必须变红。工具面对 HTTP 路由无知：传输可换（stdio / Streamable HTTP / 内嵌 Rust），换个壳不用重写工具。", 11.4, 400, "#4a3f66"))
 
 # ------------------------------------------------------------------ 底部三块

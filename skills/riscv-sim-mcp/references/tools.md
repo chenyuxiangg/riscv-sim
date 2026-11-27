@@ -1,4 +1,4 @@
-# 工具面细节（sim-mcp 0.1.0）
+# 工具面细节（sim-mcp 0.1.1）
 
 所有工具都是 `tools/call`，返回 `structuredContent = {summary, data}`：`summary` 是给人读的
 一行，`data` 是给判断用的结构。失败时 `isError: true`，`content[0].text` 带错误码。
@@ -59,6 +59,17 @@ content-type: application/octet-stream
   - `background`：`true` ⇒ 立刻回 `job`（`202`），不阻塞
 - 返回：同步 `{executed, pc, t_ps, stop_reason, ...}`；异步 `{job, ...}`
 - **撞墙钟回 `504`，但 body 是完整停点报告** —— 按成功读，别当失败
+
+## stop_policy
+
+- 参数：`stop_on_trap`（**必填**）、`max_trap_events`（配额，`stop_on_trap=false` 时**必填**）
+- `true`（默认）⇒ 同步异常交付即停，与改动前逐字节一致（AC1 基线）
+- `false` ⇒ 陷阱交付后**继续跑** handler，最多 N 个后停（配额按**一次批处理窗口**计）
+- `false` 不给配额：内核 `E_PROTO-08`；MCP 侧提前拦，给你 `E_MCP-07`
+- **会话级粘性**：一次调用管到换工程 / 卸载（那时回默认）；`advance` / `run` 都吃它
+- 事件流里会出现 `TrapSummary {count, first_cause, first_mepc, first_mtvec_target}`
+  —— 只在非默认策略下发；`first_mtvec_target` 是 `enter_trap` 真正跳去的地址
+- 中断（定时器 / 外设）**不进**这条逻辑：它们在指令边界交付，批次不停
 
 ## poll_job
 

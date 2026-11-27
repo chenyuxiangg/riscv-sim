@@ -1,6 +1,6 @@
 ---
 name: riscv-sim-mcp
-description: 通过 sim-mcp（9 个 MCP 工具）驱动远端 RISC-V 仿真器 riscv_sim：装固件、单步推进、跑到停点、读寄存器/内存/console、反汇编、设断点、回放事件。当用户要求在 RISC-V 仿真器里跑固件或调试、问 pc/寄存器/x5/t_ps/断点/反汇编/串口输出、问「AI 怎么驱动仿真器」，或提到 riscv_sim、sim-mcp、MCP 仿真、RISC-V 调试时使用。不用于编译固件，也不替代 HTTP 契约调试。
+description: 通过 sim-mcp（10 个 MCP 工具）驱动远端 RISC-V 仿真器 riscv_sim：装固件、单步推进、跑到停点、调陷阱交付策略、读寄存器/内存/console、反汇编、设断点、回放事件。当用户要求在 RISC-V 仿真器里跑固件或调试、问 pc/寄存器/x5/t_ps/断点/反汇编/串口输出、问「AI 怎么驱动仿真器」，或提到 riscv_sim、sim-mcp、MCP 仿真、RISC-V 调试时使用。不用于编译固件，也不替代 HTTP 契约调试。
 ---
 
 # 用 sim-mcp 驱动 RISC-V 仿真器
@@ -52,8 +52,14 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
    `name` 的扩展名决定解析：`.bin` = RawHex（一律从 0 起），`.elf` = ELF（真实 entry、多段），
    `.hex` 文本（Intel HEX）会被 `E_PROTO-08` 拒。
 
-3. **`advance` 是「恰好 n 条」，`run` 是「跑到停点」。** 想复现就只用 `advance`；
+3. **要验异常路径（野指针 / 非法指令 / 缺页）先调 `stop_policy {stop_on_trap:false, max_trap_events:N}`**
+   —— 否则陷阱交付即停，handler 一条指令都跑不到，后面全丢。它是**会话级粘性**
+   命令，换工程 / 卸载回默认；中断不进这条逻辑。
+
+4. **`advance` 是「恰好 n 条」，`run` 是「跑到停点」。** 想复现就只用 `advance`；
    `run` 默认 5 秒墙钟，撞钟回 `504`，但 **body 仍是完整停点报告** —— 读它，不是报失败。
+   `run` 的 `stop_reason = "budget"` 意思是**指令预算用尽**（前缀模式缺省 1e6 条，回体
+   `budget_exhausted:true` 会明说），不是死锁 —— 给 `steps` 再来。
 
 ## 3. 工具面：写细分、读合并
 
@@ -65,6 +71,7 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 | `advance` | 恰好走 n 条 | `n`（1..100000） |
 | `run` | 跑到停点 | `steps` / `timeout_ms` / `prefix`（console 命中）/ `until`（breakpoint\|halt）/ `background` |
 | `poll_job` | 读异步作业 | `job`（`run(background=true)` 回体里的） |
+| `stop_policy` | 会话级陷阱交付策略（**R-1**） | `stop_on_trap`（true=交付即停，默认）；`false` 时 `max_trap_events` **必填** |
 | `inspect` | 读状态/串口/内存 | `kind`=state\|console\|memory；`addr` `len` `format`(u32\|asc) `offset` `limit` |
 | `disasm` | 反汇编 | `addr` `count` |
 | `breakpoints` | 断点表 | `op`=list\|set\|clear\|enable（set 三选一：`addr`/`symbol`/`condition`） |
