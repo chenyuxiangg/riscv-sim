@@ -31,12 +31,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use riscv_sim_contract::csr::{
-    irq_clear_mask_targets, pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC, CSR_MIE,
-    CSR_MIP, CSR_MSTATUS,
+    irq_clear_mask_targets, pending_lines_to_mip_mask, CSR_IRQ_CLEAR, CSR_MCAUSE, CSR_MEPC,
+    CSR_MIE, CSR_MIP, CSR_MSTATUS,
 };
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
-    E_ENG_04_TRAP_STORM, ENGINE_FAMILY,
+    ErrorFamily, PlatformError, DEBUG_FAMILY, ENGINE_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX,
+    E_ENG_03_NO_PROGRESS, E_ENG_04_TRAP_STORM,
 };
 use riscv_sim_contract::model::{
     Breakpoint, BreakpointInfo, BreakpointKind, SimState, WatchAccess, Watchpoint, WriteSize,
@@ -3508,7 +3508,9 @@ mod tests {
             "默认策略下交付即停 —— 与改动前逐字节一致（AC1）"
         );
         assert_eq!(backend.traps_this_window(), 1, "只该交付一个陷阱");
-        let (cause, mepc, target) = backend.first_trap_this_window().expect("必须记下第一个陷阱");
+        let (cause, mepc, target) = backend
+            .first_trap_this_window()
+            .expect("必须记下第一个陷阱");
         assert_eq!(cause, 2, "非法指令的 mcause 是 2");
         assert_eq!(mepc, 0x0c, "mepc 是肇事那条指令的地址");
         assert_eq!(target, 0x10, "mtvec 落点是 handler 入口");
@@ -3529,8 +3531,14 @@ mod tests {
             "配额到数才停，停因仍是 Trap"
         );
         assert_eq!(backend.traps_this_window(), 8, "停在第 8 个陷阱上");
-        let (cause, mepc, target) = backend.first_trap_this_window().expect("必须记下第一个陷阱");
-        assert_eq!((cause, mepc, target), (2, 0x0c, 0x10), "第一个陷阱的三项与交付值一致");
+        let (cause, mepc, target) = backend
+            .first_trap_this_window()
+            .expect("必须记下第一个陷阱");
+        assert_eq!(
+            (cause, mepc, target),
+            (2, 0x0c, 0x10),
+            "第一个陷阱的三项与交付值一致"
+        );
         assert_eq!(
             backend.snapshot().expect("snapshot").pc,
             0x10,
@@ -3568,9 +3576,7 @@ mod tests {
         backend.reset_trap_window();
 
         // 第六、七条：又都回到 0x10 ⇒ 同一 (cause, mepc) 连到第 3 次 ⇒ 中止。
-        let err = backend
-            .step_n(2)
-            .expect_err("连环到阈值必须中止这一批");
+        let err = backend.step_n(2).expect_err("连环到阈值必须中止这一批");
         let rendered = err.to_string();
         assert!(
             rendered.starts_with("E_ENG-04: "),
@@ -3586,5 +3592,4 @@ mod tests {
             "平台错误不写 guest 停因 —— 这一批是中止，不是停下"
         );
     }
-
 }

@@ -2210,7 +2210,10 @@ mod tests {
             Some("a-b c"),
             "前端用 encodeURIComponent 编过 ⇒ 必须解码后再比"
         );
-        assert_eq!(query_parameter(Some("token="), "token").as_deref(), Some(""));
+        assert_eq!(
+            query_parameter(Some("token="), "token").as_deref(),
+            Some("")
+        );
         assert_eq!(query_parameter(Some("a=1"), "token"), None);
         assert_eq!(query_parameter(None, "token"), None);
     }

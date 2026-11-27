@@ -171,8 +171,8 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use riscv_sim_contract::error::{
-    ErrorFamily, PlatformError, E_HMS_02_FATAL_TERMINATED, E_PLT_22_NO_BOARD, E_PROTO_08_BAD_MESSAGE,
-    PLATFORM_FAMILY, PROTO_FAMILY,
+    ErrorFamily, PlatformError, E_HMS_02_FATAL_TERMINATED, E_PLT_22_NO_BOARD,
+    E_PROTO_08_BAD_MESSAGE, PLATFORM_FAMILY, PROTO_FAMILY,
 };
 use riscv_sim_contract::model::{Project, SIM_STATE_SCHEMA_VERSION};
 use riscv_sim_contract::platform::PlatformDescription;

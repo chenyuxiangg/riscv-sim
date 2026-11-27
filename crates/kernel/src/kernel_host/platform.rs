@@ -160,24 +160,23 @@ pub fn builtin_descriptions() -> Result<Vec<PlatformDescription>, PlatformError>
 /// `GET /api/board/templates` **都调这里** ⇒ ⇒ 「清单长什么样」不会在两个
 /// 地方各算一遍（`device_count` 的定义一变两边一起变）。
 pub fn template_infos() -> Vec<riscv_sim_contract::model::PlatformTemplateInfo> {
-    let mut templates: Vec<riscv_sim_contract::model::PlatformTemplateInfo> =
-        BUILTIN_DESCRIPTIONS
-            .iter()
-            .filter_map(|(id, json)| {
-                let description = parse_description(json).ok()?;
-                let device_count = description
-                    .regions
-                    .iter()
-                    .filter(|region| matches!(region, RegionSpec::Peripheral { .. }))
-                    .count() as u32;
-                Some(riscv_sim_contract::model::PlatformTemplateInfo {
-                    id: (*id).to_string(),
-                    name: description.name.clone(),
-                    priority: description.priority,
-                    device_count,
-                })
+    let mut templates: Vec<riscv_sim_contract::model::PlatformTemplateInfo> = BUILTIN_DESCRIPTIONS
+        .iter()
+        .filter_map(|(id, json)| {
+            let description = parse_description(json).ok()?;
+            let device_count = description
+                .regions
+                .iter()
+                .filter(|region| matches!(region, RegionSpec::Peripheral { .. }))
+                .count() as u32;
+            Some(riscv_sim_contract::model::PlatformTemplateInfo {
+                id: (*id).to_string(),
+                name: description.name.clone(),
+                priority: description.priority,
+                device_count,
             })
-            .collect();
+        })
+        .collect();
     templates.sort_by_key(|entry| entry.priority);
     templates
 }

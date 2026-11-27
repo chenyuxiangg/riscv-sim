@@ -298,7 +298,10 @@ impl Config {
                 .canonicalize()
                 .map_err(|e| format!("bad --front-dir {}: {e}", dir.display()))?;
             if !canonical.is_dir() {
-                return Err(format!("bad --front-dir {}: not a directory", canonical.display()));
+                return Err(format!(
+                    "bad --front-dir {}: not a directory",
+                    canonical.display()
+                ));
             }
             if !canonical.join("index.html").is_file() {
                 return Err(format!(

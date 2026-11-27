@@ -111,9 +111,8 @@ fn file_response(bytes: Vec<u8>, content_type: &'static str, head_only: bool) ->
         // `HEAD` 仍要报出「本来有多少字节」（`Content-Length` 不许为空）。
         headers.insert(
             header::CONTENT_LENGTH,
-            header::HeaderValue::from_str(&len.to_string()).unwrap_or_else(|_| {
-                header::HeaderValue::from_static("0")
-            }),
+            header::HeaderValue::from_str(&len.to_string())
+                .unwrap_or_else(|_| header::HeaderValue::from_static("0")),
         );
     }
     // 状态码留在最后写，避免上面几个 `insert` 之前有人误读默认值。
@@ -146,8 +145,10 @@ pub async fn serve(root: &Path, raw_path: &str, method: &Method) -> Response {
     match tokio::fs::read(&file).await {
         Ok(bytes) => file_response(bytes, content_type_for(&file), head_only),
         Err(err) => {
-            let mut response =
-                Response::new(Body::from(format!("cannot read {}: {err}\n", file.display())));
+            let mut response = Response::new(Body::from(format!(
+                "cannot read {}: {err}\n",
+                file.display()
+            )));
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("text/plain; charset=utf-8"),
@@ -213,15 +214,27 @@ mod tests {
     fn missing_file_is_a_miss_not_a_directory_leak() {
         let root = dir();
         assert!(resolve(&root, "/no-such-file.js").is_none());
-        assert!(resolve(&root, "/services").is_none(), "a directory is not a file");
+        assert!(
+            resolve(&root, "/services").is_none(),
+            "a directory is not a file"
+        );
     }
 
     #[test]
     fn content_types_follow_the_extension() {
-        assert_eq!(content_type_for(Path::new("a/index.html")), "text/html; charset=utf-8");
-        assert_eq!(content_type_for(Path::new("a/app.js")), "text/javascript; charset=utf-8");
+        assert_eq!(
+            content_type_for(Path::new("a/index.html")),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for(Path::new("a/app.js")),
+            "text/javascript; charset=utf-8"
+        );
         assert_eq!(content_type_for(Path::new("a/x.wasm")), "application/wasm");
-        assert_eq!(content_type_for(Path::new("a/style.CSS")), "text/css; charset=utf-8");
+        assert_eq!(
+            content_type_for(Path::new("a/style.CSS")),
+            "text/css; charset=utf-8"
+        );
         assert_eq!(
             content_type_for(Path::new("a/weird.bin")),
             "application/octet-stream"
