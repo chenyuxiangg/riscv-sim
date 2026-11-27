@@ -95,6 +95,7 @@ http://localhost:8876/?token=<随机生成的令牌>
 `ssh -L 18877:127.0.0.1:8877` 进来）。它是**合成口径**：复用已发布镜像里的
 `riscv_sim_server` 与 `front/`，不重编 Rust（ali_hy 上 `cargo build --locked` 会卡在
 依赖下载）；`Dockerfile` 仍是发布口径（源码编译 + CI 出 v0.1.x）。
+CI 会把这个形态也推到 ACR（`sha-<7>-mcp` / `mcp-latest` / `<tag>-mcp`），服务器侧只需 `docker pull`。
 两个进程的生死由一个 `docker/supervise.sh` 管：**任一退出 ⇒ 整个容器退出**，交给
 `--restart unless-stopped`，不做进程级自愈（半死不活的容器比直接重启更难查）。
 
