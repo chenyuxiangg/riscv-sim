@@ -104,6 +104,11 @@ http://localhost:8876/?token=<随机生成的令牌>
 | `<git tag>`（如 `v0.1.3`） | 每次 release | 每个版本一份自己的镜像，永不覆盖 |
 | `latest` | **只在打 tag 时** | 永远等于最新的那个 release |
 
+**历史标签的清理**：单镜像之前的双轨标签（`mcp-latest`、`*-mcp`、纯服务端的
+`v0.1.0/1/2` 与 `sha-*`）只能**在 ACR 控制台手删** —— 个人版的 registry API 不对
+DELETE manifest 授权（实测 401，detail 是 `Action=delete`），CI 里做不成自动清理。
+`tools/prune_acr_tags.py` 留着当手动工具：会打印该删哪些、digest 有没有和保留项共用。
+
 两个进程的生死由 `docker/supervise.sh` 管：**任一退出 ⇒ 整个容器退出**，交给
 `--restart unless-stopped`，不做进程级自愈（半死不活的容器比直接重启更难查）。
 
