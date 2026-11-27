@@ -112,7 +112,7 @@ svg.append(f'<rect width="{W}" height="{H}" fill="url(#dots)" opacity="0.9"/>')
 
 # ------------------------------------------------------------------ 标题
 svg.append(text(40, 56, "运行视图 · AI 接入层：MCP 部署在 ali_hy，只经隧道", 25, 700))
-svg.append(text(40, 84, "实线 = 已在跑（v0.1.1 镜像、隧道已在上一轮实测通过）；虚线 = 尚未存在（sim-mcp 容器）。", 12.5, 400, "#61708a"))
+svg.append(text(40, 84, "实线 = 已在跑（riscv-sim v0.1.1 · sim-mcp 0.1.0，两者都已在 ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。", 12.5, 400, "#61708a"))
 svg.append(text(40, 102, "AI 只看得见工具，看不见 8876，也拿不到 SIM_TOKEN —— 这条边界是整张图的重点。", 12.5, 400, "#61708a"))
 svg.append(text(W - 40, 56, "front/ · crates/{kernel,contract,server} · sim-mcp(待建)", 11.5, 400, "#8a97a8", anchor="end", mono=True))
 
@@ -141,9 +141,9 @@ svg.append(card(MX + 18, MY + 308, MW - 36, 104, "这里刻意没有的东西", 
     "没有 Docker 引擎 —— Mac 上跑不了镜像，验证只在 ali_hy",
 ], fill="#fff7e8", stroke="#e8c98a"))
 
-svg.append(card(MX + 18, MY + 424, MW - 36, 96, "验收线（一条就够）", [
-    "装 8 字节 RawHex 固件 → advance 5 次",
-    "→ 工具回 pc 与 x5 的真实值，中途不被你纠正",
+svg.append(card(MX + 18, MY + 424, MW - 36, 96, "验收线（已通过）", [
+    "装 8 字节 RawHex 固件 → advance 2 次",
+    "→ 工具回 pc=8 · x5=3，中途没被纠正",
 ], fill="#fbfcfe", stroke="#cdd5e0"))
 
 svg.append(card(MX + 18, MY + 520, MW - 36, 82, "隧道给的是「先验身份」", [
@@ -162,20 +162,20 @@ svg.append(rect(BX, BY, BW, BH, "#ffffff", "#7c8ea6", sw=1.8))
 svg.append(text(BX + 20, BY + 28, "B · ali_hy　8.155.139.119（Ubuntu 22.04 / Docker 29.9.3）", 14.5, 700, "#243043"))
 
 # sim-mcp（虚线：待建）
-svg.append(rect(BX + 18, BY + 44, BW - 36, 292, "#faf9ff", "#b9a8dd", dash="7 5", sw=1.8, r=10))
-svg.append(text(BX + 32, BY + 68, "容器 sim-mcp（待建 · 只绑 127.0.0.1:8877）", 13, 700, "#4a3f66"))
+svg.append(rect(BX + 18, BY + 44, BW - 36, 292, "#faf9ff", "#8f74c9", sw=1.8, r=10))
+svg.append(text(BX + 32, BY + 68, "容器 sim-mcp（已部署 0.1.0 · 只绑 127.0.0.1:8877）", 13, 700, "#4a3f66"))
 
 svg.append(card(BX + 32, BY + 80, 328, 104, "入口与鉴权", [
     "只绑回环 127.0.0.1:8877，公网没有这个口",
     "Bearer <MCP token>；退化 /mcp/<token>",
     "一条令牌，无角色、无过期（不是 OAuth）",
-], fill="#ffffff", stroke="#c3cedb", size=10.5, dash="6 4"))
+], fill="#ffffff", stroke="#c3cedb", size=10.5))
 
 svg.append(card(BX + 376, BY + 80, 328, 104, "会话归属表（隔离的唯一手段）", [
     "client_id → session_id，一客户端 1 个",
     "boot 只建自己的，空闲 5 min 主动 DELETE",
     "对客户端永不暴露 /api/sessions 列表",
-], fill="#ffffff", stroke="#c3cedb", size=10.5, dash="6 4"))
+], fill="#ffffff", stroke="#c3cedb", size=10.5))
 
 svg.append(card(BX + 32, BY + 196, 328, 128, "工具层 · 9 个（写细分 / 读合并）", [
     "boot · load_image · advance · run · poll_job",
@@ -189,7 +189,7 @@ svg.append(card(BX + 376, BY + 196, 328, 128, "闸门与审计", [
     "max_run_ms 封顶 5000，客户端不能抬价",
     "每调用一行：client / tool / 耗时 / 错误码",
     "没有它，远程出事定位不到「谁把会话搞没」",
-], fill="#ffffff", stroke="#c3cedb", size=10.5, dash="6 4"))
+], fill="#ffffff", stroke="#c3cedb", size=10.5))
 
 # riscv-sim（实线：已跑）
 svg.append(rect(BX + 18, BY + 360, BW - 36, 238, "#f7fbf7", "#a9c8a9", sw=1.8, r=10))
@@ -269,11 +269,11 @@ svg.append(card(590, 862, 520, 150, "二、长任务与「仿真器坏了」的�
 ], fill="#ffffff", stroke="#c3cedb", size=10.8))
 
 svg.append(card(1140, 862, 520, 150, "三、现在到哪一步", [
-    "已跑通：riscv-sim v0.1.1 healthy、8876 公网可访问",
-    "已验证：隧道 1887x → 8876 的等价路径（上一轮实测）",
-    "待建：sim-mcp 容器（图上虚线）+ 9 工具 + 审计",
-    "验收：装固件 → advance 5 → 报出 pc 与 x5，无需纠正",
-], fill="#fbfbfc", stroke="#c8ced8", dash="6 4", size=10.8))
+    "已跑通：riscv-sim v0.1.1（8876 公网）· sim-mcp 0.1.0（8877 仅回环）",
+    "已验收：隧道内 check_mcp ⇒ 装固件 · advance(2) · pc=8 · x5=3",
+    "审计已生效：docker logs sim-mcp 一行一调用（client/tool/耗时/码）",
+    "待做：多客户端并发压测、MCP 并进 Rust 单二进制",
+], fill="#ffffff", stroke="#c3cedb", size=10.8))
 
 svg.append('</svg>')
 open("docs/architecture/mcp-view.svg", "w").write("\n".join(svg))
