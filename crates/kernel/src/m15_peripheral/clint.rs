@@ -45,6 +45,8 @@
 //! ⚠️ **为什么必须带 `mtime`**：它的真相源是「锚点 + 虚拟时间」，锚点
 //! **不是寄存器**（guest 看不见）⇒ 不带 `mtime` 就还原不出那个值。
 
+use std::cell::Cell;
+
 use riscv_sim_contract::error::{ErrorFamily, PlatformError};
 use riscv_sim_contract::model::{PendingWrite, WriteSize};
 use riscv_sim_contract::port::{Peripheral, ProbeSink, TimeSource};
@@ -127,6 +129,23 @@ pub struct Clint {
     mtime_anchor: (u64, u64),
     /// 最近一次观察到的虚拟时间（ps）。
     now_ps: u64,
+    /// `mtime` **高半的锁存值**（R-2）。
+    ///
+    /// guest 读 64 位 `mtime` 在 RV32 上是**两条 32 位 load**，两条之间
+    /// 虚拟时间会前进（每条指令推进 [`INSTRUCTION_COST_PS`]）⇒ 如果高半
+    /// 在第二条 load 时**重新算一遍**，拼出来的 64 位值就不是任何一个
+    /// 真实时刻的读数（撕裂读）。
+    ///
+    /// 硬件语义（本次补丁采用）：**读低半时把当时的高半钉住**，紧接着读
+    /// 高半返回钉住的那一份；下一次读低半才重新钉。因此
+    /// 「读低半 → 读高半」这个序列**永远**得到一个真实时刻的快照。
+    ///
+    /// 用 [`Cell`] 是因为 [`Peripheral::read`] 拿的是 `&self`（读寄存器
+    /// 不该要求可变借用，也不该为这个锁存把 CLINT 从 `&self` 改成
+    /// `&mut self` 而牵动 M-14 总线）。
+    ///
+    /// [`INSTRUCTION_COST_PS`]: crate::m17_backend::INSTRUCTION_COST_PS
+    mtime_hi_latch: Cell<Option<u32>>,
     /// M-18 探针回调（D-12）。空 = 没有观察者。
     probe: ProbeSlot,
 }
@@ -157,6 +176,7 @@ impl Clint {
             mtimecmp: vec![0; harts as usize],
             mtime_anchor: (0, 0),
             now_ps: 0,
+            mtime_hi_latch: Cell::new(None),
             probe: ProbeSlot::default(),
         }
     }
@@ -217,6 +237,9 @@ impl Clint {
     /// 所以「喂一个绝对值」与「让 `mtime` 跟着虚拟时间走」不冲突。
     pub fn set_mtime_cycles(&mut self, cycles: u64) {
         self.mtime_anchor = (self.now_ps, cycles);
+        // 喂进来的是一个**新的**绝对值 ⇒ 之前钉住的高半已经不代表任何
+        // 时刻的 `mtime`，必须作废（否则下一次 guest 读高半会拿到旧值）。
+        self.mtime_hi_latch.set(None);
     }
 
     /// 最近一次观察到的虚拟时间（ps）。
@@ -470,6 +493,8 @@ impl Peripheral for Clint {
         // 值继续走（而不是回到「虚拟时间的函数」）。
         self.mtime_anchor = (s.now_ps, s.mtime_cycles);
         self.now_ps = s.now_ps;
+        // 同 `set_mtime_cycles`：恢复出来的是另一个时刻的 `mtime`。
+        self.mtime_hi_latch.set(None);
         Ok(())
     }
 
@@ -520,10 +545,20 @@ impl Clint {
             });
         }
 
-        // ---- `mtime` ----
+        // ---- `mtime`（64 位，按两个半字暴露；高半**锁存**，见 R-2）----
         match off {
-            reg::MTIME => Ok(self.mtime_cycles() as u32),
-            o if o == reg::MTIME + 4 => Ok((self.mtime_cycles() >> 32) as u32),
+            reg::MTIME => {
+                let cycles = self.mtime_cycles();
+                // 钉住「与这个低半同属一瞬间」的高半。
+                self.mtime_hi_latch.set(Some((cycles >> 32) as u32));
+                Ok(cycles as u32)
+            }
+            o if o == reg::MTIME + 4 => Ok(match self.mtime_hi_latch.get() {
+                // 刚才读过低半 ⇒ 用钉住的那一份（同一个时刻的快照）。
+                Some(hi) => hi,
+                // 没读过低半就直接读高半（少见，但合法）⇒ 现算。
+                None => (self.mtime_cycles() >> 32) as u32,
+            }),
             _ => Err(undefined_offset(off)),
         }
     }
@@ -828,5 +863,100 @@ mod tests {
         assert_eq!(log[0].2, 1_000, "时间戳是外设的时钟");
         assert_eq!(log[1].0, SIGNAL_MTIMECMP);
         assert_eq!(log[1].1, 0x0000_0010);
+    }
+
+    // -------------------------------------------------------------------
+    // R-2：64 位 `mtime` 读的一致性
+    // -------------------------------------------------------------------
+
+    /// 读低半 + 读高半 = **同一个时刻**的值（高半被低半的读锁存）。
+    ///
+    /// 反证：如果在两条 load 之间高半重新算一遍，这个用例会拿到
+    /// `lo(旧时刻) | hi(新时刻) << 32` —— 一个**从来没有存在过**的值。
+    #[test]
+    fn mtime_high_half_is_latched_by_the_low_half_read() {
+        let mut clint = Clint::new("CLINT0", CLINT_BASE);
+
+        // ① 一个高半为 0 的时刻：20000 周期（= osz 的 `0x4E20`）。
+        clint.tick(2_000_000_000).unwrap();
+        assert_eq!(clint.mtime_cycles(), 20_000);
+
+        let lo = clint.read(reg::MTIME, WriteSize::Word).unwrap();
+        assert_eq!(lo, 0x0000_4E20, "低半是 20000");
+
+        // ② 中间虚拟时间**跳到**高半会长大的地方（> 2^32 周期）。
+        clint.tick(1_000_000_000_000_000).unwrap();
+        assert!(clint.mtime_cycles() >> 32 > 0, "此刻高半已经不是 0");
+
+        // ③ 读高半：必须是 ① 那个时刻钉住的 0，而不是 ② 现算的大值。
+        let hi = clint.read(reg::MTIME + 4, WriteSize::Word).unwrap();
+        assert_eq!(hi, 0, "高半必须是低半那一瞬间的快照");
+
+        // ④ 再读一次低半才重新钉；此后高半跟着走。
+        let lo2 = clint.read(reg::MTIME, WriteSize::Word).unwrap();
+        let hi2 = clint.read(reg::MTIME + 4, WriteSize::Word).unwrap();
+        assert_eq!(
+            hi2,
+            (clint.mtime_cycles() >> 32) as u32,
+            "重新钉之后高半是当前值"
+        );
+        assert_eq!(
+            (u64::from(hi2) << 32) | u64::from(lo2),
+            clint.mtime_cycles(),
+            "重新钉之后，两半拼出的就是此刻的 mtime"
+        );
+    }
+
+    /// 宿主喂 `mtime` 之后，之前钉住的高半必须作废（否则还原 / 喂值
+    /// 之后 guest 会拼出一个旧的高半）。
+    #[test]
+    fn set_mtime_cycles_drops_the_latched_high_half() {
+        let mut clint = Clint::new("CLINT0", CLINT_BASE);
+        clint.tick(1_000).unwrap();
+        let _ = clint.read(reg::MTIME, WriteSize::Word).unwrap(); // 钉住 hi = 0
+        clint.set_mtime_cycles(0x0000_0001_0000_0000);
+        assert_eq!(
+            clint.read(reg::MTIME + 4, WriteSize::Word).unwrap(),
+            1,
+            "喂值之后高半必须立刻反映新值"
+        );
+    }
+
+    /// R-2 的验收条件：**连续 100 万次 64 位读** ⇒ 单调不减、相邻差 < 1000。
+    ///
+    /// 这里按「guest 的真实时序」采样：每条指令推进 1000 ps（10 MHz CLINT
+    /// ⇒ 0.01 周期），采样间隔 2 条指令 ⇒ 每条 2000 ps。
+    #[test]
+    fn one_million_mtime_reads_are_monotone_with_small_deltas() {
+        const COST_PS: u64 = 1_000; // = m17_backend::INSTRUCTION_COST_PS
+        let mut clint = Clint::new("CLINT0", CLINT_BASE);
+
+        let mut previous: Option<u64> = None;
+        let mut max_delta: u64 = 0;
+        let mut regressions = 0u32;
+
+        for _ in 0..1_000_000u32 {
+            // 采样：读低半 → 走 2 条指令 → 读高半（中间虚拟时间在动）。
+            clint.tick(clint.now_ps() + COST_PS).unwrap();
+            let lo = u64::from(clint.read(reg::MTIME, WriteSize::Word).unwrap());
+            clint.tick(clint.now_ps() + COST_PS).unwrap();
+            let hi = u64::from(clint.read(reg::MTIME + 4, WriteSize::Word).unwrap());
+            let now = (hi << 32) | lo;
+
+            if let Some(prev) = previous {
+                if now < prev {
+                    regressions += 1;
+                } else {
+                    max_delta = max_delta.max(now - prev);
+                }
+            }
+            previous = Some(now);
+        }
+
+        assert_eq!(regressions, 0, "100 万次读里不允许出现倒退");
+        assert!(
+            max_delta < 1000,
+            "相邻差必须 < 1000 cycles，实测 {max_delta}"
+        );
     }
 }

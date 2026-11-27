@@ -35,12 +35,27 @@
 B-1 的 `stop_causes` 落地后可把守卫限定到 fault 类 cause，进一步压误报（合法地反复
 陷同一处：自陷式打点 / 轮询 semihosting）。
 
-## B-3 · R-2 · wasm 后端 CLINT `mtime` 64 位读偶发异常
+## B-3 · R-2 · wasm 后端 CLINT `mtime` 64 位读偶发异常 —— **已做（判因+补丁）**
 
-**要什么**：先在 wasm 侧写「100 万次连读 `0x200BFF8`」的复现脚本判因
-（宿主喂的 `now_ps` 跳变 vs guest 两次 32 位读未锁存），再补锁存 / 原子快照。
+**判因结论**：`now_ps` 只有一处写入（`m17_backend::step` 每条退休指令 +1000 ps），
+没有跳时入口 ⇒ 「宿主喂的 `now_ps` 跳变」不成立；结构性入口只剩**两次独立重算**
+（`read_word` 对 `0xBFF8`/`0xBFFC` 各调一次 `mtime_cycles()`）。已改为
+**读低半时锁存高半**（`mtime_hi_latch`，`Cell<Option<u32>>`），并在
+`set_mtime_cycles` / `restore_session_state` 里作废锁存。
 
-**为什么现在不做**：与 R-1 独立（需求单明确「可独立合入」），且未复现就没有判据。
+**复现情况（诚实记录）**：本机重编的 wasm 产物（schema 20）上
+`tools/r2_mtime_probe.mjs` 跑 100 万次（修前/修后）都是单调、最大单步差 1 cycle；
+把 OSZ 的 `osz_red.elf` 在 wasm 里跑完整套件（8 pass / 1 crash）时 `ms=` 全是 0/1，
+**没有**出现 `0x12A7D7FBECD0` 那个量级。⇒ OSZ 报告的那一次异常值**未在本机复现**，
+补丁是按「结构性根因」修的（撕裂读窗口存在，只是概率极低）。
+
+**待办（需要 OSZ 侧配合）**：要他们出事那版的 wasm 产物（或 commit）+ 板子 + 三条
+读的相邻时间戳，否则只能停在「结构已消掉、症状未复现」。
+
+**另外发现（与本项无关，记在这里免得丢）**：`Continue`（窗口循环）在
+`pc=0x80006B34` 这类「跑飞进数据区」的状态下会以 `Halted(EndOfExecution)` 收尾
+（零进展判据），而同一状态用 `StepN{1000}` 分块可以继续跑完 —— 两种驱动路径对
+「零进展」的判定不一致，`.github` 无覆盖。
 
 ## B-4 · `run` 的 `budget_exhausted` 之外，把「默认 1e6」写进 USER_GUIDE
 
