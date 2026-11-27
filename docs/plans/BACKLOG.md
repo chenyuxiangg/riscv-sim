@@ -17,17 +17,23 @@
 **注意时间成本**：R-1 已把 `SCHEMA_VERSION` 升到 20；这批合入后再加字段就是 21，
 前端镜像 / MCP / skill 都要再跟一遍。能塞进 v20 的窗口只有合入前。
 
-## B-2 · `stall_guard`（异常连环的提前收尾）
+## B-2 · `stall_guard`（异常连环的提前收尾）—— **已落地**
 
-**要什么**：`stop_on_trap = false` 时，连续 N 次（建议 64）出现**同 `mcause` + 同
-`mepc`** ⇒ 判「异常连环」报 `E_ENG-04`（带 cause / mepc / count）中止，而不是烧到
+**要什么**：`stop_on_trap = false` 时，连续 N 次**同 `mcause` + 同 `mepc`** ⇒ 判
+「异常连环」报 `E_ENG-04`（带 cause / mepc / count）中止，而不是烧到
 `max_trap_events`。计数**跨批处理窗口**持久（窗口边界不清零），否则一次 `run` 切窗
 就失效。
 
-**为什么现在不做**：P0 的验收（AC1/AC3/AC4）用配额就能过；`stall_guard` 是第二道防线，
-且它的误报口径（合法地反复陷在同一处，如自陷式打点日志）要跟 B-1 一起定。
+**怎么做的**：`SetStopPolicy` 加第三个字段 `stall_guard: Option<u32>`（`serde(default)`，
+不升 schema）；`TrapPolicy` 记 `last_trap_key` / `stall_count`；`step()` 在记账后、配额
+前判守卫；`reset_trap_window()` **不清**连环账；`set_stop_policy` 重置。宿主 `dispatch`
+拒两种误用（`stop_on_trap=true` 时给、阈值 < 2）⇒ `E_PROTO-08`；MCP 同一套判据 ⇒
+`E_MCP-07`。`run` 回体把平台中止翻成 `stop_reason="error"` + `error_code`（此前只会
+说 `halt`）。
 
-**什么时候该做**：R-2 收口后，或 OSZ 反馈「配额给小了误杀、给大了烧穿预算」。
+**剩下的**：默认值仍建议给（工具面文案写 `32` 起步，代码不设默认 ⇒ 缺省关）；
+B-1 的 `stop_causes` 落地后可把守卫限定到 fault 类 cause，进一步压误报（合法地反复
+陷同一处：自陷式打点 / 轮询 semihosting）。
 
 ## B-3 · R-2 · wasm 后端 CLINT `mtime` 64 位读偶发异常
 

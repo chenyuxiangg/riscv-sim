@@ -62,7 +62,7 @@ poll_job {"job":"<上一步的 job>"}          → 重复到终态
 ## R4b · 验异常路径（R-1：崩溃后继续跑完）
 
 ```
-stop_policy {"stop_on_trap":false,"max_trap_events":1024}
+stop_policy {"stop_on_trap":false,"max_trap_events":1024,"stall_guard":32}
 run {"prefix":"[SZTEST] end","steps":8000000}
 ```
 
@@ -73,6 +73,11 @@ run {"prefix":"[SZTEST] end","steps":8000000}
 - 回默认：`stop_policy {"stop_on_trap":true}`（或换工程 / 卸载）
 - `false` 忘给配额 ⇒ 内核 `E_PROTO-08` / MCP `E_MCP-07`（提前拦）
 - `run` 回 `budget_exhausted:true` ⇒ 指令预算用尽（缺省 1e6 条），给 `steps` 再来
+- `run` 回 `stop_reason:"error"` + `error_code:"E_ENG-04"` ⇒ 异常连环（handler
+  一直跳回同一故障点）：先看 `TrapSummary` 的 `first_mepc`，几乎总是仓库里
+  没有 handler 或 handler 自己也是非法指令；不是仿真器挂了，也不是 guest 停点
+- `stall_guard` 建议给（`32` 起步）：不给的话，handler 死循环只能等配额烧完，
+  指令数可能多三个数量级
 
 ## R5 · 定位「pc 为什么停这儿」
 

@@ -381,8 +381,14 @@ pub mod snapshot;
 ///
 /// Contract **v20** adds the **陷阱交付策略**（R-1 · 需求单 v2）：
 ///
-/// - 新命令 `CommandPayload::SetStopPolicy { stop_on_trap, max_trap_events }`
-///   —— 会话级粘性，`LoadProject` 重置为默认；
+/// - 新命令 `CommandPayload::SetStopPolicy { stop_on_trap, max_trap_events,
+///   stall_guard }` —— 会话级粘性，`LoadProject` 重置为默认；
+///   - `stall_guard`（B-2 · 异常连环守卫）：同一 `(mcause, mepc)` 连续陷到
+///     N 次 ⇒ 内核报 `E_ENG-04` **中止这一批**（`>= 2`；只在
+///     `stop_on_trap = false` 时生效，`None` 关）；
+///   - ⚠️ **`stall_guard` 是 v20 内追加的字段**（`serde(default)`）：
+///     不升 `SCHEMA_VERSION` —— 线上信封形状只多了一个**可缺省**字段，
+///     没给它的客户端逐字节仍是 v20；再加**新字段**才需要 21；
 /// - 新事件 `EventPayload::TrapSummary { count, first_cause, first_mepc,
 ///   first_mtvec_target }` —— **只在 `stop_on_trap = false` 时**发，默认
 ///   策略下事件序列与改动前逐字节一致；

@@ -62,13 +62,18 @@ content-type: application/octet-stream
 
 ## stop_policy
 
-- 参数：`stop_on_trap`（**必填**）、`max_trap_events`（配额，`stop_on_trap=false` 时**必填**）
+- 参数：`stop_on_trap`（**必填**）、`max_trap_events`（配额，`stop_on_trap=false` 时**必填**）、`stall_guard`（可选，≥2）
 - `true`（默认）⇒ 同步异常交付即停，与改动前逐字节一致（AC1 基线）
 - `false` ⇒ 陷阱交付后**继续跑** handler，最多 N 个后停（配额按**一次批处理窗口**计）
 - `false` 不给配额：内核 `E_PROTO-08`；MCP 侧提前拦，给你 `E_MCP-07`
+- `stall_guard=N`（B-2 · 异常连环守卫）⇒ 同一 `(mcause, mepc)` 连陷 N 次就报
+  `E_ENG-04` 中止这一批：说明 handler 一直把程序送回故障点。**跨窗口累计**，
+  所以比配额早得多；只在 `stop_on_trap=false` 时能用（`true` 给它会回 `E_MCP-07`）
 - **会话级粘性**：一次调用管到换工程 / 卸载（那时回默认）；`advance` / `run` 都吃它
 - 事件流里会出现 `TrapSummary {count, first_cause, first_mepc, first_mtvec_target}`
   —— 只在非默认策略下发；`first_mtvec_target` 是 `enter_trap` 真正跳去的地址
+- 平台中止（`E_ENG-03` 无进展 / `E_ENG-04` 连环）`run` 回体是 `stop_reason="error"` +
+  `error_code` —— **不是** `halt`，别读成 guest 停点
 - 中断（定时器 / 外设）**不进**这条逻辑：它们在指令边界交付，批次不停
 
 ## poll_job

@@ -52,9 +52,11 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
    `name` 的扩展名决定解析：`.bin` = RawHex（一律从 0 起），`.elf` = ELF（真实 entry、多段），
    `.hex` 文本（Intel HEX）会被 `E_PROTO-08` 拒。
 
-3. **要验异常路径（野指针 / 非法指令 / 缺页）先调 `stop_policy {stop_on_trap:false, max_trap_events:N}`**
+3. **要验异常路径（野指针 / 非法指令 / 缺页）先调 `stop_policy {stop_on_trap:false, max_trap_events:N, stall_guard:32}`**
    —— 否则陷阱交付即停，handler 一条指令都跑不到，后面全丢。它是**会话级粘性**
-   命令，换工程 / 卸载回默认；中断不进这条逻辑。
+   命令，换工程 / 卸载回默认；中断不进这条逻辑。`stall_guard`（B-2）可选：同一
+   `(cause, mepc)` 连陷 N 次就报 `E_ENG-04` 中止（跨窗口累计，比配额早得多）——
+   handler 死循环时回体是 `stop_reason:"error"` + `error_code`，别读成 guest 停点。
 
 4. **`advance` 是「恰好 n 条」，`run` 是「跑到停点」。** 想复现就只用 `advance`；
    `run` 默认 5 秒墙钟，撞钟回 `504`，但 **body 仍是完整停点报告** —— 读它，不是报失败。
@@ -71,7 +73,7 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 | `advance` | 恰好走 n 条 | `n`（1..100000） |
 | `run` | 跑到停点 | `steps` / `timeout_ms` / `prefix`（console 命中）/ `until`（breakpoint\|halt）/ `background` |
 | `poll_job` | 读异步作业 | `job`（`run(background=true)` 回体里的） |
-| `stop_policy` | 会话级陷阱交付策略（**R-1**） | `stop_on_trap`（true=交付即停，默认）；`false` 时 `max_trap_events` **必填** |
+| `stop_policy` | 会话级陷阱交付策略（**R-1**）+ 异常连环守卫（**B-2**） | `stop_on_trap`（true=交付即停，默认）；`false` 时 `max_trap_events` **必填**；可选 `stall_guard`（≥2，同一 (cause,mepc) 连陷 N 次 ⇒ `E_ENG-04`） |
 | `inspect` | 读状态/串口/内存 | `kind`=state\|console\|memory；`addr` `len` `format`(u32\|asc) `offset` `limit` |
 | `disasm` | 反汇编 | `addr` `count` |
 | `breakpoints` | 断点表 | `op`=list\|set\|clear\|enable（set 三选一：`addr`/`symbol`/`condition`） |

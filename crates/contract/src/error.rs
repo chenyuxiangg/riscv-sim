@@ -418,7 +418,7 @@ pub const E_DBG_03_DUMP_TOO_LARGE: u16 = 3;
 pub const E_DBG_04_SYMBOL_NAME_EMPTY: u16 = 4;
 
 // ---------------------------------------------------------------------------
-// Engine family — `E_ENG-01`..`E_ENG-03`
+// Engine family — `E_ENG-01`..`E_ENG-04`
 // ---------------------------------------------------------------------------
 
 /// Scenario code: the engine could not publish an event onto the bus
@@ -445,6 +445,21 @@ pub const E_ENG_02_QUEUE_INCONSISTENT: u16 = 2;
 /// not present it as "the program crashed" — the session is wedged and
 /// the engine bailed out on purpose.
 pub const E_ENG_03_NO_PROGRESS: u16 = 3;
+
+/// Scenario code: the guest is in a **trap storm** — the same synchronous
+/// exception (`mcause` + `mepc`) was delivered N times in a row, so the
+/// handler never moved the guest past the failing instruction.
+///
+/// ⚠️ This is a **platform** verdict, not a guest halt: the engine aborted
+/// the batch on purpose (`stop_on_trap = false` + `stall_guard = N`). It
+/// is deliberately **not** `HaltReason::Trap` — a trap storm means the
+/// handler is broken (or the fault cannot be fixed), and reporting it as
+/// "the guest stopped at a trap" would hide exactly that.
+///
+/// ⚠️ Different judgement from [`E_ENG_03_NO_PROGRESS`]: there the guest
+/// retired **nothing**; here it retires plenty (the handler runs), yet
+/// returns to the same fault point every time.
+pub const E_ENG_04_TRAP_STORM: u16 = 4;
 
 // ---------------------------------------------------------------------------
 // Health family — `E_HMS-01`..`E_HMS-02`
@@ -908,6 +923,7 @@ mod tests {
             (E_ENG_01_BUS_PUBLISH_FAILED, "E_ENG-01"),
             (E_ENG_02_QUEUE_INCONSISTENT, "E_ENG-02"),
             (E_ENG_03_NO_PROGRESS, "E_ENG-03"),
+            (E_ENG_04_TRAP_STORM, "E_ENG-04"),
         ];
         for (scenario, expected) in cases {
             let err = PlatformError::new(ENGINE_FAMILY, scenario, "x");

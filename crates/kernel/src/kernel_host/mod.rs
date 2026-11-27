@@ -1101,6 +1101,7 @@ impl KernelHost {
             CommandPayload::SetStopPolicy {
                 stop_on_trap,
                 max_trap_events,
+                stall_guard,
             } => {
                 if !stop_on_trap && max_trap_events.is_none() {
                     return vec![self.error_from(&PlatformError::new(
@@ -1110,7 +1111,29 @@ impl KernelHost {
                          （handler 死循环时会烧穿整轮指令预算）",
                     ))];
                 }
-                self.backend.set_stop_policy(stop_on_trap, max_trap_events);
+                // ---- B-2：异常连环守卫只在「不停」时定义 ----
+                //
+                // `stop_on_trap = true` 时第一条陷阱就收尾，守卫**永远**没有
+                // 机会触发 ⇒ ⇒ 接受它等于让调用方以为「设了也没用」，明确拒。
+                if stall_guard.is_some() && stop_on_trap {
+                    return vec![self.error_from(&PlatformError::new(
+                        PROTO_FAMILY,
+                        E_PROTO_08_BAD_MESSAGE,
+                        "SetStopPolicy: stall_guard 只在 stop_on_trap=false 时可用\
+                         （默认策略第一条陷阱就停，守卫没有意义）",
+                    ))];
+                }
+                // 阈值 < 2 不是守卫：同一个故障点出现 1 次在任何策略下都正常。
+                if matches!(stall_guard, Some(n) if n < 2) {
+                    return vec![self.error_from(&PlatformError::new(
+                        PROTO_FAMILY,
+                        E_PROTO_08_BAD_MESSAGE,
+                        "SetStopPolicy: stall_guard 阈值必须 >= 2\
+                         （1 会把「第一次就踩到」的正常故障判成连环）",
+                    ))];
+                }
+                self.backend
+                    .set_stop_policy(stop_on_trap, max_trap_events, stall_guard);
                 vec![self.tick()]
             }
             CommandPayload::SetBreakpoint(bp) => match self

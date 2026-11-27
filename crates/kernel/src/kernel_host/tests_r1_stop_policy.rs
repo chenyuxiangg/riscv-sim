@@ -116,6 +116,7 @@ fn policy_off_continues_and_stops_at_the_quota_with_a_summary() {
         CommandPayload::SetStopPolicy {
             stop_on_trap: false,
             max_trap_events: Some(4),
+            stall_guard: None,
         },
     );
     assert!(
@@ -148,6 +149,7 @@ fn policy_off_without_a_quota_is_rejected() {
         CommandPayload::SetStopPolicy {
             stop_on_trap: false,
             max_trap_events: None,
+            stall_guard: None,
         },
     );
 
@@ -175,6 +177,7 @@ fn load_project_restores_the_default_policy() {
         CommandPayload::SetStopPolicy {
             stop_on_trap: false,
             max_trap_events: Some(4),
+            stall_guard: None,
         },
     );
 
@@ -186,4 +189,100 @@ fn load_project_restores_the_default_policy() {
         trap_summary(&events).is_none(),
         "装载之后策略必须回默认（否则新固件的崩溃会被静静吞掉）"
     );
+}
+
+/// **B-2 · 异常连环守卫**：`stop_on_trap = false` + 大配额 + `stall_guard = 3`
+/// ⇒ 同一个 `(mcause, mepc)` 连环到第 3 次就**报错中止**，而不是烧到配额。
+///
+/// 判据三条：
+/// 1. 回的是 `Error { code: E_ENG-04 }` —— **不是** `Halted { reason: Trap }`
+///    （这是平台结论：handler 是坏的，不是 guest 停）；
+/// 2. 停下来时配额**远未用满**（证明是守卫而不是配额收的尾）；
+/// 3. 文案里带 `mcause` / `mepc` / 阈值 ⇒ 调用方看得懂「哪个异常点」。
+#[test]
+fn stall_guard_aborts_the_trap_storm_before_the_quota() {
+    let mut host = KernelHost::new();
+    let base = load(&mut host);
+
+    let ack = dispatch(
+        &mut host,
+        CommandPayload::SetStopPolicy {
+            stop_on_trap: false,
+            max_trap_events: Some(64),
+            stall_guard: Some(3),
+        },
+    );
+    assert!(
+        ack.iter()
+            .any(|event| matches!(event, EventPayload::Tick { .. })),
+        "带 stall_guard 的命令必须被接受，实际 {ack:?}"
+    );
+
+    let events = dispatch(&mut host, CommandPayload::Continue);
+
+    let (code, message) = events
+        .iter()
+        .find_map(|event| match event {
+            EventPayload::Error { code, message } => Some((code.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("连环到阈值必须报错，而不是继续跑到配额");
+    assert!(
+        code.starts_with("E_ENG-04"),
+        "错误码必须是 E_ENG-04（异常连环），实际 {code}"
+    );
+    assert!(
+        message.contains("连环"),
+        "文案要说清是异常连环，实际 {message}"
+    );
+    assert_ne!(
+        halt_reason(&events),
+        Some(HaltReason::Trap),
+        "平台错误不许被报成「guest 停在陷阱」\
+         （`Continue` 的窗口循环随后补的 `Halted(EndOfExecution)` 是窗口收尾，不是 trap 停因）"
+    );
+    assert!(
+        host.total_executed() < 10,
+        "守卫在第 3 次就要收：跑到配额 64 的话 executed 会大得多，实际 {}",
+        host.total_executed()
+    );
+    let _ = base;
+}
+
+/// **B-2 的两条拒绝口径**（都是 `E_PROTO-08`）：
+/// `stall_guard` 挂在默认策略上、或阈值 < 2。
+#[test]
+fn stall_guard_is_rejected_outside_its_domain() {
+    let mut host = KernelHost::new();
+
+    // ① `stop_on_trap = true` 时守卫没有意义（第一条陷阱就收尾）。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetStopPolicy {
+            stop_on_trap: true,
+            max_trap_events: None,
+            stall_guard: Some(3),
+        },
+    );
+    let code = error_code(&events).expect("默认策略 + stall_guard 必须被拒");
+    assert!(code.starts_with("E_PROTO-08"), "实际 {code}");
+
+    // ② 阈值 1 会把「第一次就踩到」的正常故障判成连环。
+    let events = dispatch(
+        &mut host,
+        CommandPayload::SetStopPolicy {
+            stop_on_trap: false,
+            max_trap_events: Some(64),
+            stall_guard: Some(1),
+        },
+    );
+    let code = error_code(&events).expect("阈值 1 必须被拒");
+    assert!(code.starts_with("E_PROTO-08"), "实际 {code}");
+}
+
+fn error_code(events: &[EventPayload]) -> Option<String> {
+    events.iter().find_map(|event| match event {
+        EventPayload::Error { code, .. } => Some(code.clone()),
+        _ => None,
+    })
 }

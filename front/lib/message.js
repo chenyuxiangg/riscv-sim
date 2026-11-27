@@ -607,21 +607,32 @@ export const Command = Object.freeze({
     /** `CommandPayload::ListLocals`（STAGE-55 真相候选列表批 · 只读）. */
     listLocals: () => "ListLocals",
     /**
-     * `CommandPayload::SetStopPolicy { stop_on_trap, max_trap_events }`
-     * （契约 v20 · R-1 陷阱交付策略）。
+     * `CommandPayload::SetStopPolicy { stop_on_trap, max_trap_events, stall_guard }`
+     * （契约 v20 · R-1 陷阱交付策略 + B-2 异常连环守卫）。
      *
      * ⚠️ 前端**不主动发**：默认策略就是「交付即停」，与改动前一致。这条
      * 镜像存在的意义是**契约一致性门禁**，以及给「要看异常路径」的调试面
      * 留口子（内核侧要求 `stop_on_trap = false` 时**必须**给
      * `max_trap_events`，否则 `E_PROTO-08`）。
+     *
+     * `stallGuard`：同一 `(mcause, mepc)` 连续陷到 N 次 ⇒ 内核报
+     * `E_ENG-04` 中止这一批（阈值 ≥ 2；只在 `stopOnTrap = false` 时有意义）。
      */
-    setStopPolicy: (stopOnTrap, maxTrapEvents = null) => ({
+    setStopPolicy: (
+        stopOnTrap,
+        maxTrapEvents = null,
+        stallGuard = null,
+    ) => ({
         SetStopPolicy: {
             stop_on_trap: Boolean(stopOnTrap),
             max_trap_events:
                 maxTrapEvents === null || maxTrapEvents === undefined
                     ? null
                     : Number(maxTrapEvents) >>> 0,
+            stall_guard:
+                stallGuard === null || stallGuard === undefined
+                    ? null
+                    : Number(stallGuard) >>> 0,
         },
     }),
     /** `CommandPayload::SetWatchpoint(Watchpoint)`. */
