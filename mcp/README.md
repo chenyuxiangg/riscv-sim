@@ -38,7 +38,10 @@ curl -X POST http://127.0.0.1:18877/images \
 ```
 
 回体 `{ok, bytes, kind, entry, segments, session_id}`，装完即复位到 `entry`。
-`load_image` 仍保留 `hex` / `b64`（小文件）/ `path` 三种入口，工具数还是 9 个。
+
+**装载只有这一条路**（skill 也这么要求）：`load_image` 只在 8 字节基线自检时用 `hex`。
+协议里的 `b64` / `path` 还留着（历史兼容），但不要拿它们装真文件 —— 一个烧上下文，
+一个依赖「文件已经在服务器上」。工具数仍是 9 个。
 
 ## 起了它之后怎么验
 

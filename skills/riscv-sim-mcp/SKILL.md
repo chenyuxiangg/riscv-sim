@@ -42,12 +42,16 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
    0.1.0 是忽略，只能等空闲回收）。`boot` 本身幂等：同板复用回 `reused: true`。
    全机会话池只有 8 个，空闲 5 分钟由服务端自动回收。**不要反复 boot 来「重试」**，
    也不要指望有工具去看别人的会话 —— 看不到，这是设计。
-2. **装的方式按文件大小选，别把 ELF 塞进工具参数。** 三种入口：
-   - `hex` —— 原始字节的十六进制，**不是 Intel HEX 文件**（`.hex` 文本会被 `E_PROTO-08` 拒）；
-   - `b64` —— 几十 KB 以内的小文件；再大就是烧上下文（100 KB 的 ELF base64 后 133 K 字符）；
-   - **`POST /images` 上行** —— 真文件走这条：读本地文件、原始字节直接推，零 token。
-   另有 `path`（服务器 `/data/images` 白名单下的文件）。`name` 的扩展名决定解析：
-   `.bin` = RawHex（一律从 0 起），`.elf` = ELF（带真实 entry 与多段）。
+2. **装固件只有一条路：客户端把文件字节推到 `POST /images`（`--upload`）。**
+   不要用 `hex` / `b64` / `path` 去装真文件 —— 它们要么烧上下文，要么依赖“文件已经在
+   服务器上”这种本 skill 无法验证的前提：
+   - `hex`：只留给 8 字节基线自检（§4），不是装固件的手段；
+   - `b64`：几十 KB 的 ELF 编成上百 K 字符，等于先烧几万 token，还容易截断；
+   - `path`：读的是服务器 `/data/images`，你没法确认里面到底是不是用户那个文件。
+   文件从**你这侧**读、原始字节直接 POST，是这条路唯一的正确形态。
+   `name` 的扩展名决定解析：`.bin` = RawHex（一律从 0 起），`.elf` = ELF（真实 entry、多段），
+   `.hex` 文本（Intel HEX）会被 `E_PROTO-08` 拒。
+
 3. **`advance` 是「恰好 n 条」，`run` 是「跑到停点」。** 想复现就只用 `advance`；
    `run` 默认 5 秒墙钟，撞钟回 `504`，但 **body 仍是完整停点报告** —— 读它，不是报失败。
 
@@ -56,8 +60,8 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 | 工具 | 用途 | 关键参数 |
 |---|---|---|
 | `boot` | 建/复用本客户端会话（**带 board**） | `board`：`qemu-virt` / `default` / `minimal` |
-| `load_image` | 装固件并复位到入口 | `hex` / `b64`（小文件）/ `path`；`name` |
-| `POST /images` | **上行真文件**（HTTP，不是工具） | 头 `x-image-name`，body 原始字节 |
+| `POST /images` | **装固件唯一入口**（HTTP，不是 MCP 工具） | 头 `x-image-name`，body 原始字节 |
+| `load_image` | 只用于 8 字节基线自检 | `hex`（**不装真文件**） |
 | `advance` | 恰好走 n 条 | `n`（1..100000） |
 | `run` | 跑到停点 | `steps` / `timeout_ms` / `prefix`（console 命中）/ `until`（breakpoint\|halt）/ `background` |
 | `poll_job` | 读异步作业 | `job`（`run(background=true)` 回体里的） |
@@ -84,9 +88,9 @@ events since=0                                  → next=4，含 ImageLoaded / S
 这是**验收基线**：跑出 `pc=8 · x5=3` 说明链路（隧道→MCP→server→内核）全通。
 哪一跳不对，先证链路，再怀疑固件。
 
-## 4.5 上传 ELF（客户端手上的文件）
+## 4.5 上传 ELF（**唯一的装载路径**）
 
-MCP 是远端进程，看不见你的磁盘 —— 所以「文件」永远从**你这侧**推过去：
+MCP 是远端进程，看不见你的磁盘 —— 「文件」永远从**你这侧**推过去，一条路，没有分支：
 
 ```
 python3 scripts/sim_call.py --upload ./fw.elf          # 默认 name 取文件名
@@ -133,5 +137,6 @@ entry**，不用再调 `load_image`。
 ## 8. 固件怎么来
 
 MCP 只负责**装**，不负责编。要新固件就在仓库里编（`cargo build` 或
-`riscv64-unknown-elf-gcc -nostdlib`），产出 `.elf` 或裸 `.bin` 再喂 `load_image`。
+`riscv64-unknown-elf-gcc -nostdlib`），产出 `.elf` 或裸 `.bin`，再用 `--upload` 推上去。
+（装固件不走 `load_image`，只有 8 字节基线用 `hex`。）
 8 字节最小样例：`addi x5,x0,2` + `addi x5,x5,1` = `9302200093821200`。

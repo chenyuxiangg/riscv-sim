@@ -85,7 +85,7 @@ events {"since":<next>,"limit":32}   → 继续
 ```
 tools/list                # 先确认有 reset
 reset {}
-load_image {"hex":"...","name":"fw.bin"}
+# 再装一次：sim_call.py --upload ./fw.bin（不调 load_image）
 ```
 
 判据：`tools/list` 里没有 `reset` 就**不要**尝试，直接告诉用户开

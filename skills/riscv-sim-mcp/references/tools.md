@@ -15,9 +15,9 @@
 
 ## load_image
 
-- 参数（四选一的入口）：`hex`（**原始字节**的十六进制字符串，如 `9302200093821200`）/
-  `b64`（文件字节的 base64，**只为小文件**，几十 KB 以内）/ `path`（白名单 `/data/images`
-  下的文件）/ 不用工具而是 `POST /images`（见下节）；`name`（默认 `fw.bin`）
+- **本 skill 只允许一种装载入口：`POST /images`（见下节）。** 这个工具只留 `hex`
+  （8 字节基线自检），协议上还存在 `b64` / `path` 两个参数，但**不要用**：`b64` 烧上下文、
+  `path` 依赖「文件已经在服务器上」这个本 skill 无法核实的前提。
 - 返回：`{name, kind, entry, segments:[{base,size}]}`
 - `name` 的扩展名决定解析：`.bin` ⇒ RawHex，`.elf` ⇒ ELF；**`.hex` 文本会被
   `E_PROTO-08` 拒**（那是 Intel HEX 格式，不是原始字节）
@@ -35,7 +35,7 @@ content-type: application/octet-stream
 ```
 
 - 回体：`{ok, session_id, bytes, name, kind, entry, segments:[{base,size}], pc}`
-- 装完**即复位到 entry**；等价于 `load_image(path=...)` 但你不用先传文件到服务器
+- 装完**即复位到 entry**；不用再调 `load_image`
 - 目标会话必须是本客户端的（先 `boot`）；没有会话回 `409 / E_MCP-02`
 - 上限 `SIM_MCP_MAX_UPLOAD`（默认 16 MiB）：超了 `413 / E_MCP-09`；空 body `400 / E_MCP-08`
 - 为什么不用工具参数：100 KB 的 ELF base64 之后是 133 K 字符，等于把上下文烧光；
@@ -105,7 +105,7 @@ content-type: application/octet-stream
 
 | 码 | 出处 | 含义 / 动作 |
 |---|---|---|
-| `E_MCP-03` | load_image | 既没给 hex 也没给 path，或 hex 不是合法十六进制 |
+| `E_MCP-03` | load_image | 没给 hex（本 skill 唯一的调用形态），或 hex 不是合法十六进制 |
 | `E_MCP-04` | advance | `n` 越界（不在 1..MAX_STEPS） |
 | `E_MCP-05` | poll_job | 缺 `job` |
 | `E_MCP-06` | inspect / disasm | `memory` 缺 `addr`，或 `kind` 不认识 |
