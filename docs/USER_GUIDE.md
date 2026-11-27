@@ -783,6 +783,7 @@ node tools/browser-verify.mjs        # 需要本机 Chrome
 | 搞懂架构 | [`docs/architecture/RISC-V_Architecture_Design.html`](./architecture/RISC-V_Architecture_Design.html)（4+1 视图 + ADR） |
 | 看系统怎么跑起来 | [`docs/architecture/runtime-view.svg`](./architecture/runtime-view.svg)（运行视图：浏览器两种身份 / 服务进程 / 契约接缝；`.png` 同名） |
 | 看部署形态 | [`docs/architecture/deploy-view.svg`](./architecture/deploy-view.svg)（部署视图：一个端口、容器、卷、探针） |
+| 看 AI 怎么接进来 | [`docs/architecture/mcp-view.svg`](./architecture/mcp-view.svg)（MCP 运行视图：客户端 / 隧道 / sim-mcp / 令牌两层；`.png` 同名） |
 | 看需求 | [`docs/requirements/RISC-V_Requirements_v1.4.html`](./requirements/RISC-V_Requirements_v1.4.html) |
 | 看某个模块怎么设计 | [`docs/module-design-spec/RISC-V_Module_Design_Specification.html`](./module-design-spec/RISC-V_Module_Design_Specification.html)（23 模块 LLD）+ [`docs/detailed-design/M-01..M-23_*.html`](./detailed-design/) |
 | 看某一批的规格与裁决 | [`docs/detailed-design/STAGE-1..STAGE-42_*.md`](./detailed-design/)（**41 份**冻结规格） |

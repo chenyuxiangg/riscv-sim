@@ -1,0 +1,59 @@
+# sim-mcp · AI 接入层
+
+把 `riscv_sim` 的 HTTP 面收成 **9 个 MCP 工具**，让 AI（Claude Code / Cursor / 自研 agent）
+能驱动一个真的在跑的仿真器。对应图：`docs/architecture/mcp-view.svg`。
+
+## 它是什么，不是什么
+
+- **是**：一层薄适配。工具只翻译 `Command` 信封的变体，不重新设计能力面。
+- **不是**：第二套 API。仿真器仍然是唯一真相，工具层不认识 HTTP 路由之外的语义。
+- **不是**：公网服务。默认只绑 `127.0.0.1:8877`，靠 SSH 隧道进来。
+
+## 两条令牌，别混
+
+| 令牌 | 谁持有 | 能干什么 |
+|---|---|---|
+| `SIM_TOKEN` | **只有本进程**（env） | 建/删/查所有会话、跑任意固件 |
+| `SIM_MCP_TOKEN` | 客户端 | 只能调 9 个工具，且只见自己的会话 |
+
+启动时若两条令牌相同 ⇒ 直接拒绝启动（那等于把两层凭据退化成一层）。
+
+## 工具面（写细分 / 读合并）
+
+`boot` · `load_image` · `advance` · `run` · `poll_job` · `inspect` · `disasm` · `breakpoints` · `events`
+（`reset` / `drop_session` 属破坏性，需 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册）
+
+`run` 只回 `job`，长任务用 `poll_job` —— 因为 `max_run_ms` 默认 5000，同步等必然撞墙钟。
+
+## 起了它之后怎么验
+
+```bash
+# 本机（或隧道之后）—— 一条命令就是验收线
+python3 tools/check_mcp.py --url http://127.0.0.1:18877/mcp --token "$SIM_MCP_TOKEN"
+```
+
+期望：`装固件 → advance(2) → pc=8 · x5=3`（8 字节 RawHex：`addi x5,x0,2` + `addi x5,x5,1`）。
+
+## 客户端配置（Streamable HTTP）
+
+```json
+{
+  "mcpServers": {
+    "riscv-sim": {
+      "type": "http",
+      "url": "http://127.0.0.1:18877/mcp",
+      "headers": { "Authorization": "Bearer <SIM_MCP_TOKEN>" }
+    }
+  }
+}
+```
+
+客户端不支持自定义 header 时，用退化形态：`http://127.0.0.1:18877/mcp/<SIM_MCP_TOKEN>`。
+隧道：`ssh -f -N -L 18877:127.0.0.1:8877 ali_hy`。
+
+## 不变量（破了就等于没这一层）
+
+1. 客户端永远拿不到 `SIM_TOKEN`；
+2. 一个客户端一个会话，永不 `list` 别人的；
+3. 破坏性工具默认不注册；
+4. 每次调用一行审计（client / tool / 耗时 / 错误码）。

@@ -10,7 +10,7 @@
 <rect width="1700" height="1060" fill="#f5f7fa"/>
 <rect width="1700" height="1060" fill="url(#dots)" opacity="0.9"/>
 <text x="40" y="56" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="25" font-weight="700" fill="#1c2430" text-anchor="start" opacity="1">运行视图 · AI 接入层：MCP 部署在 ali_hy，只经隧道</text>
-<text x="40" y="84" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="400" fill="#61708a" text-anchor="start" opacity="1">实线 = 已在跑（v0.1.1 镜像、隧道已在上一轮实测通过）；虚线 = 尚未存在（sim-mcp 容器）。</text>
+<text x="40" y="84" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="400" fill="#61708a" text-anchor="start" opacity="1">实线 = 已在跑（riscv-sim v0.1.1 · sim-mcp 0.1.0，两者都已在 ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。</text>
 <text x="40" y="102" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="400" fill="#61708a" text-anchor="start" opacity="1">AI 只看得见工具，看不见 8876，也拿不到 SIM_TOKEN —— 这条边界是整张图的重点。</text>
 <text x="1660" y="56" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5" font-weight="400" fill="#8a97a8" text-anchor="end" opacity="1">front/ · crates/{kernel,contract,server} · sim-mcp(待建)</text>
 <rect x="40" y="118" width="424" height="618" rx="10" ry="10" fill="#ffffff" stroke="#a9b9cd" stroke-width="1.8" opacity="1"/>
@@ -33,9 +33,9 @@
 <text x="71" y="482" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">没有 8876 直连（那条是浏览器老路径，与 AI 无关）</text>
 <text x="71" y="499" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">没有 Docker 引擎 —— Mac 上跑不了镜像，验证只在 ali_hy</text>
 <rect x="58" y="542" width="388" height="96" rx="10" ry="10" fill="#fbfcfe" stroke="#cdd5e0" stroke-width="1.4" opacity="1"/>
-<text x="71" y="564" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">验收线（一条就够）</text>
-<text x="71" y="581" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#243043" text-anchor="start" opacity="1">装 8 字节 RawHex 固件 → advance 5 次</text>
-<text x="71" y="598" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">→ 工具回 pc 与 x5 的真实值，中途不被你纠正</text>
+<text x="71" y="564" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">验收线（已通过）</text>
+<text x="71" y="581" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#243043" text-anchor="start" opacity="1">装 8 字节 RawHex 固件 → advance 2 次</text>
+<text x="71" y="598" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">→ 工具回 pc=8 · x5=3，中途没被纠正</text>
 <rect x="58" y="638" width="388" height="82" rx="10" ry="10" fill="#fbfbfc" stroke="#c8ced8" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
 <text x="71" y="660" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">隧道给的是「先验身份」</text>
 <text x="71" y="677" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#243043" text-anchor="start" opacity="1">能开隧道 = 有这台机器 SSH key 的人</text>
@@ -45,14 +45,14 @@
 <text x="508" y="254" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="9.8" font-weight="400" fill="#5b6b7f" text-anchor="middle" opacity="1">HTTP · Bearer</text>
 <rect x="552" y="118" width="736" height="618" rx="10" ry="10" fill="#ffffff" stroke="#7c8ea6" stroke-width="1.8" opacity="1"/>
 <text x="572" y="146" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="14.5" font-weight="700" fill="#243043" text-anchor="start" opacity="1">B · ali_hy　8.155.139.119（Ubuntu 22.04 / Docker 29.9.3）</text>
-<rect x="570" y="162" width="700" height="292" rx="10" ry="10" fill="#faf9ff" stroke="#b9a8dd" stroke-width="1.8" stroke-dasharray="7 5" opacity="1"/>
-<text x="584" y="186" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="13" font-weight="700" fill="#4a3f66" text-anchor="start" opacity="1">容器 sim-mcp（待建 · 只绑 127.0.0.1:8877）</text>
-<rect x="584" y="198" width="328" height="104" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
+<rect x="570" y="162" width="700" height="292" rx="10" ry="10" fill="#faf9ff" stroke="#8f74c9" stroke-width="1.8" opacity="1"/>
+<text x="584" y="186" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="13" font-weight="700" fill="#4a3f66" text-anchor="start" opacity="1">容器 sim-mcp（已部署 0.1.0 · 只绑 127.0.0.1:8877）</text>
+<rect x="584" y="198" width="328" height="104" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" opacity="1"/>
 <text x="597" y="220" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">入口与鉴权</text>
 <text x="597" y="237" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">只绑回环 127.0.0.1:8877，公网没有这个口</text>
 <text x="597" y="254" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">Bearer &lt;MCP token&gt;；退化 /mcp/&lt;token&gt;</text>
 <text x="597" y="271" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">一条令牌，无角色、无过期（不是 OAuth）</text>
-<rect x="928" y="198" width="328" height="104" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
+<rect x="928" y="198" width="328" height="104" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" opacity="1"/>
 <text x="941" y="220" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">会话归属表（隔离的唯一手段）</text>
 <text x="941" y="237" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">client_id → session_id，一客户端 1 个</text>
 <text x="941" y="254" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">boot 只建自己的，空闲 5 min 主动 DELETE</text>
@@ -63,7 +63,7 @@
 <text x="597" y="370" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">inspect(kind) · disasm · breakpoints · events</text>
 <text x="597" y="387" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">读合并、写细分；只认 Command 变体（不认路由）</text>
 <text x="597" y="404" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">返回人读摘要 + 机器字段（不倒 32 个寄存器）</text>
-<rect x="928" y="314" width="328" height="128" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
+<rect x="928" y="314" width="328" height="128" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" opacity="1"/>
 <text x="941" y="336" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">闸门与审计</text>
 <text x="941" y="353" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">破坏性工具默认不注册（要显式开环境变量）</text>
 <text x="941" y="370" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">max_run_ms 封顶 5000，客户端不能抬价</text>
@@ -127,10 +127,10 @@
 <text x="603" y="918" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">所以 run 只回 job_id，poll_job 去拉 /jobs/{job}</text>
 <text x="603" y="935" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">事件用 events(since_seq) 补，不靠长连 WS（隧道会断）</text>
 <text x="603" y="952" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">隧道断开 = 连接错误；仿真器异常 = 工具回结构化错误码</text>
-<rect x="1140" y="862" width="520" height="150" rx="10" ry="10" fill="#fbfbfc" stroke="#c8ced8" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
+<rect x="1140" y="862" width="520" height="150" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" opacity="1"/>
 <text x="1153" y="884" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">三、现在到哪一步</text>
-<text x="1153" y="901" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#243043" text-anchor="start" opacity="1">已跑通：riscv-sim v0.1.1 healthy、8876 公网可访问</text>
-<text x="1153" y="918" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">已验证：隧道 1887x → 8876 的等价路径（上一轮实测）</text>
-<text x="1153" y="935" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">待建：sim-mcp 容器（图上虚线）+ 9 工具 + 审计</text>
-<text x="1153" y="952" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">验收：装固件 → advance 5 → 报出 pc 与 x5，无需纠正</text>
+<text x="1153" y="901" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#243043" text-anchor="start" opacity="1">已跑通：riscv-sim v0.1.1（8876 公网）· sim-mcp 0.1.0（8877 仅回环）</text>
+<text x="1153" y="918" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">已验收：隧道内 check_mcp ⇒ 装固件 · advance(2) · pc=8 · x5=3</text>
+<text x="1153" y="935" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">审计已生效：docker logs sim-mcp 一行一调用（client/tool/耗时/码）</text>
+<text x="1153" y="952" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">待做：多客户端并发压测、MCP 并进 Rust 单二进制</text>
 </svg>
