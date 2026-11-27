@@ -10,7 +10,7 @@
 <rect width="1700" height="1060" fill="#f5f7fa"/>
 <rect width="1700" height="1060" fill="url(#dots)" opacity="0.9"/>
 <text x="40" y="56" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="25" font-weight="700" fill="#1c2430" text-anchor="start" opacity="1">运行视图 · AI 接入层：MCP 部署在 ali_hy，只经隧道</text>
-<text x="40" y="84" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="400" fill="#61708a" text-anchor="start" opacity="1">实线 = 已在跑（单镜像 riscv-sim:allinone：v0.1.1 二进制 + sim-mcp 0.1.0，ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。</text>
+<text x="40" y="84" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="400" fill="#61708a" text-anchor="start" opacity="1">实线 = 已在跑（单镜像 riscv_sim：服务端 + sim-mcp 0.1.0，ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。</text>
 <text x="40" y="102" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="400" fill="#61708a" text-anchor="start" opacity="1">AI 只看得见工具，看不见 8876，也拿不到 SIM_TOKEN —— 这条边界是整张图的重点。</text>
 <text x="1660" y="56" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5" font-weight="400" fill="#8a97a8" text-anchor="end" opacity="1">front/ · crates/{kernel,contract,server} · sim-mcp 已合体</text>
 <rect x="40" y="118" width="424" height="618" rx="10" ry="10" fill="#ffffff" stroke="#a9b9cd" stroke-width="1.8" opacity="1"/>
@@ -130,7 +130,7 @@
 <text x="603" y="969" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">一容器两进程 ⇒ 任一退出整容器重启（不做进程级自愈）</text>
 <rect x="1140" y="862" width="520" height="150" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.4" opacity="1"/>
 <text x="1153" y="884" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">三、现在到哪一步</text>
-<text x="1153" y="901" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#243043" text-anchor="start" opacity="1">已合体：riscv-sim:allinone（192MB，两进程一容器，healthy）</text>
+<text x="1153" y="901" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#243043" text-anchor="start" opacity="1">已合体：riscv_sim 单镜像（192MB，两进程一容器，healthy）</text>
 <text x="1153" y="918" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">已验收：隧道内 check_mcp ⇒ 装固件 · advance(2) · pc=8 · x5=3</text>
 <text x="1153" y="935" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">审计已生效：docker logs riscv-sim 一行一调用（client/tool/耗时/码）</text>
 <text x="1153" y="952" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.8" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">待做：多客户端并发压测、MCP 并进 Rust 单二进制</text>

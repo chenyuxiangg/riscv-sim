@@ -12,7 +12,7 @@
 ⚠️ 图上的事实来源（不要在描述里加没验证过的东西）：
    - riscv-sim 容器：镜像 v0.1.1、0.0.0.0:8876、healthy（ali_hy 实测）
    - 会话池：max_sessions=8 / session_ttl=900s / max_run_ms=5000（config.rs 常量）
-   - sim-mcp 容器：**尚未存在**，图中一律虚线
+   - sim-mcp：**已与 sim 同容器**（单镜像 riscv_sim）
 """
 from html import escape
 from unicodedata import east_asian_width
@@ -112,7 +112,7 @@ svg.append(f'<rect width="{W}" height="{H}" fill="url(#dots)" opacity="0.9"/>')
 
 # ------------------------------------------------------------------ 标题
 svg.append(text(40, 56, "运行视图 · AI 接入层：MCP 部署在 ali_hy，只经隧道", 25, 700))
-svg.append(text(40, 84, "实线 = 已在跑（单镜像 riscv-sim:allinone：v0.1.1 二进制 + sim-mcp 0.1.0，ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。", 12.5, 400, "#61708a"))
+svg.append(text(40, 84, "实线 = 已在跑（单镜像 riscv_sim：服务端 + sim-mcp 0.1.0，ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。", 12.5, 400, "#61708a"))
 svg.append(text(40, 102, "AI 只看得见工具，看不见 8876，也拿不到 SIM_TOKEN —— 这条边界是整张图的重点。", 12.5, 400, "#61708a"))
 svg.append(text(W - 40, 56, "front/ · crates/{kernel,contract,server} · sim-mcp 已合体", 11.5, 400, "#8a97a8", anchor="end", mono=True))
 
@@ -270,7 +270,7 @@ svg.append(card(590, 862, 520, 150, "二、长任务与「仿真器坏了」的�
 ], fill="#ffffff", stroke="#c3cedb", size=10.8))
 
 svg.append(card(1140, 862, 520, 150, "三、现在到哪一步", [
-    "已合体：riscv-sim:allinone（192MB，两进程一容器，healthy）",
+    "已合体：riscv_sim 单镜像（192MB，两进程一容器，healthy）",
     "已验收：隧道内 check_mcp ⇒ 装固件 · advance(2) · pc=8 · x5=3",
     "审计已生效：docker logs riscv-sim 一行一调用（client/tool/耗时/码）",
     "待做：多客户端并发压测、MCP 并进 Rust 单二进制",

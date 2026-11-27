@@ -89,14 +89,22 @@ http://localhost:8876/?token=<随机生成的令牌>
 
 常用子命令：`./deploy.sh rebuild`（改了代码/前端后重建）、`down`（停，数据卷保留）、`logs`、`ps`。
 
-**单镜像形态（sim + mcp 一个容器）**：`Dockerfile.allinone` 把 MCP 层合进主镜像 ——
-一条 `docker run` 带 `-e SIM_MCP_TOKEN` 就同时起服务端与 MCP，容器内 MCP 走回环
-`127.0.0.1:9876`，宿主侧只把 `8877` 发布到回环（公网仍然没有这个端口，AI 走
-`ssh -L 18877:127.0.0.1:8877` 进来）。它是**合成口径**：复用已发布镜像里的
-`riscv_sim_server` 与 `front/`，不重编 Rust（ali_hy 上 `cargo build --locked` 会卡在
-依赖下载）；`Dockerfile` 仍是发布口径（源码编译 + CI 出 v0.1.x）。
-CI 会把这个形态也推到 ACR（`sha-<7>-mcp` / `mcp-latest` / `<tag>-mcp`），服务器侧只需 `docker pull`。
-两个进程的生死由一个 `docker/supervise.sh` 管：**任一退出 ⇒ 整个容器退出**，交给
+**单镜像形态（sim + mcp 一个容器）**：`Dockerfile` 本身就是单镜像 —— 构建阶段出
+服务端二进制，运行阶段是 `python:3.12-slim-bookworm`（多一个 python3 给 MCP），
+`COPY` 进 `mcp/server.py`，由 `docker/supervise.sh` 起两个进程：服务端
+`0.0.0.0:9876`、MCP `0.0.0.0:8877`（容器内回环私有口，MCP 就指向 `127.0.0.1:9876`）。
+宿主侧只把 `8877` 发布到 **127.0.0.1** ⇒ 公网仍然没有这个端口，AI 走
+`ssh -L 18877:127.0.0.1:8877` 进来。
+
+镜像名固定 `riscv_sim`，标签只有三条：
+
+| 标签 | 什么时候出现 | 用途 |
+|---|---|---|
+| `sha-<7>` | 每次构建 | 服务器按摘要部署（可复现） |
+| `<git tag>`（如 `v0.1.3`） | 每次 release | 每个版本一份自己的镜像，永不覆盖 |
+| `latest` | **只在打 tag 时** | 永远等于最新的那个 release |
+
+两个进程的生死由 `docker/supervise.sh` 管：**任一退出 ⇒ 整个容器退出**，交给
 `--restart unless-stopped`，不做进程级自愈（半死不活的容器比直接重启更难查）。
 
 整张图在 [`docs/architecture/deploy-view.svg`](./architecture/deploy-view.svg)（同名 `.png` 供直接看）：浏览器 → 宿主 `8876` → 容器 `9876` → 进程（静态托管 / API / 会话线程 / 内核），以及卷与健康检查的位置。

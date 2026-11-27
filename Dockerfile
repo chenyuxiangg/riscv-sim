@@ -1,14 +1,19 @@
 # syntax=docker/dockerfile:1.6
 #
-# 单容器 / 单端口：**页面与 API 同一个 origin**（`--front-dir`）。
+# 单镜像：**服务端 + sim-mcp 两个进程**，一条 `docker run` 起两件事。
 #
-#   docker build -t riscv-sim-server .          # 或 ./deploy.sh（推荐）
+#   docker build -t riscv-sim .          # 或 ./deploy.sh（推荐）
 #
 # 为什么只有一个容器：
 #   - `front/` 是**零构建**的 ES module（没有 npm 依赖、没有打包步骤）⇒ 直接
 #     `COPY front` 就是可用的页面；
 #   - 服务端用 `--front-dir` 自己托管它 ⇒ 不需要 nginx、不需要 CORS 白名单、
-#     用户在浏览器里只需要一个地址。
+#     用户在浏览器里只需要一个地址；
+#   - sim-mcp 只是服务端 HTTP 面的一层适配（`mcp/server.py`，纯标准库）⇒ 与它
+#     同容器、走回环 `127.0.0.1:9876`，省掉第二个镜像、第二份令牌、第二套重启策略。
+#
+# ⚠️ 两个进程的生死由 `docker/supervise.sh` 管：任一退出 ⇒ 整个容器退出 ⇒ 交给
+#    `--restart`。不做进程级自愈 —— 半死不活的容器比直接重启更难查。
 #
 # ⚠️ WASM 内核**不**打进镜像（默认形态）：本镜像的页面走 **server 模式**
 #    （内核在容器里，native）。要离线单机模式请先 `tools/build-wasm.sh`，
@@ -32,7 +37,7 @@ RUN cargo build --locked --release -p riscv_sim_server \
 # ---------------------------------------------------------------------------
 # ⚠️ 运行层用 `python:3.12-slim-bookworm` 而不是 `debian:bookworm-slim` + apt：
 #    mcp/server.py 是**纯标准库**，镜像里只需要一个 python3；用 python 基础镜像
-#    就省掉 `apt-get update` 这一步。这不只是省事：2026-11-27 在 ali_hy 上
+#    就省掉 `apt-get update`。这不只是省事：2026-11-27 在 ali_hy 上
 #    `apt-get update` 因 bookworm 仓库签名公钥缺失直接失败（NO_PUBKEY），
 #    用 apt 的镜像连构建都起不来；不碰 apt 就没有这个外部依赖。
 #    两个镜像同为 bookworm，构建产物（glibc 链接的服务端二进制）兼容。
@@ -73,8 +78,9 @@ ENV SIM_BIND=0.0.0.0 \
 # 但**宿主侧只发布 127.0.0.1** ⇒ 公网仍然没有这个端口，AI 走 SSH 隧道进来。
 EXPOSE 9876 8877
 
-# 探针打两边的 `/healthz`（都不校验令牌：编排系统没有令牌，也不该有）。
-# 只探服务端等于允许「页面能开、AI 连不上」的状态，所以两个都要探。
+# 探针打两边 `/healthz`（都不校验令牌：编排系统没有令牌，也不该有）。
+# 只探服务端等于允许「页面能开、AI 连不上」的状态；MCP 的 /healthz 还会探上游，
+# 配错地址时回 503 —— 「起得来、干不了活」也能被抓住。
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["python3", "/usr/local/bin/sim-healthcheck"]
 
