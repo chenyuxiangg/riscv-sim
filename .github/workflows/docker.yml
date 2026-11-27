@@ -154,12 +154,3 @@ jobs:
           first="$(echo '${{ steps.tags.outputs.tags }}' | cut -d, -f1)"
           docker buildx imagetools inspect "$first" | sed -n 1,12p
 
-      # 把 ACR 收敛成「只有带 mcp 的单镜像」：删滚动别名（mcp-latest）、删 -mcp 后缀、
-      # 删单镜像时代之前的纯服务端版本。清理失败不让发布变红（个人版删除 API 有差异），
-      # 只把清单打出来。
-      - name: 收敛 ACR 标签（只留单镜像版本）
-        env:
-          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
-        run: python3 tools/prune_acr_tags.py "${GITHUB_SHA::7}"
-        continue-on-error: true
