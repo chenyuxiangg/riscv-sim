@@ -9,7 +9,7 @@ name: Docker image
 #
 # 触发：
 #   - 推一个 git tag（`v*`）⇒ 顺带打上该 tag 名；
-#   - Actions 页面手动 Run workflow（默认推 latest + sha）。
+#   - Actions 页面手动 Run workflow（只推 sha；latest 只跟 release 走）。
 #
 # ⚠️ 仓库要先在 ACR 控制台建好（命名空间 / 仓库名 / 公开），CI 只能往里推，不能建仓库。
 #
@@ -24,11 +24,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      push_latest:
-        description: "同时推 latest（关掉就只推 sha）"
-        type: boolean
-        default: true
 
 env:
   REGISTRY: crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com
