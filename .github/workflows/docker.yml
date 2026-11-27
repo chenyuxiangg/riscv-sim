@@ -1,6 +1,9 @@
 name: Docker image
 
-# 构建并推送服务端镜像到阿里云个人版 ACR。
+# 构建并推送服务端镜像到阿里云个人版 ACR（两种形态）：
+#   1. `sha-<7>` / `latest` / `<git tag>`      —— 只有服务端 + 页面（发布口径，源码编译）
+#   2. `sha-<7>-mcp` / `mcp-latest` / `<tag>-mcp` —— 单镜像：服务端 + sim-mcp 两进程
+#      它 FROM 上面那个刚推上去的镜像（复用同一份二进制），只加 python + MCP 层。
 #
 # 触发：
 #   - 推一个 git tag（`v*`）⇒ 顺带打上该 tag 名；
@@ -141,8 +144,45 @@ jobs:
             docker push "${IMAGE}:${t}"
           done
 
+      # ---------------------------------------------------------------
+      # 单镜像（sim + sim-mcp）：一条 docker run 两个进程。
+      #
+      # ⚠️ 二进制来源是**刚刚推上去的 sha-<short>**，不是本机 daemon 里的镜像：
+      #    buildx 的 container driver 看不见 daemon 的镜像（`--load` 只是拷回来），
+      #    FROM 一个本地 tag 会以「pull access denied」红灯。走 ACR 还有个好处：
+      #    合成镜像里的二进制与已发布镜像**同一个 digest**，不会「看起来一样、
+      #    实际编了两遍」。
+      - name: 构建 ⑤ 单镜像（sim + mcp，复用刚推的 sha 作为二进制来源）
+        run: |
+          set -eu
+          short="${GITHUB_SHA::7}"
+          docker buildx build --platform linux/amd64 \
+            --build-arg SERVER_IMAGE="${IMAGE}:sha-${short}" \
+            --load -f Dockerfile.allinone -t riscv-sim:allinone .
+
+      # 两个失效面都要探：「页面能开但 AI 连不上」「MCP 连的是宿主端口」
+      - name: 构建 ⑤b 单镜像冒烟（模块图 + MCP 两端口 + 上游指向容器内）
+        run: python3 tools/check_image_allinone.py riscv-sim:allinone
+
+      - name: 构建 ⑥ 单镜像打标签并推 ACR
+        run: |
+          set -eu
+          short="${GITHUB_SHA::7}"
+          tags="sha-${short}-mcp,mcp-latest"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tags="${tags},${GITHUB_REF_NAME}-mcp"
+          fi
+          echo "本次推送：${tags}"
+          for t in $(echo "$tags" | tr ',' ' '); do
+            docker tag riscv-sim:allinone "${IMAGE}:${t}"
+            docker push "${IMAGE}:${t}"
+          done
+
       - name: 回读一次（确认真推上去了，而不是「构建成功但推送失败」）
         run: |
           set -eu
           first="$(echo '${{ steps.tags.outputs.tags }}' | cut -d, -f1)"
           docker buildx imagetools inspect "$first" | sed -n 1,12p
+          short="${GITHUB_SHA::7}"
+          echo "--- 单镜像 ---"
+          docker buildx imagetools inspect "${IMAGE}:sha-${short}-mcp" | sed -n 1,12p
