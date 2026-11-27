@@ -30,13 +30,19 @@
 配额；换工程 / 卸载回默认。看异常路径的标准套路：
 
 ```
-stop_policy {"stop_on_trap": false, "max_trap_events": 1024}
+stop_policy {"stop_on_trap": false, "max_trap_events": 1024, "stall_guard": 32}
 run          {"prefix": "[SZTEST] end", "steps": 8000000}
 ```
 
-停在统计阈值后，`run` 回体的 `stop_reason` 与停点一起给出；事件流里有
-`TrapSummary {count, first_cause, first_mepc, first_mtvec_target}`（默认策略下**不发**）。
-中断不进这条逻辑。
+`stall_guard`（B-2 · 异常连环守卫）是可选阈值：同一 `(mcause, mepc)` 连续陷到 N 次
+（N ≥ 2）就报 `E_ENG-04` 中止这一批 —— 意思是 handler 一直在把程序送回故障点，
+**跨批处理窗口累计**（窗口边界不清零），所以比配额早得多、也省得多（配额 1024 ×
+每条 handler 十几条 = 十几万条指令）。只对同步异常生效，中断不进。
+
+停在统计阈值后，`run` 回体的 `stop_reason` 与停点一起给出；**平台中止**（`E_ENG-03`
+无进展 / `E_ENG-04` 异常连环）回体是 `stop_reason="error"` + `error_code`，不要读成
+`halt` —— 那不是 guest 停点。事件流里有 `TrapSummary {count, first_cause, first_mepc,
+first_mtvec_target}`（默认策略下**不发**）。
 
 ## 客户端手上的 ELF 怎么装（文件上行）
 

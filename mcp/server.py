@@ -327,9 +327,14 @@ def t_run(client: str, args: dict) -> dict:
         return {"text": f"已提交异步作业 {job}（之后用 poll_job 取结果）", "data": body}
     status, body, _ = _http("POST", f"/api/sessions/{sid}/run", body=req, timeout=MAX_RUN_MS / 1000 + 15)
     note = "（撞墙钟已熔断，但停点信息如下）" if status == 504 else ""
+    # 平台主动中止（E_ENG-03 无进展 / E_ENG-04 异常连环）⇒ 回体带
+    # `stop_reason="error"` + `error_code`：这不是 guest 停点，必须显式说清。
+    error = body.get("error_code")
+    tail = (f"；内核报错 {error}（平台中止，不是 guest 停）"
+            if error else "")
     return {
         "text": (f"{note}执行 {body.get('executed')} 条 · pc={body.get('pc')} · "
-                 f"t_ps={body.get('t_ps')} · 停因 {body.get('stop_reason')}"),
+                 f"t_ps={body.get('t_ps')} · 停因 {body.get('stop_reason')}{tail}"),
         "data": body,
     }
 
@@ -341,6 +346,15 @@ def t_stop_policy(client: str, args: dict) -> dict:
                        "要显式给 stop_on_trap（true=陷阱交付即停；false=继续跑，但要配额）", 400)
     stop_on_trap = bool(args["stop_on_trap"])
     quota = args.get("max_trap_events")
+    stall_guard = args.get("stall_guard")
+    if stall_guard is not None:
+        stall_guard = int(stall_guard)
+        if stall_guard < 2:
+            raise SimError("E_MCP-07", "stall_guard 必须 >= 2（1 等于「每次都算连环」）", 400)
+        if stop_on_trap:
+            raise SimError("E_MCP-07",
+                           "stall_guard 只在 stop_on_trap=false 时有用"
+                           "（true 时第一个陷阱就停了，没有连环可数）", 400)
     if quota is not None:
         quota = int(quota)
         if quota < 1:
@@ -352,15 +366,21 @@ def t_stop_policy(client: str, args: dict) -> dict:
     body = _contract_command(sid, {"SetStopPolicy": {
         "stop_on_trap": stop_on_trap,
         "max_trap_events": quota,
+        "stall_guard": stall_guard,
     }})
     if stop_on_trap:
         text = "停止策略：陷阱**交付即停**（默认 · 与改动前逐字节一致）"
     else:
         text = (f"停止策略：陷阱**不**停，最多跑 {quota} 个后停"
                 "（只算同步异常；中断不进这条逻辑）")
+        if stall_guard is not None:
+            text += (f"；连环守卫：同一 (cause, mepc) 连陷 {stall_guard} 次"
+                     "即报 E_ENG-04 中止这一批"
+                     "（跨窗口累计 ⇒ 比配额早得多，也更准）")
     return {
         "text": text + " · 会话级粘性：换工程 / 卸载回默认",
-        "data": {"stop_on_trap": stop_on_trap, "max_trap_events": quota, "frames": body.get("frames")},
+        "data": {"stop_on_trap": stop_on_trap, "max_trap_events": quota,
+                 "stall_guard": stall_guard, "frames": body.get("frames")},
     }
 
 
@@ -566,8 +586,11 @@ TOOLS = [
     },
     {
         "name": "stop_policy",
-        "description": ("会话级陷阱交付策略（R-1）：stop_on_trap=true 交付即停（默认），"
+        "description": ("会话级陷阱交付策略（R-1）＋异常连环守卫（B-2）："
+                        "stop_on_trap=true 交付即停（默认），"
                         "false 则陷阱继续跑、按 max_trap_events 配额停（**必须**同时给配额）。"
+                        "可选 stall_guard=N：同一 (cause, mepc) 连续陷 N 次就报 E_ENG-04 中止"
+                        "（跨窗口累计；handler 没让程序走出故障点 ⇒ 比配额早停、且更省指令）。"
                         "只作用同步异常（野指针 / 非法指令 / 缺页），中断不进这条逻辑；"
                         "换工程 / 卸载回默认。"),
         "inputSchema": {
@@ -575,6 +598,7 @@ TOOLS = [
             "properties": {
                 "stop_on_trap": {"type": "boolean", "description": "true=交付即停（默认）；false=继续跑"},
                 "max_trap_events": {"type": "integer", "description": "配额（一次批处理窗口内最多几个陷阱）；stop_on_trap=false 时必填"},
+                "stall_guard": {"type": "integer", "description": "连环守卫阈值（>=2）：同一 (cause, mepc) 连陷 N 次 ⇒ E_ENG-04；只在 stop_on_trap=false 时有效，省略=关"},
             },
             "required": ["stop_on_trap"],
         },
@@ -686,7 +710,7 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         return _rpc_result(msg_id, {
             "protocolVersion": PROTOCOL if asked != PROTOCOL else asked,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "sim-mcp", "version": "0.1.3"},
+            "serverInfo": {"name": "sim-mcp", "version": "0.1.4"},
             "instructions": ("先 boot，再 load_image(hex=原始字节的十六进制)，然后 advance(n)。"
                              "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"),
         })
@@ -741,7 +765,7 @@ def _client_id(token: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "sim-mcp/0.1.3"
+    server_version = "sim-mcp/0.1.4"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:  # 默认 access log 太吵，审计另有

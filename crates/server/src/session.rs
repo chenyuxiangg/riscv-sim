@@ -1546,6 +1546,14 @@ fn execute_run(
     let mut tail: Vec<u8> = Vec::new();
     // `until=breakpoint` 连续「不算数」的停点次数（兜底，见下）。
     let mut skips: u32 = 0;
+    // ---- 平台侧错误（E_ENG-03 无进展 / E_ENG-04 异常连环 / E_BUS-01 …）----
+    //
+    // ⚠️ 内核把这几种「主动中止这一批」的信号放在**事件流**里（`Error`），
+    //   回体却只说 `halt`/`budget` ⇒ ⇒ 客户端会把「平台中止」读成「guest
+    //   停下」。这里把本窗口新增事件里的第一个错误码提出来，直接收工并
+    //   写进回体（`stop_reason = "error"`），不要再继续循环（守卫到阈值
+    //   之后每一步都会再命中，继续跑只会再撞同一个错误）。
+    let mut error_code: Option<String> = None;
 
     // ⚠️ 停因**只**由 `break <label>` 交付（带值 break）⇒ ⇒ 不存在「先给个
     //    初值再覆盖」那种永远不会被读到的赋值；也省掉末尾 `unwrap_or` 兜底
@@ -1565,9 +1573,20 @@ fn execute_run(
         };
         let report = host.run_until(chunk, timeout_arg, pause_requested);
         // ⚠️ 每个窗口**立刻**把字节搬进会话环：内核捕获环有界，攒着会丢。
-        events_ring.push(&host.take_pending_events());
+        let pending = host.take_pending_events();
+        if error_code.is_none() {
+            error_code = pending.iter().find_map(|event| match event {
+                EventPayload::Error { code, .. } => Some(code.clone()),
+                _ => None,
+            });
+        }
+        events_ring.push(&pending);
         let drained = host.drain_console();
         console.push(&drained);
+        // 平台错误 ⇒ 这一批已经中止，立刻收工（**不**回滚、不假装是停点）。
+        if error_code.is_some() {
+            break "error";
+        }
 
         // ---- 前缀观察（只在服务端发生，停因仍由内核给）----
         let mut hit_prefix = false;
@@ -1652,6 +1671,9 @@ fn execute_run(
         "budget_exhausted": stop == "budget",
         "budget_steps": RUN_PREFIX_DEFAULT_BUDGET,
     });
+    if let Some(code) = &error_code {
+        body["error_code"] = serde_json::json!(code);
+    }
     // 断点命中：按 pc 去权威表里找（`Halted` 只带 pc，不带 id）。
     if body.get("stop_reason").and_then(|v| v.as_str()) == Some("breakpoint") {
         let pc = host.pc();
@@ -2622,6 +2644,74 @@ mod tests {
         );
         // R-05：回体带虚拟时间。
         assert!(report.get("t_ps").and_then(|v| v.as_u64()).is_some());
+    }
+
+    /// B-2 异常连环守卫：内核**主动中止**这一批时，回体必须说 `error` + 错误码，
+    /// 不许只说 `halt`。
+    ///
+    /// ⚠️ 背景：`RunStop` 里没有 `Error` 变体（错误只走事件流的 `Error`），
+    /// 窗口循环随后补一个 `Halted(EndOfExecution)` ⇒ ⇒ 不翻译的话客户端会把
+    /// 「平台中止（E_ENG-04）」读成「guest 停下来了」。
+    #[test]
+    fn run_reports_a_platform_error_abort_instead_of_a_halt() {
+        let registry = registry();
+        let info = registry
+            .create(Some("qemu-virt".to_string()), BoardSource::Request)
+            .unwrap();
+        let id = info.id.clone();
+        // 非法指令 @0x0c ⇒ handler 在 0x10 也非法 ⇒ 同一 (cause, mepc) 连环。
+        let program = vec![
+            0x97, 0x02, 0x00, 0x00, // 0x00  auipc x5, 0
+            0x93, 0x82, 0x02, 0x01, // 0x04  addi  x5, x5, 16
+            0x73, 0x90, 0x52, 0x30, // 0x08  csrrw x0, mtvec, x5
+            0x00, 0x00, 0x00, 0x00, // 0x0c  非法指令
+            0x00, 0x00, 0x00, 0x00, // 0x10  非法指令（handler）
+        ];
+        registry
+            .load_image(&id, "storm.bin".to_string(), ImageKind::RawHex, program)
+            .expect("装载陷阱连环镜像");
+        registry
+            .contract(
+                &id,
+                Message::command(
+                    0,
+                    CommandPayload::SetStopPolicy {
+                        stop_on_trap: false,
+                        max_trap_events: Some(1_000),
+                        stall_guard: Some(3),
+                    },
+                ),
+                Some(1),
+            )
+            .expect("设策略必须成功");
+
+        let report = registry
+            .run(
+                &id,
+                RunSpec {
+                    steps: Some(1_000),
+                    ..RunSpec::default()
+                },
+            )
+            .expect("run 必须返回（中止是回体信息，不是 HTTP 错误）");
+        assert_eq!(
+            report.get("stop_reason").and_then(|v| v.as_str()),
+            Some("error"),
+            "平台中止必须报 error，不许伪装成 halt：{report}"
+        );
+        assert_eq!(
+            report.get("error_code").and_then(|v| v.as_str()),
+            Some("E_ENG-04"),
+            "回体要带内核的错误码：{report}"
+        );
+        assert!(
+            report
+                .get("executed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(u64::MAX)
+                < 10,
+            "连环守卫必须远早于配额（1000）就停：{report}"
+        );
     }
 
     /// 复位（R-14）：回到装载起点 —— pc 回 entry、已执行条数归零。

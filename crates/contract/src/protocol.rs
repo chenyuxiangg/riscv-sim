@@ -152,7 +152,19 @@ pub enum CommandPayload {
     ///
     /// ⚠️ 策略是**会话级粘性**的：设一次，之后的 `Continue` / `StepN` /
     /// `StepOver` 都按它判；`LoadProject` 把它**重置**为默认
-    /// （`stop_on_trap: true`、`max_trap_events: None`）。
+    /// （`stop_on_trap: true`、`max_trap_events: None`、`stall_guard: None`）。
+    ///
+    /// ⚠️ `stall_guard`（**异常连环守卫**，P2 · B-2）只在
+    /// `stop_on_trap = false` 时有意义：连续 N 次出现**同一 `mcause` +
+    /// 同一 `mepc`** ⇒ 判定「handler 没让程序走出这个故障点」⇒ 内核**中止**
+    /// 并报 `E_ENG-04`（平台错误，**不是** guest 停）。它的计数**跨批处理
+    /// 窗口持久**（不像 `max_trap_events` 那样每窗口清零）—— 一次 `run`
+    /// 内部的窗口边界不清账，否则守卫看不见跨窗口的连环。
+    ///
+    /// 为什么不靠 `max_trap_events` 兜底：配额只数**次数**、不认**结构**，
+    /// 给小了会把「正常的多次异常」误杀，给大了要烧到十几万条预算才知道
+    /// 是死循环；守卫在第 N 次就停，且报出来的是「异常连环」而不是
+    /// 「预算用尽」。
     SetStopPolicy {
         /// `true`（默认）= 与改动前逐字节一致：交付完就停。
         /// `false` = 交付后继续在 `mtvec` 处取指。
@@ -161,6 +173,11 @@ pub enum CommandPayload {
         /// `Halted { reason: Trap }` 收尾。`stop_on_trap = false` 时必填。
         #[serde(default)]
         max_trap_events: Option<u32>,
+        /// 异常连环阈值 N（`>= 2`）：同一 `(mcause, mepc)` 连续出现 N 次
+        /// ⇒ 报 `E_ENG-04` 中止。缺省 `None` = 关（配额是唯一兜底）；
+        /// 只在 `stop_on_trap = false` 时可用（`true` 时内核拒绝）。
+        #[serde(default)]
+        stall_guard: Option<u32>,
     },
     /// Request a pause.
     ///

@@ -616,9 +616,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 Backtrace: Command.backtrace(),
                 // ⚠️ **STAGE-55 真相候选列表批** ⇒ ⇒ unit 变体（裸字符串）。
                 ListLocals: Command.listLocals(),
-                // ⚠️ **契约 v20**（R-1 陷阱交付策略）⇒ ⇒ 登记
-                //   （`stop_on_trap` / `max_trap_events`）。
-                SetStopPolicy: Command.setStopPolicy(false, 4),
+                // ⚠️ **契约 v20**（R-1 陷阱交付策略 + B-2 异常连环守卫）⇒ ⇒ 登记
+                //   （`stop_on_trap` / `max_trap_events` / `stall_guard`）。
+                SetStopPolicy: Command.setStopPolicy(false, 4, 8),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),

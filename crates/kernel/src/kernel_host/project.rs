@@ -214,7 +214,7 @@ impl KernelHost {
         //   的显式选择；换了一份固件还沿用 ⇒ ⇒ 新 guest 的崩溃会被静静吞掉
         //   ⇒ ⇒ 「我以为它停了，其实它在 handler 里跑」。默认策略（交付即
         //   停）才是 AC1 的基线。
-        self.backend.set_stop_policy(true, None);
+        self.backend.set_stop_policy(true, None, None);
 
         // ---- 第四步：重建平台 ----
         if let Err(err) = self.rebuild_platform() {
@@ -600,7 +600,7 @@ impl KernelHost {
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
         // R-1：卸载也是「新会话」⇒ 策略回默认（理由同 `on_load_project`）。
-        self.backend.set_stop_policy(true, None);
+        self.backend.set_stop_policy(true, None, None);
 
         // ---- ② 新会话 ⇒ 订阅全部失效（前端**必须重订**）----
         self.topics.clear();

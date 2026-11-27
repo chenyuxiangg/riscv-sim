@@ -56,6 +56,7 @@
 | 陷阱后 console 停住、后续用例全丢 | 默认策略「交付即停」；要跑 handler 就先 `stop_policy {stop_on_trap:false, max_trap_events:N}` |
 | `stop_reason=budget`，pc 在 idle 的 `wif/jal` 循环 | 预算用尽（前缀模式缺省 1e6 条），回体 `budget_exhausted:true`；给 `steps` 再来，不是死锁 |
 | 换了固件 `inspect kind=console offset=0` 读到空/旧串 | 装载会清 console（偏移不归零）；按回体 `console.base` 重新对齐，旧 offset 会 `E_SESS-04` |
+| `stop_reason=error` + `error_code=E_ENG-04` | 异常连环：handler 一直跳回同一 `(cause, mepc)`；看 `TrapSummary.first_mepc`。不是 guest 停点，也不是仿真器坏了 ⇒ 查仓库里到底有没有 handler（或 handler 自己是不是非法指令） |
 
 ## 7. 找不到破坏性工具
 

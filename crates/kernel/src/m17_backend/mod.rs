@@ -36,6 +36,7 @@ use riscv_sim_contract::csr::{
 };
 use riscv_sim_contract::error::{
     ErrorFamily, PlatformError, DEBUG_FAMILY, E_DBG_01_INVALID_REGISTER_INDEX, E_ENG_03_NO_PROGRESS,
+    E_ENG_04_TRAP_STORM, ENGINE_FAMILY,
 };
 use riscv_sim_contract::model::{
     Breakpoint, BreakpointInfo, BreakpointKind, SimState, WatchAccess, Watchpoint, WriteSize,
@@ -332,6 +333,15 @@ pub(crate) struct TrapPolicy {
     count: u32,
     /// 本窗口**第一个**陷阱的 `(mcause, mepc, mtvec_target)`。
     first: Option<(u32, u32, u32)>,
+    /// **异常连环阈值**（`None` = 守卫关；B-2）。
+    stall_guard: Option<u32>,
+    /// 上一次交付的 `(mcause, mepc)` —— 判「是不是同一个故障点」。
+    ///
+    /// ⚠️ **跨批处理窗口持久**（不在 `reset_trap_window` 里清）：一次
+    /// `run` 内部的窗口边界不清账，否则跨窗口的连环看不见。
+    last_trap_key: Option<(u32, u32)>,
+    /// 同一个 `(mcause, mepc)` 已经**连续**出现几次。
+    stall_count: u32,
 }
 
 impl Default for TrapPolicy {
@@ -341,6 +351,9 @@ impl Default for TrapPolicy {
             max_trap_events: None,
             count: 0,
             first: None,
+            stall_guard: None,
+            last_trap_key: None,
+            stall_count: 0,
         }
     }
 }
@@ -354,12 +367,39 @@ impl TrapPolicy {
         }
     }
 
-    /// 记一次陷阱交付（先记「第一个」，再累加总数）。
+    /// 记一次陷阱交付（先记「第一个」，再累加总数；顺带记连环）。
     fn note(&mut self, cause: u32, mepc: u32, target: u32) {
         if self.first.is_none() {
             self.first = Some((cause, mepc, target));
         }
         self.count = self.count.saturating_add(1);
+
+        // ---- B-2：异常连环（同一 (cause, mepc) 连续出现）----
+        let key = (cause, mepc);
+        if self.last_trap_key == Some(key) {
+            self.stall_count = self.stall_count.saturating_add(1);
+        } else {
+            self.last_trap_key = Some(key);
+            self.stall_count = 1;
+        }
+    }
+
+    /// 连环是否达到阈值 ⇒ 给出 `(threshold, observed)`，供报错文案用。
+    ///
+    /// ⚠️ 只在 `stop_on_trap = false` 时才可能触发（默认策略第一条就停，
+    /// 走不到这里）。
+    fn stall_reached(&self) -> Option<(u32, u32)> {
+        match self.stall_guard {
+            Some(n) if self.stall_count >= n.max(2) => Some((n.max(2), self.stall_count)),
+            _ => None,
+        }
+    }
+
+    /// 换策略 / 换工程 ⇒ 连环账也归零（策略是会话级的，旧账不该留在新
+    /// 策略下）。
+    fn reset_stall(&mut self) {
+        self.last_trap_key = None;
+        self.stall_count = 0;
     }
 }
 
@@ -776,6 +816,32 @@ impl InstructionExecutor for IssExecutor<'_> {
             let target = state.pc;
             self.policy.note(cause, mepc, target);
 
+            // ---- B-2：异常连环守卫（只在「不停」的策略下才有意义）----
+            //
+            // 判据是**结构**而不是计数：同一个 `(mcause, mepc)` 连续出现
+            // N 次 ⇒ handler 每次都把程序送回同一个故障点 ⇒ 它没修好这个
+            // 故障（也没跳过那条指令）。报 `E_ENG-04`（**平台**结论），
+            // **不是** `HaltReason::Trap` —— 说成「guest 停在陷阱」会把
+            // 「handler 是坏的」这条最重要的信息藏起来。
+            //
+            // ⚠️ 三个判据的先后是定死的：`stop_on_trap`（AC1 基线）>
+            //    `stall_guard`（结构）> 配额（数量）。否则默认策略会被
+            //    守卫改写。
+            if !self.policy.stop_on_trap {
+                if let Some((threshold, observed)) = self.policy.stall_reached() {
+                    return Err(PlatformError::new(
+                        ENGINE_FAMILY,
+                        E_ENG_04_TRAP_STORM,
+                        format!(
+                            "同一异常点连环 {observed} 次（阈值 {threshold}）：\
+                             mcause={cause:#010x} mepc={mepc:#010x} \
+                             mtvec={target:#010x} —— handler 没让程序走出这个\
+                             故障点，已中止（平台错误，不是 guest 停）"
+                        ),
+                    ));
+                }
+            }
+
             // 停的条件只有两条：策略要求「交付即停」，或本窗口配额用满。
             if self.policy.stop_on_trap || self.policy.quota_reached() {
                 return Ok(ExecOutcome::Stop {
@@ -937,17 +1003,27 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     ///
     /// ⚠️ 同时**清空本窗口的计数**：换策略之后「这一窗口交付了几个陷阱」
     /// 从零算，否则 `TrapSummary` 的 `count` 会把旧策略下的数字带上来。
-    pub fn set_stop_policy(&mut self, stop_on_trap: bool, max_trap_events: Option<u32>) {
+    /// **连环账也一起清**（`stall_guard` 的 `(cause, mepc)` 与计数）：旧策略
+    /// 下的连环对新策略没有意义，留着会把第一次陷阱就判成「连环」。
+    pub fn set_stop_policy(
+        &mut self,
+        stop_on_trap: bool,
+        max_trap_events: Option<u32>,
+        stall_guard: Option<u32>,
+    ) {
         self.trap_policy.stop_on_trap = stop_on_trap;
         self.trap_policy.max_trap_events = max_trap_events;
+        self.trap_policy.stall_guard = stall_guard;
+        self.trap_policy.reset_stall();
         self.reset_trap_window();
     }
 
-    /// R-1：当前策略 `(stop_on_trap, max_trap_events)`。
-    pub fn stop_policy(&self) -> (bool, Option<u32>) {
+    /// R-1 / B-2：当前策略 `(stop_on_trap, max_trap_events, stall_guard)`。
+    pub fn stop_policy(&self) -> (bool, Option<u32>, Option<u32>) {
         (
             self.trap_policy.stop_on_trap,
             self.trap_policy.max_trap_events,
+            self.trap_policy.stall_guard,
         )
     }
 
@@ -960,6 +1036,10 @@ impl<B: EventBus, I: InterruptSink> SelfIssBackend<B, I> {
     ///
     /// ⚠️ 口径是「一次批处理窗口」，不是「一条命令」：`Continue` 的窗口
     /// 循环会多次进来 ⇒ ⇒ 每个窗口的配额各自算。
+    ///
+    /// ⚠️ **不清连环账**（`last_trap_key` / `stall_count`）：B-2 的判据就是
+    /// 「跨窗口还回到同一个故障点」⇒ ⇒ 在窗口边界清掉它，守卫永远看不见
+    /// 跨窗口的连环（一次 `run` 内部会切很多窗口）。
     pub fn reset_trap_window(&mut self) {
         self.trap_policy.count = 0;
         self.trap_policy.first = None;
@@ -1621,7 +1701,14 @@ impl<B: EventBus, I: InterruptSink> ExecutionBackend for SelfIssBackend<B, I> {
                 Err(err) => {
                     // 取指 / 访存失败（E_BUS-01 等）——**批处理层**把它记成
                     // 陷阱停止原因（并把错误向上传播）。
-                    *last_stop = Some(HaltReason::Trap);
+                    //
+                    // ⚠️ **平台侧结论不进 `last_stop`**（`Engine` 族：`E_ENG-03`
+                    // 无进展 / `E_ENG-04` 异常连环）：那是仿真器主动中止这一批，
+                    // 不是 guest 停在陷阱上。写进去会让宿主把「平台中止」当成
+                    // 「guest 崩溃」，`TrapSummary` 也会带上一个根本不成立的停点。
+                    if err.family != ENGINE_FAMILY {
+                        *last_stop = Some(HaltReason::Trap);
+                    }
                     return Err(err);
                 }
             }
@@ -3432,7 +3519,7 @@ mod tests {
     #[test]
     fn policy_off_continues_through_traps_until_the_quota() {
         let mut backend = backend_with_program(&TRAP_LOOP_FIRMWARE);
-        backend.set_stop_policy(false, Some(8));
+        backend.set_stop_policy(false, Some(8), None);
 
         backend.step_n(40).expect("step");
 
@@ -3457,12 +3544,46 @@ mod tests {
     #[test]
     fn policy_off_without_a_quota_does_not_stop_on_traps() {
         let mut backend = backend_with_program(&TRAP_LOOP_FIRMWARE);
-        backend.set_stop_policy(false, None);
+        backend.set_stop_policy(false, None, None);
         backend.step_n(4).expect("step");
         assert_eq!(
             backend.traps_this_window(),
             1,
             "没有配额 ⇒ 计数照记（宿主侧会先拒掉这种命令，这一层只测记账）"
+        );
+    }
+
+    /// **B-2 · 异常连环守卫跨批处理窗口持久**：同一 `(cause, mepc)` 连到
+    /// 阈值 ⇒ 报 `E_ENG-04`；**中途 `reset_trap_window()` 不清连环账** ——
+    /// 否则一次 `run` 切窗口就永远看不见连环。
+    #[test]
+    fn stall_guard_aborts_a_trap_storm_across_windows() {
+        let mut backend = backend_with_program(&TRAP_LOOP_FIRMWARE);
+        backend.set_stop_policy(false, Some(1000), Some(3));
+
+        // 前五条：auipc / addi / csrrw 是正常指令；第四条（0x0c）与第五条
+        // （handler 0x10 自己也陷）是两个**不同 mepc** 的陷阱 ⇒ 还不算连环。
+        backend.step_n(5).expect("前两个陷阱还不算连环");
+        // 窗口边界（`on_run_inner` 每个窗口都会调）—— 连环账必须留着。
+        backend.reset_trap_window();
+
+        // 第六、七条：又都回到 0x10 ⇒ 同一 (cause, mepc) 连到第 3 次 ⇒ 中止。
+        let err = backend
+            .step_n(2)
+            .expect_err("连环到阈值必须中止这一批");
+        let rendered = err.to_string();
+        assert!(
+            rendered.starts_with("E_ENG-04: "),
+            "必须是异常连环的平台错误，实际 {rendered}"
+        );
+        assert!(
+            rendered.contains("连环"),
+            "文案要说清是「连环」，实际 {rendered}"
+        );
+        assert_eq!(
+            backend.last_stop_reason(),
+            None,
+            "平台错误不写 guest 停因 —— 这一批是中止，不是停下"
         );
     }
 
