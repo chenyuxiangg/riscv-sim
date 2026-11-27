@@ -112,9 +112,9 @@ svg.append(f'<rect width="{W}" height="{H}" fill="url(#dots)" opacity="0.9"/>')
 
 # ------------------------------------------------------------------ 标题
 svg.append(text(40, 56, "运行视图 · AI 接入层：MCP 部署在 ali_hy，只经隧道", 25, 700))
-svg.append(text(40, 84, "实线 = 已在跑（riscv-sim v0.1.1 · sim-mcp 0.1.0，两者都已在 ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。", 12.5, 400, "#61708a"))
+svg.append(text(40, 84, "实线 = 已在跑（单镜像 riscv-sim:allinone：v0.1.1 二进制 + sim-mcp 0.1.0，ali_hy 实测通过）；虚线 = 仅剩「还没做」的登记项。", 12.5, 400, "#61708a"))
 svg.append(text(40, 102, "AI 只看得见工具，看不见 8876，也拿不到 SIM_TOKEN —— 这条边界是整张图的重点。", 12.5, 400, "#61708a"))
-svg.append(text(W - 40, 56, "front/ · crates/{kernel,contract,server} · sim-mcp(待建)", 11.5, 400, "#8a97a8", anchor="end", mono=True))
+svg.append(text(W - 40, 56, "front/ · crates/{kernel,contract,server} · sim-mcp 已合体", 11.5, 400, "#8a97a8", anchor="end", mono=True))
 
 # ------------------------------------------------------------------ A. 你的 Mac
 MX, MY, MW, MH = 40, 118, 424, 618
@@ -159,11 +159,11 @@ svg.append(text(MX + MW + 44, MY + 136, "HTTP · Bearer", 9.8, 400, "#5b6b7f", a
 # ------------------------------------------------------------------ B. ali_hy
 BX, BY, BW, BH = 552, 118, 736, 618
 svg.append(rect(BX, BY, BW, BH, "#ffffff", "#7c8ea6", sw=1.8))
-svg.append(text(BX + 20, BY + 28, "B · ali_hy　8.155.139.119（Ubuntu 22.04 / Docker 29.9.3）", 14.5, 700, "#243043"))
+svg.append(text(BX + 20, BY + 28, "B · ali_hy　8.155.139.119（单镜像双进程：sim + mcp 同一容器）", 14.5, 700, "#243043"))
 
 # sim-mcp（虚线：待建）
 svg.append(rect(BX + 18, BY + 44, BW - 36, 292, "#faf9ff", "#8f74c9", sw=1.8, r=10))
-svg.append(text(BX + 32, BY + 68, "容器 sim-mcp（已部署 0.1.0 · 只绑 127.0.0.1:8877）", 13, 700, "#4a3f66"))
+svg.append(text(BX + 32, BY + 68, "同容器进程 sim-mcp（0.1.0 · 只绑 127.0.0.1:8877）", 13, 700, "#4a3f66"))
 
 svg.append(card(BX + 32, BY + 80, 328, 104, "入口与鉴权", [
     "只绑回环 127.0.0.1:8877，公网没有这个口",
@@ -193,7 +193,7 @@ svg.append(card(BX + 376, BY + 196, 328, 128, "闸门与审计", [
 
 # riscv-sim（实线：已跑）
 svg.append(rect(BX + 18, BY + 360, BW - 36, 238, "#f7fbf7", "#a9c8a9", sw=1.8, r=10))
-svg.append(text(BX + 32, BY + 384, "容器 riscv-sim（已在跑 · 镜像 v0.1.1 · healthy）", 13, 700, "#2f5a34"))
+svg.append(text(BX + 32, BY + 384, "同容器进程 riscv-sim（v0.1.1 二进制 · 0.0.0.0:9876）", 13, 700, "#2f5a34"))
 
 svg.append(card(BX + 32, BY + 396, 328, 88, "入口与令牌", [
     "0.0.0.0:8876（安全组已放行 · 浏览器老路径）",
@@ -212,7 +212,7 @@ svg.append(card(BX + 32, BY + 496, 672, 86, "内核与事件环", [
 
 # sim-mcp → riscv-sim 两条
 svg.append(f'<line x1="{BX + BW // 2 - 60}" y1="{BY + 336}" x2="{BX + BW // 2 - 60}" y2="{BY + 360}" stroke="#3f6fa8" stroke-width="1.6" marker-end="url(#arrow)"/>')
-svg.append(text(BX + BW // 2 - 52, BY + 356, "② 回环 · 带 SIM_TOKEN", 10.5, 600, "#3f6fa8"))
+svg.append(text(BX + BW // 2 - 52, BY + 356, "② 回环 9876 · SIM_TOKEN", 10.5, 600, "#3f6fa8"))
 svg.append(f'<line x1="{BX + BW // 2 + 130}" y1="{BY + 360}" x2="{BX + BW // 2 + 130}" y2="{BY + 336}" stroke="#8a6b3c" stroke-width="1.6" marker-end="url(#arrow)" stroke-dasharray="5 4"/>')
 svg.append(text(BX + BW // 2 + 138, BY + 356, "③ 应答 / events / job", 10.5, 600, "#8a6b3c"))
 
@@ -242,7 +242,7 @@ svg.append(card(CX2 + 16, CY + 324, CW2 - 32, 112, "为什么先走隧道", [
 svg.append(card(CX2 + 16, CY + 448, CW2 - 32, 140, "还没做（如实登记）", [
     "多客户端并发未压测（共享 8 个会话额度）",
     "令牌 → 角色 / 配额：没做，现在一条令牌通吃",
-    "MCP 未并进 Rust 单二进制（现为独立适配容器）",
+    "MCP 仍是 python 旁挂进程，没并进 Rust 单二进制",
     "远程审计日志没有轮转与保留策略",
 ], fill="#ffffff", stroke="#c3cedb", size=10.2))
 
@@ -266,12 +266,13 @@ svg.append(card(590, 862, 520, 150, "二、长任务与「仿真器坏了」的�
     "所以 run 只回 job_id，poll_job 去拉 /jobs/{job}",
     "事件用 events(since_seq) 补，不靠长连 WS（隧道会断）",
     "隧道断开 = 连接错误；仿真器异常 = 工具回结构化错误码",
+    "一容器两进程 ⇒ 任一退出整容器重启（不做进程级自愈）",
 ], fill="#ffffff", stroke="#c3cedb", size=10.8))
 
 svg.append(card(1140, 862, 520, 150, "三、现在到哪一步", [
-    "已跑通：riscv-sim v0.1.1（8876 公网）· sim-mcp 0.1.0（8877 仅回环）",
+    "已合体：riscv-sim:allinone（192MB，两进程一容器，healthy）",
     "已验收：隧道内 check_mcp ⇒ 装固件 · advance(2) · pc=8 · x5=3",
-    "审计已生效：docker logs sim-mcp 一行一调用（client/tool/耗时/码）",
+    "审计已生效：docker logs riscv-sim 一行一调用（client/tool/耗时/码）",
     "待做：多客户端并发压测、MCP 并进 Rust 单二进制",
 ], fill="#ffffff", stroke="#c3cedb", size=10.8))
 

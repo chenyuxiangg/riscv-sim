@@ -64,6 +64,9 @@ SIM_MAX_CONSOLE=${SIM_MAX_CONSOLE:-1048576}
 SIM_SESSION_TTL=${SIM_SESSION_TTL:-900}
 # 访问令牌：页面用 ?token=<这个值> 打开；改它要 ./deploy.sh rebuild
 SIM_TOKEN=${SIM_TOKEN:-$token}
+# AI 接入层令牌（sim-mcp）：客户端只拿这条，SIM_TOKEN 不下发
+SIM_MCP_TOKEN=${SIM_MCP_TOKEN:-$(random_token)}
+SIM_MCP_PORT=${SIM_MCP_PORT:-8877}
 EOF
     chmod 600 .env
     say "==> 已生成 .env（令牌在里面，权限 600）"
