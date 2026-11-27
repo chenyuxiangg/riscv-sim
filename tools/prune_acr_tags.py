@@ -39,9 +39,10 @@ ACCEPT = ",".join([
 ])
 
 
-def token(scope="pull,push"):
-    # ⚠️ 只申请 pull,push：registry 的删除动作吃的是 push 权限；scope 里写
-    #    `delete` 会被 ACR 的 token 服务当成非法 scope 直接 401（踩过一次）。
+def token(scope="pull,push,delete"):
+    # 删除 manifest 需要 token 里带 `delete` 这个 action：只申请 pull,push 时
+    # registry 回 401（detail 里 Action=delete）—— 这是实测出来的，不是猜的。
+    # 万一某个版本的 token 服务不认 `delete`，退回 pull,push（至少还能读）。
     user, pw = os.environ["ACR_USERNAME"], os.environ["ACR_PASSWORD"]
     basic = base64.b64encode(f"{user}:{pw}".encode()).decode()
     url = "https://dockerauth-cn-heyuan.aliyuncs.com/auth?" + urllib.parse.urlencode({
@@ -49,7 +50,13 @@ def token(scope="pull,push"):
         "scope": f"repository:{REPO}:{scope}",
     })
     req = urllib.request.Request(url, headers={"Authorization": f"Basic {basic}"})
-    return json.load(urllib.request.urlopen(req, timeout=30))["token"]
+    try:
+        return json.load(urllib.request.urlopen(req, timeout=30))["token"]
+    except urllib.error.HTTPError as e:
+        if scope.endswith(",delete"):
+            print(f"⚠️ 带 delete 的 scope 被拒（HTTP {e.code}），退回 pull,push")
+            return token("pull,push")
+        raise
 
 
 def api(path, tok=None, method="GET", accept=ACCEPT):
