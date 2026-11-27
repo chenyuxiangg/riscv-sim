@@ -10,6 +10,8 @@
     4. advance(2) ⇒ executed=2 · pc=8 · t_ps=2000
     5. inspect(state) ⇒ x5=3
     6. events(since=0) 能取到东西（EventRing 有 seq）
+    7. 文件上行 POST /images：同一个令牌推 8 字节 bin，回体是 Elf/RawHex + entry
+       （这条对应「客户端把 ELF 推给仿真器」那条路径：字节流走 HTTP，不进工具参数）
 """
 import argparse
 import json
@@ -85,6 +87,18 @@ def main() -> int:
     st = mcp.call("inspect", {"kind": "state"})
     print("inspect →", st["summary"])
     assert st["data"]["registers"][5] == 3, st["data"]["registers"]
+
+    # 7) 文件上行：真文件不该走工具参数（base64 会烧上下文），走 POST /images
+    base = args.url.rsplit("/mcp", 1)[0] if args.url.endswith("/mcp") else args.url
+    req = urllib.request.Request(f"{base}/images", data=bytes.fromhex(FW_HEX), method="POST")
+    req.add_header("authorization", f"Bearer {args.token}")
+    req.add_header("content-type", "application/octet-stream")
+    req.add_header("x-image-name", "fw8.bin")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        up = json.loads(resp.read())
+    assert up["ok"] and up["kind"] in ("RawHex", "Elf"), up
+    assert up["entry"] == 0 and up["bytes"] == 8, up
+    print("upload /images →", up["kind"], f"entry={up['entry']:#x}", f"{up['bytes']} B")
 
     ev = mcp.call("events", {"since": 0, "limit": 32})
     print("events →", ev["summary"][:160])

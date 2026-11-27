@@ -42,9 +42,12 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
    0.1.0 是忽略，只能等空闲回收）。`boot` 本身幂等：同板复用回 `reused: true`。
    全机会话池只有 8 个，空闲 5 分钟由服务端自动回收。**不要反复 boot 来「重试」**，
    也不要指望有工具去看别人的会话 —— 看不到，这是设计。
-2. **`hex` 是原始字节的十六进制，不是 Intel HEX 文件。** `.hex` 文本会被服务端以
-   `E_PROTO-08` 拒绝。给文件就用 `path`，且只认 `/data/images` 白名单下的 `.elf` / `.bin`；
-   `name` 的扩展名决定解析：`.bin` = RawHex（不是 ELF），`.elf` = ELF。
+2. **装的方式按文件大小选，别把 ELF 塞进工具参数。** 三种入口：
+   - `hex` —— 原始字节的十六进制，**不是 Intel HEX 文件**（`.hex` 文本会被 `E_PROTO-08` 拒）；
+   - `b64` —— 几十 KB 以内的小文件；再大就是烧上下文（100 KB 的 ELF base64 后 133 K 字符）；
+   - **`POST /images` 上行** —— 真文件走这条：读本地文件、原始字节直接推，零 token。
+   另有 `path`（服务器 `/data/images` 白名单下的文件）。`name` 的扩展名决定解析：
+   `.bin` = RawHex（一律从 0 起），`.elf` = ELF（带真实 entry 与多段）。
 3. **`advance` 是「恰好 n 条」，`run` 是「跑到停点」。** 想复现就只用 `advance`；
    `run` 默认 5 秒墙钟，撞钟回 `504`，但 **body 仍是完整停点报告** —— 读它，不是报失败。
 
@@ -53,7 +56,8 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 | 工具 | 用途 | 关键参数 |
 |---|---|---|
 | `boot` | 建/复用本客户端会话（**带 board**） | `board`：`qemu-virt` / `default` / `minimal` |
-| `load_image` | 装固件并复位到入口 | `hex` 或 `path`，`name` |
+| `load_image` | 装固件并复位到入口 | `hex` / `b64`（小文件）/ `path`；`name` |
+| `POST /images` | **上行真文件**（HTTP，不是工具） | 头 `x-image-name`，body 原始字节 |
 | `advance` | 恰好走 n 条 | `n`（1..100000） |
 | `run` | 跑到停点 | `steps` / `timeout_ms` / `prefix`（console 命中）/ `until`（breakpoint\|halt）/ `background` |
 | `poll_job` | 读异步作业 | `job`（`run(background=true)` 回体里的） |
@@ -80,6 +84,24 @@ events since=0                                  → next=4，含 ImageLoaded / S
 这是**验收基线**：跑出 `pc=8 · x5=3` 说明链路（隧道→MCP→server→内核）全通。
 哪一跳不对，先证链路，再怀疑固件。
 
+## 4.5 上传 ELF（客户端手上的文件）
+
+MCP 是远端进程，看不见你的磁盘 —— 所以「文件」永远从**你这侧**推过去：
+
+```
+python3 scripts/sim_call.py --upload ./fw.elf          # 默认 name 取文件名
+python3 scripts/sim_call.py --upload ./build/app.bin --name app.bin
+```
+
+等价于 `POST <base>/images`，头 `Authorization: Bearer <MCP令牌>` + `x-image-name: fw.elf`，
+body 就是文件字节。回体 `{ok, bytes, kind, entry, segments, session_id}`，**装完即复位到
+entry**，不用再调 `load_image`。
+
+- 目标必须是**你自己的会话**：先 `boot {"board":"qemu-virt"}`，否则 409。
+- `413 / E_MCP-09` = 超过 `SIM_MCP_MAX_UPLOAD`（默认 16 MiB）。
+- `400 / E_MCP-08` = body 空（别把 JSON 当字节流传了）。
+- 装完先 `inspect kind=state` 对一眼 `pc`，再 `disasm` 确认那段真的是你编的指令。
+
 ## 5. 长任务与并发
 
 - 超过约 5 秒的跑动：`run background=true` 拿 `job`，用 `poll_job` 轮询到终态。
@@ -97,8 +119,11 @@ events since=0                                  → next=4，含 ImageLoaded / S
 | `load_image` 回 `E_PLT-22`「没有生效板」 | `boot` 没带 `board`；0.1.1 起再 boot 一次带 board 就会重建会话 |
 | `run` 回 `504` | 撞墙钟，**body 有完整停点**；改 `background` 或 `steps` 分片 |
 | 没有 `reset` 工具 | 破坏性闸门关着（默认），不是 MCP 坏了 |
+| 上传回 `409` | 还没 `boot`，或会话被别人占着（一客户端一会话） |
+| 上传后 `pc=0` 但固件是 ELF | 传的是 `.bin` 名字 + ELF 内容（或反过来），解析按扩展名走 |
 
-排查清单：[references/troubleshooting.md](references/troubleshooting.md)。
+排查清单：[references/troubleshooting.md](references/troubleshooting.md)；上传细节见
+[references/tools.md](references/tools.md) 的「文件上行」。
 
 ## 7. 调试剧本
 

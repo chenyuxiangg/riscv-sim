@@ -10,6 +10,8 @@
 传输：MCP Streamable HTTP 的 JSON 子集（POST /mcp，回 application/json）。
   - 不做服务端 SSE 推送（GET /mcp 回 405）⇒ 事件靠 `events(since_seq)` 拉。
   - 支持 `Authorization: Bearer <token>`，也支持退化形态 `/mcp/<token>`。
+  - **文件上行**：`POST /images`（原始字节 + `x-image-name`，同一令牌）。ELF 不进
+    工具参数 —— base64 上百 KB 会把上下文烧光，字节流走 HTTP 才是零成本。
 
 启动（容器内）：
     SIM_BASE=http://host.docker.internal:8876 \
@@ -18,6 +20,7 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -40,6 +43,9 @@ PORT = int(os.environ.get("SIM_MCP_PORT", "8877"))
 IDLE_SECS = int(os.environ.get("SIM_MCP_IDLE_SECS", "300"))
 MAX_RUN_MS = int(os.environ.get("SIM_MCP_MAX_RUN_MS", "5000"))
 MAX_STEPS = int(os.environ.get("SIM_MCP_MAX_STEPS", "100000"))
+# 文件上传的字节上限（客户端推 ELF 走 HTTP，不是 MCP 参数 —— 一条 base64 参数
+# 会把上下文烧光：100 KB 的 ELF 编成 133 K 个字符）。默认跟服务端一样 16 MiB。
+MAX_UPLOAD = int(os.environ.get("SIM_MCP_MAX_UPLOAD", str(16 * 1024 * 1024)))
 PROTOCOL = os.environ.get("SIM_MCP_PROTOCOL", "2025-06-18")
 
 
@@ -215,12 +221,15 @@ def t_load_image(client: str, args: dict) -> dict:
                                 body={"path": path, "name": name})
     else:
         blob_hex = (args.get("hex") or "").replace("0x", "").replace(" ", "").replace("\n", "")
-        if not blob_hex:
-            raise SimError("E_MCP-03", "要么给 hex（原始字节的十六进制），要么给 path", 400)
+        blob_b64 = (args.get("b64") or "").strip()
+        if not blob_hex and not blob_b64:
+            raise SimError("E_MCP-03",
+                           "三选一：hex（原始字节的十六进制）/ b64（小文件，<20KB）/ path", 400)
         try:
-            blob = bytes.fromhex(blob_hex)
-        except ValueError as err:
-            raise SimError("E_MCP-03", f"hex 不是合法十六进制：{err}", 400)
+            blob = (base64.b64decode(blob_b64, validate=False) if blob_b64
+                    else bytes.fromhex(blob_hex))
+        except (ValueError, base64.binascii.Error) as err:
+            raise SimError("E_MCP-03", f"hex/b64 解不开：{err}", 400)
         status, body, _ = _http("POST", f"/api/sessions/{sid}/image", raw=blob,
                                 ctype="application/octet-stream",
                                 extra_headers={"x-image-name": name})
@@ -431,13 +440,15 @@ TOOLS = [
     },
     {
         "name": "load_image",
-        "description": ("装载固件：给 hex（**原始字节**的十六进制，不是 Intel HEX 文件）"
-                        "或服务器白名单路径 path。8 字节最小固件即可跑。"),
+        "description": ("装载固件：hex（**原始字节**的十六进制，不是 Intel HEX 文件）/ "
+                        "b64（小文件，几十 KB 以内；大 ELF 走 POST /images 上行）/ "
+                        "path（服务器白名单）。8 字节最小固件即可跑。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "hex": {"type": "string", "description": "原始字节的十六进制，如 9302200093821200"},
                 "path": {"type": "string", "description": "服务器侧白名单路径（/data/images 下）"},
+                "b64": {"type": "string", "description": "文件字节的 base64（小文件用；大文件走 POST /images）"},
                 "name": {"type": "string", "description": "镜像名，决定 kind；.bin=RawHex，.elf=ELF"},
             },
         },
@@ -576,7 +587,7 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         return _rpc_result(msg_id, {
             "protocolVersion": PROTOCOL if asked != PROTOCOL else asked,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "sim-mcp", "version": "0.1.1"},
+            "serverInfo": {"name": "sim-mcp", "version": "0.1.2"},
             "instructions": ("先 boot，再 load_image(hex=原始字节的十六进制)，然后 advance(n)。"
                              "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"),
         })
@@ -631,7 +642,7 @@ def _client_id(token: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "sim-mcp/0.1.1"
+    server_version = "sim-mcp/0.1.2"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:  # 默认 access log 太吵，审计另有
@@ -691,8 +702,58 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("content-length", "0")
         self.end_headers()
 
+    def _upload(self) -> None:
+        """POST /images —— 把客户端手上的 ELF/裸 bin 推给仿真器并装载。
+
+        为什么是 HTTP 端点而不是 `load_image(b64=...)`：
+          - 100 KB 的 ELF base64 之后是 133 K 个字符，塞进 MCP 参数就是**烧上下文**，
+            而且大多数客户端根本没法把「本地文件」变成参数；
+          - 但字节流走 HTTP 是零 token 成本：客户端读文件 → 直接 POST。
+        所以：小文件用 `load_image(b64)`，真文件用这里。
+
+        鉴权只看 `SIM_MCP_TOKEN`（客户端那条）；`SIM_TOKEN` 仍只在本进程里。
+        目标会话必须是**这个客户端自己的**（先 boot），不替别人装。
+        """
+        length = int(self.headers.get("content-length", "0"))
+        if length <= 0:
+            self._json(400, {"code": "E_MCP-08", "detail": "空 body：This is a raw-bytes upload"})
+            return
+        if length > MAX_UPLOAD:
+            self._json(413, {"code": "E_MCP-09",
+                             "detail": f"太大：{length} > 上限 {MAX_UPLOAD} 字节"})
+            return
+        name = (self.headers.get("x-image-name") or "fw.elf").strip()
+        token = self._token(urlparse(self.path).path)
+        client = _client_id(token)
+        t0 = time.monotonic()
+        try:
+            sid = OWNER.sid(client)
+            blob = self.rfile.read(length)
+            status, body, _ = _http("POST", f"/api/sessions/{sid}/image", raw=blob,
+                                    ctype="application/octet-stream",
+                                    extra_headers={"x-image-name": name}, timeout=60)
+            ms = int((time.monotonic() - t0) * 1000)
+            print(json.dumps({"audit": "upload", "client": client, "name": name,
+                              "bytes": len(blob), "ms": ms, "ok": True}), flush=True)
+            self._json(status, {"ok": True, "session_id": sid, "bytes": len(blob), **body})
+        except SimError as err:
+            print(json.dumps({"audit": "upload", "client": client, "name": name,
+                              "ms": int((time.monotonic() - t0) * 1000),
+                              "ok": False, "code": err.code}), flush=True)
+            self._json(err.status, {"ok": False, "code": err.code, "detail": err.detail})
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/images") or parsed.path.startswith("/upload"):
+            token = self._token(parsed.path)
+            if token != MCP_TOKEN:
+                # 读掉 body 再回，否则客户端写不进去、连接被重置
+                int(self.headers.get("content-length", "0")) and self.rfile.read(
+                    int(self.headers.get("content-length", "0")))
+                self._json(401, {"error": "unauthorized"})
+                return
+            self._upload()
+            return
         if not parsed.path.startswith("/mcp"):
             self._json(404, {"error": "not found"})
             return

@@ -8,6 +8,8 @@
     python3 scripts/sim_call.py --tool boot --json '{"board":"qemu-virt"}'
     python3 scripts/sim_call.py --tool advance --json '{"n":2}'
     python3 scripts/sim_call.py --tool inspect --json '{"kind":"state"}' --raw
+    python3 scripts/sim_call.py --upload ./fw.elf              # 真文件走这里（零 token）
+    python3 scripts/sim_call.py --upload ./fw.elf --name fw.elf
 
 只依赖标准库：客户端 SDK 版本各异，这条路径是「协议本身」的最低公共分母。
 """
@@ -67,6 +69,8 @@ def main() -> int:
     ap.add_argument("--token", default=DEFAULT_TOKEN)
     ap.add_argument("--health", action="store_true", help="探 /healthz（含上游探测）")
     ap.add_argument("--list", action="store_true", help="列工具")
+    ap.add_argument("--upload", metavar="FILE", help="把本地文件推给仿真器并装载（POST /images）")
+    ap.add_argument("--name", help="上传时的镜像名（默认取文件名）")
     ap.add_argument("--tool", help="工具名")
     ap.add_argument("--json", default="{}", help="工具参数（JSON）")
     ap.add_argument("--raw", action="store_true", help="原样打印 structuredContent")
@@ -84,6 +88,24 @@ def main() -> int:
     info = mcp.handshake()
     print(f"# {info['serverInfo']['name']} {info['serverInfo'].get('version','')} "
           f"· MCP {info['protocolVersion']}", file=sys.stderr)
+
+    if a.upload:
+        # 真文件走字节流，不进 MCP 参数：ELF 上百 KB，base64 进上下文就把预算烧光了。
+        base = a.url.rsplit("/mcp", 1)[0] if a.url.endswith("/mcp") else a.url
+        blob = open(a.upload, "rb").read()
+        name = a.name or os.path.basename(a.upload)
+        req = urllib.request.Request(f"{base}/images", data=blob, method="POST")
+        req.add_header("authorization", f"Bearer {a.token}")
+        req.add_header("content-type", "application/octet-stream")
+        req.add_header("x-image-name", name)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            out = json.loads(resp.read() or b"{}")
+        seg = ", ".join(f"[{s['base']:#x}+{s['size']}]" for s in out.get("segments", []))
+        print(f"uploaded {name}（{out.get('bytes')} B）→ {out.get('kind')} "
+              f"entry={out.get('entry', 0):#x} 段 {seg}")
+        if a.raw:
+            print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0
 
     if a.list:
         for t in (x["name"] for x in mcp.rpc("tools/list")["result"]["tools"]):
