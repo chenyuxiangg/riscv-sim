@@ -122,10 +122,22 @@ class Ownership:
         if cur:
             status, state, _ = _http("GET", f"/api/sessions/{cur['sid']}/state")
             if status == 200:
-                cur["used"] = time.time()
-                return {"session_id": cur["sid"], "board": cur["board"], "reused": True}
-            with self._lock:
-                self._map.pop(client, None)
+                if board and board != cur["board"]:
+                    # 板是建会话时定死的，改不了 ⇒ 换板只能重建。只动自己的会话。
+                    # 不这么做的话：首次 boot 没给 board ⇒ 会话永远没板，load_image
+                    # 一直回 E_PLT-22，而 boot 一直「复用成功」，看着像工具坏了。
+                    print(json.dumps({"audit": "rebind", "from": cur["board"],
+                                      "to": board}), flush=True)
+                    self._drop(cur["sid"])
+                    with self._lock:
+                        self._map.pop(client, None)
+                    cur = None
+                else:
+                    cur["used"] = time.time()
+                    return {"session_id": cur["sid"], "board": cur["board"], "reused": True}
+            else:
+                with self._lock:
+                    self._map.pop(client, None)
         body = {"board": board} if board else {}
         status, created, _ = _http("POST", "/api/sessions", body=body)
         entry = {"sid": created["session_id"], "board": created.get("board"),
@@ -564,7 +576,7 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         return _rpc_result(msg_id, {
             "protocolVersion": PROTOCOL if asked != PROTOCOL else asked,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "sim-mcp", "version": "0.1.0"},
+            "serverInfo": {"name": "sim-mcp", "version": "0.1.1"},
             "instructions": ("先 boot，再 load_image(hex=原始字节的十六进制)，然后 advance(n)。"
                              "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"),
         })
@@ -619,7 +631,7 @@ def _client_id(token: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "sim-mcp/0.1.0"
+    server_version = "sim-mcp/0.1.1"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:  # 默认 access log 太吵，审计另有
