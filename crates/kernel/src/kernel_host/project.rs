@@ -208,6 +208,13 @@ impl KernelHost {
         //   ⇒ ⇒ **界面在骗人**。
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
+        // ---- R-1：换工程 ⇒ 停止策略回到默认 ----
+        //
+        // ⚠️ **必须重置**：`stop_on_trap = false` 是调用方对**某一份固件**
+        //   的显式选择；换了一份固件还沿用 ⇒ ⇒ 新 guest 的崩溃会被静静吞掉
+        //   ⇒ ⇒ 「我以为它停了，其实它在 handler 里跑」。默认策略（交付即
+        //   停）才是 AC1 的基线。
+        self.backend.set_stop_policy(true, None);
 
         // ---- 第四步：重建平台 ----
         if let Err(err) = self.rebuild_platform() {
@@ -592,6 +599,8 @@ impl KernelHost {
         // ---- ① 清**运行态**（寄存器 / 事件队列 / 断点 / 观察点）----
         let _ = self.backend.reset();
         self.backend.clear_debug_state();
+        // R-1：卸载也是「新会话」⇒ 策略回默认（理由同 `on_load_project`）。
+        self.backend.set_stop_policy(true, None);
 
         // ---- ② 新会话 ⇒ 订阅全部失效（前端**必须重订**）----
         self.topics.clear();

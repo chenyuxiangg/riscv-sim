@@ -134,6 +134,34 @@ pub enum CommandPayload {
     ///
     /// 回执与 `StepN` 同形：运行窗口结束后照常推 `Halted`（若真的停下）。
     StepOver,
+    /// **设置会话级停止策略**（契约 v20 · R-1）。
+    ///
+    /// 关掉 `stop_on_trap` 之后，同步异常**照常交付**：`enter_trap` 照旧写
+    /// `mepc` / `mcause` / `mtval`、按 `medeleg` 判委托、跳 `mtvec`；但
+    /// **不再**把交付转成 `Halted { reason: Trap }` ⇒ ⇒ 那条指令计入
+    /// `executed`，执行流直接进 guest 的 handler。OS/RTOS 的异常路径
+    /// （野指针、非法指令、缺页、越权）才在仿真器上**可测**，而不是
+    /// 「机器停了」。
+    ///
+    /// ⚠️ **只作用于同步异常**：中断走 `ExecOutcome::InterruptTaken`，
+    /// 本来就不停批次（且不计入 `executed`）⇒ ⇒ 本策略**不改变**中断行为。
+    ///
+    /// ⚠️ `max_trap_events` **不能不设**：`stop_on_trap = false` 且没给上限
+    /// 时，内核**拒绝**这条命令（`E_PROTO-08`）。handler 自己死循环时，
+    /// 不设上限会把整轮指令预算烧穿，还丢掉「这是异常循环」的诊断信息。
+    ///
+    /// ⚠️ 策略是**会话级粘性**的：设一次，之后的 `Continue` / `StepN` /
+    /// `StepOver` 都按它判；`LoadProject` 把它**重置**为默认
+    /// （`stop_on_trap: true`、`max_trap_events: None`）。
+    SetStopPolicy {
+        /// `true`（默认）= 与改动前逐字节一致：交付完就停。
+        /// `false` = 交付后继续在 `mtvec` 处取指。
+        stop_on_trap: bool,
+        /// **每次批处理窗口**内最多交付多少个陷阱；到数按
+        /// `Halted { reason: Trap }` 收尾。`stop_on_trap = false` 时必填。
+        #[serde(default)]
+        max_trap_events: Option<u32>,
+    },
     /// Request a pause.
     ///
     /// The engine records the request and the host reports
@@ -648,6 +676,27 @@ pub enum EventPayload {
         #[serde(default)]
         trigger_addr: Option<u32>,
     },
+    /// **本次批处理窗口交付了多少个陷阱、第一个交给了谁**（契约 v20 · R-1）。
+    ///
+    /// ⚠️ **只在非默认策略下发**（`stop_on_trap = false`）：默认策略下事件
+    /// 序列与改动前**逐字节一致**（AC1）。
+    ///
+    /// ⚠️ 三个值**读自 `enter_trap` 刚写下的 CSR**（`mcause` / `mepc`）与
+    /// 它算出的 `mtvec` 落点（即交付后的 `pc`），**不在这里重算** ⇒ ⇒ 与
+    /// 交付值天然一致（AC4）。
+    ///
+    /// ⚠️ **不等于**逐条陷阱流水：这是「这一窗口的头一条 + 总数」，帧数与
+    /// 陷阱数无关 ⇒ ⇒ 不会把 4096 格的事件环挤爆。
+    TrapSummary {
+        /// 本窗口交付的陷阱数（中断**不计**）。
+        count: u32,
+        /// 第一个陷阱的 `mcause` 原始值（含最高位的异步位 = 0）。
+        first_cause: u32,
+        /// 第一个陷阱的 `mepc`（**被陷入的那条指令**的地址）。
+        first_mepc: u32,
+        /// 第一个陷阱的 `mtvec` 落点（交付后 `pc`，即 handler 入口）。
+        first_mtvec_target: u32,
+    },
     /// Catch-all for kernel errors (see [`crate::error::PlatformError`]).
     Error {
         code: String,
@@ -1086,9 +1135,14 @@ mod tests {
     /// 装载**成功之后**多一条回执（name / kind / entry / segments /
     /// elf_bits+has_rvc / platform_revision）⇒ ⇒ 线上**多一个事件变体 +
     /// 一个 DTO**（`model::ImageSegment`）。
+    ///
+    /// **v20** adds the **陷阱交付策略**（R-1）：多一条命令
+    /// `SetStopPolicy` 与一个事件 `TrapSummary`（后者只在
+    /// `stop_on_trap = false` 时发）⇒ ⇒ 线上**多一个命令变体 + 一个事件
+    /// 变体**；`HaltReason` **一个变体都不加**。
     #[test]
-    fn the_schema_version_is_nineteen() {
-        assert_eq!(crate::SCHEMA_VERSION, 19);
+    fn the_schema_version_is_twenty() {
+        assert_eq!(crate::SCHEMA_VERSION, 20);
     }
 
     /// **批 C**（STAGE-55）：`Halted` 多一个**可选**的 `trigger_addr`
@@ -1434,8 +1488,9 @@ mod tests {
         let json = serde_json::to_value(&msg).expect("json");
         // ⚠️ **v17（v0.77 · STAGE-53）**：`SetBudget` 变体退役；
         //    **v18（v0.138）**：观察表达式整块下线（3 条命令 + 1 条事件）；
-        //    **v19（v0.144 · M-24）**：装载回执 `ImageLoaded` 上线。
-        assert_eq!(json["schema_version"], 19);
+        //    **v19（v0.144 · M-24）**：装载回执 `ImageLoaded` 上线；
+        //    **v20（R-1）**：陷阱交付策略 `SetStopPolicy` + `TrapSummary`。
+        assert_eq!(json["schema_version"], 20);
     }
 
     // -----------------------------------------------------------------

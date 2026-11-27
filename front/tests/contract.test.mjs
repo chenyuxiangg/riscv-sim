@@ -426,6 +426,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Command.backtrace()),
             // STAGE-55 真相候选列表批：一条**只读**命令。
             variantOf(Command.listLocals()),
+            // 契约 v20 新增：会话级陷阱交付策略（R-1）。
+            variantOf(Command.setStopPolicy(false, 4)),
         ].sort();
         assert.deepEqual(js, rust, "JS 命令变体与 Rust CommandPayload 不一致");
     });
@@ -468,6 +470,8 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
             variantOf(Event.platformTemplate({})),
             // 契约 v13 新增：内核断点表的只读回执。
             variantOf(Event.breakpoints([])),
+            // 契约 v20 新增：陷阱交付汇总（只在非默认策略下发）。
+            variantOf(Event.trapSummary(1, 2, 0, 0)),
             // STAGE-55 栈回溯批：栈回溯回执。
             variantOf(Event.backtrace([], false)),
             // STAGE-55 真相候选列表批：当前帧局部变量回执。
@@ -612,6 +616,9 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 Backtrace: Command.backtrace(),
                 // ⚠️ **STAGE-55 真相候选列表批** ⇒ ⇒ unit 变体（裸字符串）。
                 ListLocals: Command.listLocals(),
+                // ⚠️ **契约 v20**（R-1 陷阱交付策略）⇒ ⇒ 登记
+                //   （`stop_on_trap` / `max_trap_events`）。
+                SetStopPolicy: Command.setStopPolicy(false, 4),
             },
             EventPayload: {
                 Tick: Event.tick(0, 0),
@@ -663,6 +670,10 @@ describe("契约一致性（JS 镜像 vs Rust 源码）", () => {
                 //   （`name` / `kind` / `entry` / `segments` / `elf_bits` /
                 //   `has_rvc` / `platform_revision`）。
                 ImageLoaded: Event.imageLoaded("fw.bin", "RawHex", 0, [], 0, false, 0),
+                // ⚠️ **契约 v20**（R-1 陷阱交付策略）⇒ ⇒ 字段名逐字比对的
+                //   登记处（`count` / `first_cause` / `first_mepc` /
+                //   `first_mtvec_target`）。
+                TrapSummary: Event.trapSummary(1, 2, 0, 0),
             },
         };
 

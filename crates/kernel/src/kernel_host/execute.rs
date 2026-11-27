@@ -211,6 +211,10 @@ impl KernelHost {
     }
 
     fn on_run_inner(&mut self, steps: Option<u32>, step_over: bool) -> Vec<EventPayload> {
+        // R-1：**本窗口**的陷阱计数从零开始 —— `max_trap_events` 的配额
+        // 与 `TrapSummary` 都按「一次批处理窗口」算（`run` 里内核还会
+        // 再分块，但那几次分块**共用**这一个窗口的计数）。
+        self.backend.reset_trap_window();
         // 运行期**重试**装探针回调（V-A 检视 · 🟡-7）。
         //
         // 装配那一刻外设可能正被总线派发路径占用（`try_borrow_mut` 失败）
@@ -275,6 +279,22 @@ impl KernelHost {
         // console 事件（v0.23 · 契约 v4）：订阅了才推。
         if let Some(console) = self.console_event() {
             events.push(console);
+        }
+        // R-1：**只在非默认策略下发**「这一窗口交付了哪些陷阱」——
+        // 默认策略下事件序列与改动前逐字节一致（AC1）。三个值来自
+        // `enter_trap` 刚写下的 `mcause`/`mepc` 与它算出的落点（AC4），
+        // 帧数与陷阱数无关（不会把事件环挤爆）。
+        if !self.backend.stop_on_trap() {
+            if let Some((first_cause, first_mepc, first_mtvec_target)) =
+                self.backend.first_trap_this_window()
+            {
+                events.push(EventPayload::TrapSummary {
+                    count: self.backend.traps_this_window(),
+                    first_cause,
+                    first_mepc,
+                    first_mtvec_target,
+                });
+            }
         }
         events.push(self.tick());
         if let Some(wave) = self.register_waveform(false) {

@@ -72,10 +72,10 @@ const ADMIN_DIAG_FIELDS = [
 // ---------------------------------------------------------------------------
 
 describe("契约 v8 · 前端镜像（C-1）", () => {
-    test("契约信封版本是 **19**（与契约层同批升版）", () => {
+    test("契约信封版本是 **20**（与契约层同批升版）", () => {
         // ⚠️ **版本字面量随契约升版**（v8 → v9 · STAGE-42 规格 §2.8）⇒ ⇒
         //   这条判据**钉住的是那个确切的数** ⇒ ⇒ 意外的升版 / 漏改都会红。
-        assert.equal(SCHEMA_VERSION, 19, "契约信封版本必须是 19（v17 `SetBudget` 退役 · v18 观察表达式下线 · v19 装载回执 ImageLoaded）");
+        assert.equal(SCHEMA_VERSION, 20, "契约信封版本必须是 20（v18 观察表达式下线 · v19 装载回执 ImageLoaded · v20 陷阱交付策略 SetStopPolicy / TrapSummary）");
     });
 
     test("两个 admin topic 在表里，且拼写逐字一致", () => {

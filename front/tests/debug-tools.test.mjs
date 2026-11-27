@@ -185,7 +185,7 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 // ---------------------------------------------------------------------------
 
 describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
-    test("C-1 · `SCHEMA_VERSION` = 19，两个上限**逐字**等于跨层夹具", () => {
+    test("C-1 · `SCHEMA_VERSION` = 20，两个上限**逐字**等于跨层夹具", () => {
         // ⚠️ **夹具是「两个真相结构上不可能」的唯一保障**（裁决 K）⇒ ⇒
         //   这里读**那一个文件** ⇒ ⇒ 前端镜像与 Rust 常量任一处改动 ⇒ ⇒
         //   这条立刻红。
@@ -193,7 +193,7 @@ describe("契约镜像的版本与两个上限（视图层 · C-1）", () => {
             resolve(repoRoot, "crates/contract/fixtures/debug-limits.json"),
             "utf8",
         ));
-        assert.equal(msg.SCHEMA_VERSION, 19, "前端镜像的信封版本必须是 19（v17 `SetBudget` 退役 · v18 观察表达式下线 · v19 装载回执）");
+        assert.equal(msg.SCHEMA_VERSION, 20, "前端镜像的信封版本必须是 20（v18 观察表达式下线 · v19 装载回执 · v20 陷阱交付策略）");
         assert.equal(
             msg.DUMP_MAX_BYTES,
             fixture.dump_max_bytes,
