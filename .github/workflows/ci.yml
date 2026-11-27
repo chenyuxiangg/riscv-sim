@@ -17,7 +17,18 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --message-format=short -- -D warnings 2>&1 | tee /tmp/clippy.log
+      - name: clippy 诊断（只在失败时）
+        if: failure()
+        run: |
+          {
+            echo "### cargo clippy 失败（报错/告警按文件行号）"
+            echo '```'
+            grep -E '^(error|warning)' /tmp/clippy.log | head -40 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: cargo test
         run: cargo test --workspace
 
@@ -25,7 +36,12 @@ jobs:
     name: Front end · ESM link + smoke
     runs-on: ubuntu-latest
     steps:
+      # ⚠️ 必须全历史：`tools/front_test_attrib.py` 的自检要 `git worktree`
+      #    检出 v0.31 / v0.32 / v0.33 三个历史版本重算归属 —— 浅克隆下这些
+      #    commit 不存在 ⇒ 「历史回归」直接抛 CalledProcessError（CI 红过一次）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
