@@ -25,6 +25,21 @@
 
 `run` 只回 `job`，长任务用 `poll_job` —— 因为 `max_run_ms` 默认 5000，同步等必然撞墙钟。
 
+## 客户端手上的 ELF 怎么装（文件上行）
+
+工具参数里塞文件是错的：100 KB 的 ELF base64 之后是 133 K 字符，上下文先烧光。所以
+**字节流走 HTTP**，同一个令牌：
+
+```bash
+curl -X POST http://127.0.0.1:18877/images \
+  -H "Authorization: Bearer $SIM_MCP_TOKEN" \
+  -H "x-image-name: fw.elf" \
+  --data-binary @fw.elf
+```
+
+回体 `{ok, bytes, kind, entry, segments, session_id}`，装完即复位到 `entry`。
+`load_image` 仍保留 `hex` / `b64`（小文件）/ `path` 三种入口，工具数还是 9 个。
+
 ## 起了它之后怎么验
 
 ```bash

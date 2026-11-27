@@ -15,12 +15,31 @@
 
 ## load_image
 
-- 参数：`hex`（**原始字节**的十六进制字符串，如 `9302200093821200`）或 `path`（白名单
-  `/data/images` 下的文件）；`name`（默认 `fw.bin`）
+- 参数（四选一的入口）：`hex`（**原始字节**的十六进制字符串，如 `9302200093821200`）/
+  `b64`（文件字节的 base64，**只为小文件**，几十 KB 以内）/ `path`（白名单 `/data/images`
+  下的文件）/ 不用工具而是 `POST /images`（见下节）；`name`（默认 `fw.bin`）
 - 返回：`{name, kind, entry, segments:[{base,size}]}`
 - `name` 的扩展名决定解析：`.bin` ⇒ RawHex，`.elf` ⇒ ELF；**`.hex` 文本会被
   `E_PROTO-08` 拒**（那是 Intel HEX 格式，不是原始字节）
 - 装载后会复位到 `entry`，`t_ps` 归零
+
+## 文件上行 `POST /images`（不是 MCP 工具）
+
+```
+POST <base>/images
+Authorization: Bearer <SIM_MCP_TOKEN>
+x-image-name: fw.elf
+content-type: application/octet-stream
+
+<文件原始字节>
+```
+
+- 回体：`{ok, session_id, bytes, name, kind, entry, segments:[{base,size}], pc}`
+- 装完**即复位到 entry**；等价于 `load_image(path=...)` 但你不用先传文件到服务器
+- 目标会话必须是本客户端的（先 `boot`）；没有会话回 `409 / E_MCP-02`
+- 上限 `SIM_MCP_MAX_UPLOAD`（默认 16 MiB）：超了 `413 / E_MCP-09`；空 body `400 / E_MCP-08`
+- 为什么不用工具参数：100 KB 的 ELF base64 之后是 133 K 字符，等于把上下文烧光；
+  而且多数客户端没法把本地文件变成参数。字节流走 HTTP 是零成本路径。
 
 ## advance
 
@@ -91,6 +110,8 @@
 | `E_MCP-05` | poll_job | 缺 `job` |
 | `E_MCP-06` | inspect / disasm | `memory` 缺 `addr`，或 `kind` 不认识 |
 | `E_MCP-07` | breakpoints | `op` 不认识，或 `set` 三选一都没给 / `clear` 缺 `id` |
+| `E_MCP-08` | `POST /images` | body 空（发的是 JSON 不是字节流） |
+| `E_MCP-09` | `POST /images` | 超过 `SIM_MCP_MAX_UPLOAD`（默认 16 MiB） |
 | `E_SESS-02` | 服务端 | 会话忙（409），等 200ms 重试 |
 | `E_PROTO-08` | 服务端 | 不接受的文件形态（`.hex` 文本） |
 | `E_PLT-22` | 服务端 | 会话没有生效板：`boot` 没带 `board` |

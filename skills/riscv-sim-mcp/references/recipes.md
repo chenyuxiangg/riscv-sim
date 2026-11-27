@@ -2,6 +2,19 @@
 
 每个剧本＝一串工具调用 + 一条**判据**。判据不成立就停手排查，不要接着往下推。
 
+## R0 · 装一个真 ELF 文件
+
+```
+boot {"board":"qemu-virt"}
+# 客户端侧（不是工具）：sim_call.py --upload ./fw.elf
+inspect {"kind":"state"}          → pc 应等于 entry（通常是 0x80000000）
+disasm {"addr":<entry>,"count":8} → 头几条应是你编的指令
+run {"steps":50}
+```
+
+判据：`kind=Elf` 且回体带 `entry` 与 `segments`（不止一段）；随便跑 50 条不 trap。
+`kind=RawHex` + `entry=0` ⇒ 名字给成了 `.bin`，ELF 头被当字节吃了 —— 改 `--name fw.elf`。
+
 ## R1 · 链路基线（每次开工先跑）
 
 ```
