@@ -538,9 +538,14 @@ def t_inspect(client: str, args: dict) -> dict:
         # ⚠️ 服务端回的是**裸字节**（`application/octet-stream`），方位信息在
         #    `x-console-*` 头里 —— 不是 JSON 的 `bytes` 数组。按 JSON 读会把
         #    长度读成 0、base/total 全丢（v0.1.18 之前的实际故障）。
-        text = body.get("raw") if isinstance(body, dict) else None
-        if text is None:
-            text = body.decode() if isinstance(body, bytes) else str(body)
+        # 空 console 时 HTTP 体是 0 字节 ⇒ `_decode` 回 `{}`。别把 `{}` 当正文
+        # （那会让模型以为串口里真有两个大括号）。
+        if isinstance(body, dict):
+            text = body.get("raw", "")
+        elif isinstance(body, (bytes, bytearray)):
+            text = body.decode("utf-8", "replace")
+        else:
+            text = str(body)
         raw_bytes = len(text.encode("utf-8")) if isinstance(text, str) else 0
         base = int(headers.get("x-console-base", 0))
         total = int(headers.get("x-console-total", 0))
