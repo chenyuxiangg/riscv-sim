@@ -15,7 +15,9 @@ target
 **/target
 docs
 tests
+# tools 整体不进上下文，只放行账号库 CLI（M-25：上线第一步要 docker exec 跑它）。
 tools
+!tools/accounts.py
 # Skill 是给 AI 读的文档 + 脚本：不进镜像，也不该进构建上下文。
 skills
 *.md
