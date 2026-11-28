@@ -106,7 +106,15 @@ impl ConsoleLog {
             .ok()
             .and_then(|raw| raw.trim().parse::<usize>().ok())
             .unwrap_or(cap);
-        match Self::open(std::path::Path::new(&dir), id, cap, 0) {
+        // 文件名带创建时刻：`sess-000001` 在容器重启 / TTL 回收后会被复用，
+        // 同名日志会跨「会话世代」混在一起（旧文本被当成新会话的 console）。
+        // 带戳后每个世代一个文件，24 h 内都还能翻，互不覆盖。
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let name = format!("{id}-{stamp}");
+        match Self::open(std::path::Path::new(&dir), &name, cap, 0) {
             Ok(log) => Some(log),
             Err(err) => {
                 eprintln!("riscv_sim_server: console log disabled for {id}: {err}");
