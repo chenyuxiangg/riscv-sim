@@ -21,7 +21,7 @@
 ## 工具面（写细分 / 读合并）
 
 `boot` · `load_image` · `advance` · `run` · `stop_policy` · `poll_job` · `inspect` · `disasm` · `breakpoints` · `events` · `close_session`
-（`close_session` 是**正常生命周期**工具，始终注册：跑完主动还配额；`reset` / `drop_session` 属破坏性，需 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册）
+（`close_session` 是**正常生命周期**工具，始终注册：**每个任务收尾都要调**，跑完主动还配额；`reset` / `drop_session` 属破坏性，需 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册）
 
 `run` 只回 `job`，长任务用 `poll_job` —— 因为 `max_run_ms` 默认 5000，同步等必然撞墙钟。
 
