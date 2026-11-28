@@ -33,6 +33,10 @@ pub struct ErrorBody {
     ///    客户端不需要从 detail 里正则抠数字。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<u64>,
+    /// 结构化补充：`E_SESS-04` 时给「这个会话一共产生到多少字节」。
+    /// 窗口丢失的响应里同时有 `base` 与 `total`，一次就能算清丢了多少。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 /// 一个已定位的 API 错误。
@@ -43,6 +47,8 @@ pub struct ApiError {
     detail: String,
     /// 见 [`ErrorBody::base`]。
     base: Option<u64>,
+    /// 见 [`ErrorBody::total`]。
+    total: Option<u64>,
 }
 
 impl ApiError {
@@ -53,12 +59,13 @@ impl ApiError {
             code: code.into(),
             detail: detail.into(),
             base: None,
+            total: None,
         }
     }
 
-    /// 409 · console 窗口丢失。**带上 `base`**：客户端据此重新对齐，
-    /// 不必再猜「到底丢了多少」。
-    pub fn console_window_lost(base: u64, requested: u64) -> Self {
+    /// 409 · console 窗口丢失。**同时带 `base` 与 `total`**：一次响应就能算
+    /// 清「丢了多少、现在还能读什么」，不必再补一次探测读。
+    pub fn console_window_lost(base: u64, total: u64, requested: u64) -> Self {
         let mut err = Self::new(
             StatusCode::CONFLICT,
             "E_SESS-04",
@@ -68,6 +75,7 @@ impl ApiError {
             ),
         );
         err.base = Some(base);
+        err.total = Some(total);
         err
     }
 
@@ -294,11 +302,13 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status;
         let base = self.base;
+        let total = self.total;
         let body = ErrorBody {
             code: self.code,
             detail: self.detail,
             status: status.as_u16(),
             base,
+            total,
         };
         let mut response = (status, Json(body)).into_response();
         // 头也带一份：`curl -D` / 浏览器不必解析 body 就能对齐。
@@ -306,6 +316,11 @@ impl IntoResponse for ApiError {
             response
                 .headers_mut()
                 .insert("x-console-base", base.to_string().parse().expect("ascii"));
+        }
+        if let Some(total) = total {
+            response
+                .headers_mut()
+                .insert("x-console-total", total.to_string().parse().expect("ascii"));
         }
         response
     }
@@ -323,6 +338,25 @@ mod tests {
         assert!(err.detail.contains("/api/version"));
     }
 
+    /// 窗口丢失必须一次给齐 `base` 与 `total`：客户端靠这两个数算「丢了多少」。
+    #[test]
+    fn window_lost_body_and_headers_carry_base_and_total() {
+        let err = ApiError::console_window_lost(120, 130, 10);
+        let response = err.into_response();
+        assert_eq!(response.headers()["x-console-base"], "120");
+        assert_eq!(response.headers()["x-console-total"], "130");
+        let body = ErrorBody {
+            code: "E_SESS-04".into(),
+            detail: "x".into(),
+            status: 409,
+            base: Some(120),
+            total: Some(130),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"base\":120"), "{json}");
+        assert!(json.contains("\"total\":130"), "{json}");
+    }
+
     #[test]
     fn body_carries_status_code_and_detail() {
         let err = ApiError::new(
@@ -335,6 +369,7 @@ mod tests {
             detail: err.detail.clone(),
             status: err.status.as_u16(),
             base: None,
+            total: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains("\"code\":\"E_PROTO-08\""));

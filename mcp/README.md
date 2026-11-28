@@ -29,7 +29,7 @@
 收尾仍要 `close_session`。
 
 `inspect {kind:"console"}` 用**绝对 offset** 读、读不消费内容，回 `base/total/next/lost`；
-默认 4 KiB，窗口丢了回 `base` 让客户端重新对齐（服务端 409 `E_SESS-04`）。
+默认 4 KiB，窗口丢了回 `base` + `total` 让客户端一次算清丢了多少（服务端 409 `E_SESS-04`）。
 
 `run` 只回 `job`，长任务用 `poll_job` —— 因为 `max_run_ms` 默认 5000，同步等必然撞墙钟。
 

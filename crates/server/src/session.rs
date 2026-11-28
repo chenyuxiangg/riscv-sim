@@ -192,42 +192,70 @@ pub fn spawn_console_gc() {
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(600);
+    // 全局总量上限：24 h 内会积很多「会话世代」文件，单会话 64 MiB 挡不住总量。
+    // 0 = 不限。清理顺序：先按年龄，再按 mtime 从旧到新，直到总量回到线内。
+    let total_max = std::env::var("SIM_CONSOLE_LOG_TOTAL_MAX")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(1 << 30);
     let spawned = thread::Builder::new()
         .name("console-gc".to_string())
         .spawn(move || loop {
             thread::sleep(Duration::from_secs(every.max(1)));
-            console_gc_once(std::path::Path::new(&dir), Duration::from_secs(retention));
+            console_gc_once(
+                std::path::Path::new(&dir),
+                Duration::from_secs(retention),
+                total_max,
+            );
         });
     if let Err(err) = spawned {
         eprintln!("riscv_sim_server: console gc disabled: {err}");
     }
 }
 
-/// 扫一遍目录，删掉年龄超过 `retention` 的 `.log`。返回删了几个。
-fn console_gc_once(dir: &std::path::Path, retention: Duration) -> usize {
+/// 扫一遍目录：先删年龄超过 `retention` 的 `.log`；若剩余总量超过
+/// `total_max`（0 = 不限），再按 mtime 从旧到新删到线内。返回删了几个。
+fn console_gc_once(dir: &std::path::Path, retention: Duration, total_max: u64) -> usize {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return 0,
     };
     let mut removed = 0;
+    let mut kept: Vec<(std::path::PathBuf, std::time::SystemTime, u64)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
             continue;
         }
-        let old = entry
-            .metadata()
-            .ok()
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|modified| modified.elapsed().ok())
-            .map(|age| age >= retention)
-            .unwrap_or(false);
-        if old && std::fs::remove_file(&path).is_ok() {
-            removed += 1;
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let old = mtime.elapsed().map(|age| age >= retention).unwrap_or(false);
+        if old {
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+            continue;
+        }
+        kept.push((path, mtime, meta.len()));
+    }
+    if total_max > 0 {
+        let mut total: u64 = kept.iter().map(|(_, _, len)| *len).sum();
+        kept.sort_by_key(|(_, mtime, _)| *mtime);
+        for (path, _, len) in &kept {
+            if total <= total_max {
+                break;
+            }
+            if std::fs::remove_file(path).is_ok() {
+                total = total.saturating_sub(*len);
+                removed += 1;
+            }
         }
     }
     if removed > 0 {
-        eprintln!("riscv_sim_server: console gc removed {removed} expired log(s)");
+        eprintln!("riscv_sim_server: console gc removed {removed} log(s)");
     }
     removed
 }
@@ -1113,7 +1141,8 @@ impl SessionHandle {
         // 窗口丢失是一条**正常回复**里的结构化信号（不是内核错误）：
         // `base` 必须能被打包进 409 的 body，客户端据此重新对齐。
         if let Some(base) = body.get("window_lost").and_then(|v| v.as_u64()) {
-            return Err(ApiError::console_window_lost(base, offset));
+            let total = body.get("total").and_then(|v| v.as_u64()).unwrap_or(base);
+            return Err(ApiError::console_window_lost(base, total, offset));
         }
         Ok(body)
     }
@@ -2362,6 +2391,7 @@ fn spawn_worker(
                                 //    重新对齐，不该去正则抠数字）。
                                 Err(base) => Ok(serde_json::json!({
                                     "window_lost": base,
+                                    "total": console.total,
                                     "offset": offset,
                                 })),
                             });
@@ -2928,6 +2958,30 @@ mod tests {
         ring.clear();
         assert_eq!(ring.window_base(), 10);
         assert_eq!(ring.read(2, 8).expect_err("旧窗口全部作废"), 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 全局总量上限：先按年龄删，再按 mtime 从旧到新删到线内。
+    #[test]
+    fn console_gc_enforces_total_cap_oldest_first() {
+        let dir = std::env::temp_dir().join(format!(
+            "sim-console-gc-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, len) in [("a.log", 100usize), ("b.log", 200), ("c.log", 300)] {
+            std::fs::write(dir.join(name), vec![b'x'; len]).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // 400 字节线：100 + 200 + 300 = 600 ⇒ 删掉最旧的 a、b，剩 c = 300。
+        let removed = console_gc_once(&dir, Duration::from_secs(86_400), 400);
+        assert_eq!(removed, 2, "应删 a、b");
+        assert!(!dir.join("a.log").exists() && !dir.join("b.log").exists());
+        assert!(dir.join("c.log").exists());
+        // 年龄判据独立生效：retention 0 ⇒ 全部按过期删。
+        let removed = console_gc_once(&dir, Duration::from_secs(0), 0);
+        assert_eq!(removed, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

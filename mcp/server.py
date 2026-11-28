@@ -528,10 +528,12 @@ def t_inspect(client: str, args: dict) -> dict:
                     base = int(err.headers.get("x-console-base", 0))
                 except ValueError:
                     base = 0
-            total = err.headers.get("x-console-total")
+            total = err.body.get("total")
+            if total is None:
+                total = err.headers.get("x-console-total")
             return {
                 "text": (f"console 窗口已丢：可读窗口从 offset {base} 起"
-                         f"（你请求 {offset}）；从 {base} 重读即可"),
+                         f"（你请求 {offset}，累计到 {total}）；从 {base} 重读即可"),
                 "data": {"offset": offset, "base": base,
                          "total": int(total) if total else None, "window_lost": True},
             }
