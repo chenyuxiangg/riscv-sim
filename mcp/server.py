@@ -546,12 +546,44 @@ def t_drop_session(client: str, args: dict) -> dict:
     return {"text": f"已删除自己的会话 {sid}（不影响别人的）", "data": {"session_id": sid}}
 
 
+def t_close_session(client: str, args: dict) -> dict:
+    """主动释放本客户端自己的会话（**幂等**）：跑完就还配额，不必等 TTL。
+
+    ⚠️ 只动 `OWNER` 里本客户端映射的那一条 —— 浏览器页面 / 别的令牌开的会话
+       **不碰**（同一账号共用一个配额池，闭掉别人的等于把对方正在看的页面砸掉）。
+    """
+    with OWNER._lock:
+        entry = OWNER._map.get(client)
+    if not entry:
+        # 没有映射（还没 boot，或 MCP 进程重启丢了内存态）⇒ 什么都不删，
+        # 但把「已经没什么可释放」说清楚，调用方不必把它当失败重试。
+        return {"text": "这个客户端当前没有在跟踪的会话（无需释放）",
+                "data": {"session_id": None, "closed": False}}
+    sid = entry["sid"]
+    try:
+        status, _, _ = _http("DELETE", f"/api/sessions/{sid}", token=entry.get("token"))
+    except SimError as err:
+        # 404 = 服务端已经没了（TTL 回收 / 别人删了）⇒ 与「刚删掉」等价，按幂等成功回。
+        if err.status != 404:
+            raise
+        status = 404
+    with OWNER._lock:
+        OWNER._map.pop(client, None)
+    gone = status in (200, 202, 204, 404)
+    return {
+        "text": (f"已释放会话 {sid}，配额立即可用" if status != 404
+                 else f"会话 {sid} 已经不存在（TTL 回收或已关闭），无需再释放"),
+        "data": {"session_id": sid, "closed": gone, "status": status},
+    }
+
+
 # --------------------------------------------------------------------------- 工具清单
 TOOLS = [
     {
         "name": "boot",
         "description": ("建立/复用本客户端自己的仿真会话（幂等）。返回 session_id 与板名。"
-                        "每个客户端最多 1 个会话；空闲 5 分钟会被自动回收。"),
+                        "每个客户端最多 1 个会话；空闲回收：MCP 侧 5 分钟 sweeper、"
+                        "服务端 15 分钟 TTL。跑完想立刻还配额就调 close_session。"),
         "inputSchema": {
             "type": "object",
             "properties": {"board": {"type": "string",
@@ -687,6 +719,15 @@ TOOLS = [
         },
         "fn": t_events,
     },
+    {
+        "name": "close_session",
+        "description": ("主动释放本客户端自己的会话（幂等）。跑完/交付完就还配额，"
+                        "不必等空闲回收（MCP 侧 5 分钟 sweeper、服务端 15 分钟 TTL）。"
+                        "只删本客户端映射的那一条 —— 浏览器页面或别的令牌开的会话不碰。"
+                        "释放后再用就先 boot（会新建一条）。"),
+        "inputSchema": {"type": "object", "properties": {}},
+        "fn": t_close_session,
+    },
 ]
 
 if ALLOW_DESTRUCTIVE:
@@ -728,7 +769,7 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         return _rpc_result(msg_id, {
             "protocolVersion": PROTOCOL if asked != PROTOCOL else asked,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "sim-mcp", "version": "0.1.4"},
+            "serverInfo": {"name": "sim-mcp", "version": "0.1.5"},
             "instructions": ("先 boot，再 load_image(hex=原始字节的十六进制)，然后 advance(n)。"
                              "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"),
         })

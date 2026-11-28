@@ -4,7 +4,7 @@
     python3 tools/check_mcp.py --url http://127.0.0.1:18877/mcp --token <MCP 令牌>
 
 断言（这条线就是「AI 能自己跑起来」的判据）：
-    1. tools/list 至少 9 个工具，且 boot / load_image / advance 都在
+    1. tools/list 至少 10 个工具，且 boot / load_image / advance / close_session 都在
     2. boot 拿到 session_id
     3. 装 8 字节 RawHex 固件（addi x5,x0,2 → addi x5,x5,1）
     4. advance(2) ⇒ executed=2 · pc=8 · t_ps=2000
@@ -69,7 +69,7 @@ def main() -> int:
     mcp.rpc("notifications/initialized")
     tools = [t["name"] for t in mcp.rpc("tools/list")["result"]["tools"]]
     print("tools →", tools)
-    for need in ("boot", "load_image", "advance", "inspect"):
+    for need in ("boot", "load_image", "advance", "inspect", "close_session"):
         assert need in tools, f"缺工具 {need}"
 
     boot = mcp.call("boot", {"board": "qemu-virt"})
@@ -105,7 +105,13 @@ def main() -> int:
     assert ev["data"]["frames"], "事件环里应该有 SimStateDelta"
     assert ev["data"]["next"] >= 1, ev["data"]["next"]
 
-    print("\n✅ MCP 验收通过：装固件 → advance(2) → pc=8 · x5=3")
+    # 8) 主动释放：跑完就还配额（不必等 MCP 5 分钟 sweeper / 服务端 15 分钟 TTL）
+    closed = mcp.call("close_session")
+    print("close_session →", closed["summary"])
+    assert closed["data"]["closed"] is True, closed["data"]
+    assert closed["data"]["session_id"] == sid, closed["data"]
+
+    print("\n✅ MCP 验收通过：装固件 → advance(2) → pc=8 · x5=3 → close_session 释放")
     return 0
 
 

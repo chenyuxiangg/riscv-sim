@@ -85,6 +85,10 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 | `disasm` | 反汇编 | `addr` `count` |
 | `breakpoints` | 断点表 | `op`=list\|set\|clear\|enable（set 三选一：`addr`/`symbol`/`condition`） |
 | `events` | 增量拉事件 | `since`=`next`，`limit` |
+| `close_session` | 主动释放自己的会话（幂等） | 无参；跑完就还配额，不必等空闲回收 |
+
+`close_session` **始终注册**（正常生命周期，不是破坏性）：只删本客户端映射的那一条，
+浏览器页面 / 别的令牌开的会话不碰；没有会话时按幂等回「无需释放」。
 
 `reset` / `drop_session` 属**破坏性**，只有服务端设了 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册。
 工具列表里没有它们，就是闸门关着 —— 告诉用户去开，**别绕过 MCP 直连 `:9876`**。
@@ -98,6 +102,7 @@ boot {"board":"qemu-virt"}                      → session_id
 load_image hex=9302200093821200 name=fw8.bin    → entry=0x0，段 [0x0+8]
 advance n=2                                     → executed=2 · pc=8 · t_ps=2000 · stop_reason=steps
 inspect kind=state                              → x5(t0)=3
+close_session                                    → 会话已删，配额立即可用
 events since=0                                  → next=4，含 ImageLoaded / SimStateDelta
 ```
 

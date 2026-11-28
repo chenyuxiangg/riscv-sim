@@ -44,7 +44,7 @@
 
 `boot` 时没给 `board`，会话建起来了但没有板，装载自然无处落。
 先 `boot {"board":"qemu-virt"}`：0.1.1 起会**重建**会话；0.1.0 只会复用，
-只能等 5 分钟空闲回收，或开闸 `drop_session`。别把这条当成工具坏了。
+先 `close_session` 把旧会话释放掉（0.1.3 起始终可用），再 `boot {"board":"qemu-virt"}` 重建；不释放也能等空闲回收（MCP 侧 5 分钟 / 服务端 15 分钟）。别把这条当成工具坏了。
 
 ## 6. 装上了但跑不动
 
@@ -62,7 +62,8 @@
 
 ## 7. 找不到破坏性工具
 
-`reset` / `drop_session` 默认**不注册**（`SIM_MCP_ALLOW_DESTRUCTIVE=0`）。
+先分清：**释放会话不是破坏性操作** —— `close_session` 始终注册，跑完直接调。
+`reset` / `drop_session` 才是默认**不注册**的（`SIM_MCP_ALLOW_DESTRUCTIVE=0`）。
 需要时让服务端把它设成 `1` 并重启 MCP。**不要**为了复位去绕过 MCP 直连内部端口 ——
 那等于把「谁能下令」这一层拆了。
 

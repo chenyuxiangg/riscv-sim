@@ -1,6 +1,6 @@
 # sim-mcp · AI 接入层
 
-把 `riscv_sim` 的 HTTP 面收成 **10 个 MCP 工具**，让 AI（Claude Code / Cursor / 自研 agent）
+把 `riscv_sim` 的 HTTP 面收成 **11 个 MCP 工具**，让 AI（Claude Code / Cursor / 自研 agent）
 能驱动一个真的在跑的仿真器。对应图：`docs/architecture/mcp-view.svg`。
 
 ## 它是什么，不是什么
@@ -14,14 +14,14 @@
 | 令牌 | 谁持有 | 能干什么 |
 |---|---|---|
 | `SIM_TOKEN` | **只有本进程**（env） | 建/删/查所有会话、跑任意固件 |
-| `SIM_MCP_TOKEN` | 客户端 | 只能调 10 个工具，且只见自己的会话 |
+| `SIM_MCP_TOKEN` | 客户端 | 只能调 11 个工具，且只见自己的会话 |
 
 启动时若两条令牌相同 ⇒ 直接拒绝启动（那等于把两层凭据退化成一层）。
 
 ## 工具面（写细分 / 读合并）
 
-`boot` · `load_image` · `advance` · `run` · `stop_policy` · `poll_job` · `inspect` · `disasm` · `breakpoints` · `events`
-（`reset` / `drop_session` 属破坏性，需 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册）
+`boot` · `load_image` · `advance` · `run` · `stop_policy` · `poll_job` · `inspect` · `disasm` · `breakpoints` · `events` · `close_session`
+（`close_session` 是**正常生命周期**工具，始终注册：跑完主动还配额；`reset` / `drop_session` 属破坏性，需 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册）
 
 `run` 只回 `job`，长任务用 `poll_job` —— 因为 `max_run_ms` 默认 5000，同步等必然撞墙钟。
 
