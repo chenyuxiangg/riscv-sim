@@ -233,6 +233,8 @@ docker exec riscv-sim python3 /opt/sim-tools/accounts.py revoke-token --account 
 
 配额默认 **全局 8 / 单账号 2**（页面占一个、agent 占一个）；单账号满了回 `429 E_SESS-05`，别人不受影响。要放宽：`--max-sessions-per-account 4`。
 
+**同源页面的会话复用（v0.1.16 起）**：页面由服务端自己发出来时（`--front-dir`，一条地址一个端口），开页/刷新会先 `GET /api/sessions` **复用最近一条空闲会话**，只有一条都没有（或选中的那条已经没了）才 `POST` 新建 —— 否则每次刷新都吃一条配额，两次刷新之后第三次开页就是 `429 E_SESS-05` ⇒ 页面拿不到 `sessionId` ⇒ 状态栏只剩 `E_TRX-03 未配置 WebSocket URL`（账号模式最容易踩的「看着像传输坏了、其实是配额满了」）。一定要一条全新会话时：先 `POST /api/sessions` 拿 id，再用 `?session=<id>` 打开。
+
 **MCP 怎么用**：客户端带自己的令牌即可，MCP 不再需要服务凭据。
 
 ```bash

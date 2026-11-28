@@ -132,6 +132,53 @@ describe("M-07 server-mode · 建/验会话（ensureSession）", () => {
         assert.equal(call.key, "POST /api/sessions");
         assert.deepEqual(JSON.parse(call.init.body), { board: "qemu-virt" });
         assert.equal(call.init.headers["x-auth-token"], "t0k");
+        // 账号模式下同源页面靠 `sim_auth` cookie 认人 ⇒ 请求必须带 cookie
+        // （`omit` 会让 POST /api/sessions 一律 401 ⇒ 页面只剩 E_TRX-03）。
+        assert.equal(call.init.credentials, "same-origin");
+    });
+
+    test("同源开页（reuse）⇒ 复用最近一条空闲会话，不 POST 新建", async () => {
+        const fetchImpl = fakeFetch({
+            "GET /api/sessions": {
+                body: {
+                    quota: { max: 2, used: 2 },
+                    sessions: [
+                        { session_id: "sess-old", busy: false, age_ms: 5000 },
+                        { session_id: "sess-busy", busy: true, age_ms: 100 },
+                        { session_id: "sess-new", busy: false, age_ms: 200 },
+                    ],
+                },
+            },
+            "GET /api/sessions/sess-new": {
+                body: { session: { session_id: "sess-new", board: "qemu-virt" }, pc: 0 },
+            },
+        });
+        const bound = await mode.ensureSession({
+            serverUrl: "http://127.0.0.1:9876",
+            reuse: true,
+            fetchImpl,
+        });
+        assert.equal(bound.sessionId, "sess-new", "空闲且最新的一条");
+        assert.equal(bound.created, false, "复用不是新建");
+        assert.equal(bound.board, "qemu-virt");
+        assert.deepEqual(
+            fetchImpl.calls.map((c) => c.key),
+            ["GET /api/sessions", "GET /api/sessions/sess-new"],
+        );
+    });
+
+    test("reuse 但列表空 ⇒ 退回 POST 新建（配额没满时照旧可用）", async () => {
+        const fetchImpl = fakeFetch({
+            "GET /api/sessions": { body: { quota: { max: 2, used: 0 }, sessions: [] } },
+            "POST /api/sessions": { status: 201, body: { session_id: "sess-1", board: null } },
+        });
+        const bound = await mode.ensureSession({
+            serverUrl: "http://127.0.0.1:9876",
+            reuse: true,
+            fetchImpl,
+        });
+        assert.equal(bound.sessionId, "sess-1");
+        assert.equal(bound.created, true);
     });
 
     test("给了 session 但已经没了（404 E_SESS-01）⇒ 重建一条并标 restarted", async () => {

@@ -209,21 +209,60 @@ export async function detectSameOriginServer(options = {}) {
 }
 
 /**
+ * 从 `GET /api/sessions` 的回体里挑一条**可复用**的会话：优先空闲的，其次
+ * 最新的（`age_ms` 最小 = 刚建的）。
+ *
+ * 只看形状，不猜语义：`sessions` 不是数组 / 条目没有 `session_id` ⇒ 当作
+ * 「没有可复用的」⇒ 调用方照旧新建（不会因为一条畸形条目把开页卡死）。
+ *
+ * @param {unknown} listed
+ * @returns {string|null}
+ */
+export function pickReusableSession(listed) {
+    const sessions = /** @type {any} */ (listed)?.sessions;
+    if (!Array.isArray(sessions)) return null;
+    const usable = sessions.filter(
+        (entry) => typeof entry?.session_id === "string" && entry.session_id !== "",
+    );
+    usable.sort((a, b) => {
+        const busy = (entry) => (entry?.busy ? 1 : 0);
+        if (busy(a) !== busy(b)) return busy(a) - busy(b);
+        return Number(a?.age_ms ?? Number.MAX_SAFE_INTEGER) - Number(b?.age_ms ?? Number.MAX_SAFE_INTEGER);
+    });
+    return usable.length ? String(usable[0].session_id) : null;
+}
+
+/**
  * 建/验会话（`POST /api/sessions` · `GET /api/sessions/{id}`）。
  *
  * 语义：
  *   - 给了 `sessionId` ⇒ 先**验活**；活着就用它（不改服务端任何东西）。
  *   - 给了但**已经没了**（404）⇒ 重建一条，并把 `restarted` 标出来 —— 页面
  *     至少还能看，而不是对着一条死会话的 404 白屏。
+ *   - 没给且 `reuse: true`（同源页面开页）⇒ 先 `GET /api/sessions` **复用**
+ *     最近一条空闲会话，再走上面的验活；列表空 / 选中的那条 404 ⇒ 才新建。
+ *     ⚠️ 不这么做的话，每次刷新都 `POST` 一条新的 ⇒ 账号配额（默认 2 条）两
+ *     次刷新就用光，第三次开页 `POST` 直接 E_CTX-04 ⇒ 页面拿不到 sessionId
+ *     ⇒ 状态栏只剩「E_TRX-03 未配置 WebSocket URL」。
  *   - 没给 ⇒ 建一条（`board` 可带；不带就是服务端默认板）。
  *
- * @param {ServerParams & {fetchImpl?: Function}} options
+ * @param {ServerParams & {reuse?: boolean, fetchImpl?: Function}} options
  * @returns {Promise<{sessionId: string, created: boolean, restarted: boolean, board: string|null}>}
  */
 export async function ensureSession(options) {
     const base = normalizeServerUrl(options.serverUrl);
     const headers = authHeaders(options.token ?? null);
     const fetchImpl = options.fetchImpl;
+
+    if (!options.sessionId && options.reuse) {
+        const listed = await requestJson(`${base}/api/sessions`, { headers, fetchImpl });
+        const reusable = pickReusableSession(listed);
+        if (reusable) {
+            // 不给 `created`：它只是「复用」，并没有新建任何东西；验活那条
+            // 路会把 board 从 `GET /api/sessions/{id}` 里读回来。
+            options = { ...options, sessionId: reusable };
+        }
+    }
 
     if (options.sessionId) {
         const id = options.sessionId;
