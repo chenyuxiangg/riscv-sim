@@ -280,12 +280,17 @@ def t_boot(client: str, args: dict) -> dict:
 
 def t_load_image(client: str, args: dict) -> dict:
     sid = OWNER.sid(client)
-    name = args.get("name") or "fw.bin"
+    name = args.get("name")
     path = args.get("path")
     if path:
-        status, body, _ = _http("POST", f"/api/sessions/{sid}/image",
-                                body={"path": path, "name": name})
+        # ⚠️ 给了 path 就别替客户端编名字：服务端会按文件名推 name
+        #    （`osz_red.elf` 报成 `fw.bin` ⇒ 摘要和落盘名都对不上）。
+        body: dict = {"path": path}
+        if name:
+            body["name"] = name
+        status, body, _ = _http("POST", f"/api/sessions/{sid}/image", body=body)
     else:
+        name = name or "fw.bin"
         blob_hex = (args.get("hex") or "").replace("0x", "").replace(" ", "").replace("\n", "")
         blob_b64 = (args.get("b64") or "").strip()
         if not blob_hex and not blob_b64:
