@@ -396,5 +396,22 @@ async fn image_root_is_scoped_per_account() {
     // 账号 id 里的怪字符被拍平（`../` 不会决定根在哪）。
     // `.` 与 `/` 都不是 `[a-z0-9_-]` ⇒ 一律拍成 `_`；结果不含任何分隔符。
     assert_eq!(crate::api::account_dir_name("../../etc"), "______etc");
+
+    // 相对路径按账号根拼（客户端只说文件名，不必知道 `acc-*/` 这一层）。
+    std::fs::write(scoped.join("prog.elf"), b"x").unwrap();
+    let resolved = crate::upload::whitelist_path(
+        Some(&scoped),
+        &crate::api::image_arg_for(Some(&scoped), "prog.elf"),
+    )
+    .unwrap();
+    assert_eq!(resolved, scoped.join("prog.elf").canonicalize().unwrap());
+
+    // 绝对路径原样交给白名单判越界：账号根之外 ⇒ 拒（提示回原文路径）。
+    let outside = root.join("legacy.elf");
+    std::fs::write(&outside, b"x").unwrap();
+    let arg = crate::api::image_arg_for(Some(&scoped), &outside.to_string_lossy());
+    assert_eq!(arg, outside.to_string_lossy());
+    assert!(crate::upload::whitelist_path(Some(&scoped), &arg).is_err());
+
     std::fs::remove_dir_all(&root).ok();
 }

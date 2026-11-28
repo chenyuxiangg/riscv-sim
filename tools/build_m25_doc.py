@@ -405,6 +405,7 @@ SECTIONS.append({
                 ["账号模式 + 无根", "<code>None</code>", "—", "<code>image_root_for</code> 回 <code>None</code> ⇒ 沿用 <code>whitelist_path</code> 的默认（仅仓库根），不报错"],
             ],
         }),
+        ("p", "镜像路径参数<b>先过 <code>image_arg_for</code> 再进白名单</b>：相对名（<code>prog.elf</code>）按<b>当前账号根</b>拼成绝对路径，绝对路径原样交给 <code>whitelist_path</code> 判越界。理由：客户端只知道「自己目录里那个文件叫什么」，MCP 的 <code>path</code> 也是这个口径；若把 <code>acc-*</code> 这层写进客户端配置，等于把内部目录结构当成接口。"),
         ("p", "目录名过滤是<b>防御性</b>而不是功能性：<code>account</code> 由服务端生成（<code>acc-XXXXXX</code>），理论上不会带斜杠与点；"
               "但账号库是外部可编辑的 JSON，若有人手改成 <code>../../etc</code>，这一层必须自己挡住 —— 用例断言 <code>account_dir_name(\"../../etc\") == \"______etc\"</code>。"),
         ("caption", "表 7 · 两条配额"),
@@ -712,7 +713,7 @@ SECTIONS.append({
                 ["<code>POST /api/sessions</code>", "会话带 owner；单账号配额生效", "无账号库时不限额（<code>usize::MAX</code>）⇒ 行为不变"],
                 ["<code>GET /api/sessions</code>", "只列自己的；<code>quota.max</code> 报该账号上限", "兼容模式全部归 <code>legacy</code> ⇒ 仍是同一批；<code>max</code> 与全局相同（未设单账号配额时）"],
                 ["<code>…/sessions/{id}/**</code>", "越权 ⇒ 404（与不存在同响应）", "单用户部署永远命中自己的会话 ⇒ 不变"],
-                ["<code>POST …/image</code>", "路径解析的根按账号切", "兼容模式原根不动 ⇒ 现有 <code>/data/images/*.elf</code> 照旧"],
+                ["<code>POST …/image</code> / <code>POST /api/boot</code> 的 <code>path</code>", "路径解析的根按账号切；<b>相对名按账号根拼</b>（<code>image_arg_for</code>）", "兼容模式原根不动 ⇒ 现有 <code>/data/images/*.elf</code> 照旧；账号模式相对名照旧可用"],
                 ["<code>POST /api/boot</code>", "内部建会话带 owner", "回体字段不变"],
                 ["<code>GET /healthz</code>", "增 <code>accounts / accounts_count / max_sessions_per_account</code>", "纯增量字段，老解析器忽略即可"],
                 ["CORS", "允许头增 <code>authorization</code>", "原来只用 <code>x-auth-token</code> 的部署不受影响"],

@@ -1064,16 +1064,16 @@ fn a_hint_encoding_leaves_the_architectural_state_alone() {
     for enc in [0x0002u16, 0x0015, 0x0401, 0x4015, 0x6005, 0x8001] {
         let mut h = Harness::new();
         let mut state = SimState::default();
-        for r in 1..32 {
-            state.gpr[r] = 0x1111_1111;
+        for reg in state.gpr.iter_mut().skip(1) {
+            *reg = 0x1111_1111;
         }
         let outcome = h.step_half_at(&mut state, 0x1000, enc);
         assert!(
             matches!(outcome, StepOutcome::Advanced),
             "0x{enc:04x} must retire"
         );
-        for r in 1..32 {
-            assert_eq!(state.gpr[r], 0x1111_1111, "0x{enc:04x} must not write x{r}");
+        for (r, reg) in state.gpr.iter().enumerate().skip(1) {
+            assert_eq!(*reg, 0x1111_1111, "0x{enc:04x} must not write x{r}");
         }
         assert_eq!(state.pc, 0x1002);
     }
