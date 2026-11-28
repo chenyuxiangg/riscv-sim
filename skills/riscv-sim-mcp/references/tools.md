@@ -17,7 +17,7 @@
 
 - **本 skill 只允许一种装载入口：`POST /images`（见下节）。** 这个工具只留 `hex`
   （8 字节基线自检），协议上还存在 `b64` / `path` 两个参数，但**不要用**：`b64` 烧上下文、
-  `path` 依赖「文件已经在服务器上」这个本 skill 无法核实的前提。
+  `path` 依赖「文件已经在服务器上」这个本 skill 无法核实的前提（账号模式下是 `<你的账号>/` 目录，相对名会被解析，但仍建议走上传）。
 - 返回：`{name, kind, entry, segments:[{base,size}]}`
 - `name` 的扩展名决定解析：`.bin` ⇒ RawHex，`.elf` ⇒ ELF；**`.hex` 文本会被
   `E_PROTO-08` 拒**（那是 Intel HEX 格式，不是原始字节）
@@ -27,7 +27,7 @@
 
 ```
 POST <base>/images
-Authorization: Bearer <SIM_MCP_TOKEN>
+Authorization: Bearer <你自己的账号令牌>
 x-image-name: fw.elf
 content-type: application/octet-stream
 

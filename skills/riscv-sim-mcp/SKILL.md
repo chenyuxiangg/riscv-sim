@@ -11,26 +11,30 @@ description: 通过 sim-mcp（10 个 MCP 工具）驱动远端 RISC-V 仿真器 
 
 ## 1. 先打通连接（不通就别往下走）
 
-隧道 + 两条令牌：
+生产入口就一条（443，按域名分 vhost，不带端口）：
 
 ```
-ssh -f -N -L 18877:127.0.0.1:8877 ali_hy     # 只开一次，重复开会抢端口
-URL   http://127.0.0.1:18877/mcp
-HEAD  Authorization: Bearer <SIM_MCP_TOKEN>
+URL   https://rsimmcp.lczyzs.xyz/mcp
+HEAD  Authorization: Bearer <你自己的账号令牌>
 ```
 
-- 客户端不支持自定义 header ⇒ 用退化形态 `http://127.0.0.1:18877/mcp/<SIM_MCP_TOKEN>`。
-- 令牌来源：用户给的 `SIM_MCP_TOKEN`（或服务器上 `/root/riscv-sim/mcp-token`）。
-  **永远不要**索要、打印或使用 `SIM_TOKEN` —— 那是服务端自己的凭据，客户端拿到就等于拿到全机。
-- 先探一次健康：`GET http://127.0.0.1:18877/healthz`，期望 `ok:true`，且 `base` 里带
-  **容器内**端口 `:9876`。`base` 指到 `:8876` 说明 MCP 连的是宿主端口 ⇒ 每个工具都会 502，
-  这时别怀疑工具，直接报「MCP 上游指错」。
-- `503` + `upstream_error` = MCP 活着但仿真器不通（容器在重启，或 server 崩了）。
+- **令牌是账号级的，一人一把**：由运维在服务器上用账号库 CLI 发（`accounts.py
+  add-account` / `add-token`，明文只打印一次）。`tok-xxxxxx` 是它的 id，不是令牌本身。
+  **不要**索要/复用别人的令牌；容器 env 里那个 `SIM_MCP_TOKEN` 是进程内部兜底，
+  不是给客户端用的全权凭据。
+- 客户端不支持自定义 header ⇒ 用 URL 形态 `https://rsimmcp.lczyzs.xyz/mcp/<令牌>`。
+- 先探一次健康：`GET https://rsimmcp.lczyzs.xyz/healthz`（免鉴权），期望
+  `{"ok":true,"tools":10,"base":"http://127.0.0.1:9876"}`。`base` 不是 `:9876` ⇒ MCP 上游指错，
+  每个工具都会 502，别怀疑工具。
+- `401` 是令牌问题（`E_SESS-07` / `E_MCP-08`）：令牌被吊销、抄错、或拿了别人的。
+- `502` 是反代到不了 ali_hy（端口/安全组/容器在重启），交给运维，不要反复重试。
+- 本机调试才用隧道：`ssh -f -N -L 18877:127.0.0.1:8877 ali_hy` ⇒
+  `http://127.0.0.1:18877/mcp`（只在 ali_hy 本机回环有效，已不对公网开放）。
 
 命令行自查（不依赖任何客户端）：
 
 ```
-python3 scripts/sim_call.py --url http://127.0.0.1:18877/mcp --token "$SIM_MCP_TOKEN" --list
+python3 scripts/sim_call.py --url https://rsimmcp.lczyzs.xyz/mcp --token "$SIM_MCP_TOKEN" --list
 python3 scripts/sim_call.py ... --tool boot --json '{}'
 ```
 
@@ -40,14 +44,17 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
    之后 `load_image` 一直回 `E_PLT-22`，而 `boot` 还一直「复用成功」—— 看着像工具坏了。
    板在建会话时定死；再给一个不同的 `board` 会重建会话（sim-mcp **0.1.1** 起；
    0.1.0 是忽略，只能等空闲回收）。`boot` 本身幂等：同板复用回 `reused: true`。
-   全机会话池只有 8 个，空闲 5 分钟由服务端自动回收。**不要反复 boot 来「重试」**，
-   也不要指望有工具去看别人的会话 —— 看不到，这是设计。
+   全机会话池只有 8 个、单账号 2 个，空闲 5 分钟由服务端自动回收。**不要反复 boot 来「重试」**，
+   也不要指望有工具去看别人的会话 —— 看不到，这是设计（越权与不存在同回 `404 E_SESS-01`）。
+   会话在**服务端内存**：容器重启/升级后旧 `session_id` 全部失效（回 404），重新 `boot` 即可，
+   不要当成 bug。
 2. **装固件只有一条路：客户端把文件字节推到 `POST /images`（`--upload`）。**
    不要用 `hex` / `b64` / `path` 去装真文件 —— 它们要么烧上下文，要么依赖“文件已经在
    服务器上”这种本 skill 无法验证的前提：
    - `hex`：只留给 8 字节基线自检（§4），不是装固件的手段；
    - `b64`：几十 KB 的 ELF 编成上百 K 字符，等于先烧几万 token，还容易截断；
-   - `path`：读的是服务器 `/data/images`，你没法确认里面到底是不是用户那个文件。
+   - `path`：读的是服务器上的镜像目录（账号模式下是 `/data/images/<你的账号>/`，相对名
+     `prog.elf` 会被按账号根解析；v0.1.13 起），你没法确认里面到底是不是用户那个文件。
    文件从**你这侧**读、原始字节直接 POST，是这条路唯一的正确形态。
    `name` 的扩展名决定解析：`.bin` = RawHex（一律从 0 起），`.elf` = ELF（真实 entry、多段），
    `.hex` 文本（Intel HEX）会被 `E_PROTO-08` 拒。
@@ -127,6 +134,9 @@ entry**，不用再调 `load_image`。
 | 现象 | 真相 |
 |---|---|
 | 每个工具都 `502`，但 `/healthz` 200 | `base` 指错端口（宿主 8876），MCP 连了没人监听的地址 |
+| 域名整体 `502`（连 `/healthz` 也 502） | 反代到不了 ali_hy：8877 未监听 / 安全组没放 nginx 源 IP / 容器在重启 |
+| `401` | 令牌被吊销、抄错、或拿了别人的；去运维要自己的令牌 |
+| 刚换过容器，`session 404` | 会话是内存态，重启即清空 —— 重新 `boot` |
 | 装入后 `pc` 不动、`executed=0` | 入口段没覆盖当前 pc；先 `disasm` 看那段是不是指令，再看 `stop_reason` |
 | `x5` 一直是 0 | 只跑了 1 条，或把 `.hex` 文本当二进制装了 |
 | `load_image` 回 `E_PLT-22`「没有生效板」 | `boot` 没带 `board`；0.1.1 起再 boot 一次带 board 就会重建会话 |

@@ -2,12 +2,13 @@
 
 ## 1. 连不上（`connection refused` / `000`）
 
-- 8877 **只在宿主的 127.0.0.1 上**，公网没有这个端口 —— 直接打 `http://<公网IP>:8877`
-  必然失败，这是正确的。
-- 隧道：`ssh -f -N -L 18877:127.0.0.1:8877 ali_hy`。开两次会抢端口，
-  用 `lsof -ti tcp:18877` 看有没有已经活着；macOS 上别用 `pkill`（会报
-  `Cannot get process list`），要杀用 `lsof -ti tcp:18877 | xargs kill`。
-- 隧道活着但 `healthz` 不通 ⇒ 容器没起：`docker ps --filter name=riscv-sim`。
+- 正式入口只有 `https://rsimmcp.lczyzs.xyz/mcp`。8877 **只对反代主机放行**，公网直连
+  `http://<ali_hy公网IP>:8877` 必然失败 —— 这是正确的，不要绕过。
+- 域名整体 `502` / 连接超时：先看反代主机到 ali_hy 的 8877 通不通（安全组是否放了
+  nginx 源 IP、容器是否在起）。`curl -s https://rsimmcp.lczyzs.xyz/healthz` 有 `ok:true`
+  才说明这条链通了。
+- 本机调试才用隧道：`ssh -f -N -L 18877:127.0.0.1:8877 ali_hy`（在 ali_hy 本机回环上）。
+  开两次会抢端口，用 `lsof -ti tcp:18877` 查；macOS 上别用 `pkill`。
 
 ## 2. 通了但 `/healthz` 说上游错
 
@@ -23,8 +24,9 @@
 
 ## 3. 401 / 403
 
-- `Authorization: Bearer <SIM_MCP_TOKEN>` 少了、拼错、或用了 `SIM_TOKEN`。
-  用 `SIM_TOKEN` 打 MCP 也会 401 —— 它只在 MCP 进程的 env 里有效。
+- `Authorization: Bearer <你的账号令牌>` 少了、拼错、或已被吊销 ⇒ 401（`E_SESS-07` / `E_MCP-08`）。
+  令牌由运维用账号库 CLI 发（一人一把，明文只打印一次）；`tok-xxxxxx` 只是 id。
+- 容器 env 里的 `SIM_MCP_TOKEN` 不再是客户端凭据（只做进程内兜底），拿它当自己的令牌会 401。
 - 退化形态 `/mcp/<token>` 路径里的 token 要**整段**（不要 URL 编码出错）。
 
 ## 4. 工具回 409
@@ -61,10 +63,11 @@
 ## 7. 找不到破坏性工具
 
 `reset` / `drop_session` 默认**不注册**（`SIM_MCP_ALLOW_DESTRUCTIVE=0`）。
-需要时让服务端把它设成 `1` 并重启 MCP。**不要**为了复位去直连 `:9876` 的 HTTP 端点 ——
-那需要 `SIM_TOKEN`，把两层凭据合成一层就是把闸门拆了。
+需要时让服务端把它设成 `1` 并重启 MCP。**不要**为了复位去绕过 MCP 直连内部端口 ——
+那等于把「谁能下令」这一层拆了。
 
 ## 8. 会话凭空消失
 
-空闲 5 分钟被服务端回收（`idle-drop` 会写进审计）。这不是错误：再 `boot` 一次即可，
-返回 `reused:false` 说明确实新建了。会话池 8 个，多客户端并发时先看有没有人占着。
+两种原因：① 空闲 5 分钟被回收（`idle-drop` 写进审计）；② 容器重启/升级 —— 会话在**内存**里，
+重启即清空，旧 `session_id` 一律 404。都不是错误：再 `boot` 一次即可，`reused:false` 说明确实新建了。
+会话池全局 8 / 单账号 2，`429 E_SESS-05` 是自己账号占满了，先关掉不用的会话。
