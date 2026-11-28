@@ -38,13 +38,13 @@ python3 scripts/sim_call.py --url https://rsimmcp.lczyzs.xyz/mcp --token "$SIM_M
 python3 scripts/sim_call.py ... --tool boot --json '{}'
 ```
 
-## 2. 三条铁律（破了结论就不可信）
+## 2. 铁律（破了结论就不可信）
 
 1. **一个客户端一个会话，`boot` 一定要带 `board`。** 首次不传板，会话就没有生效板，
    之后 `load_image` 一直回 `E_PLT-22`，而 `boot` 还一直「复用成功」—— 看着像工具坏了。
    板在建会话时定死；再给一个不同的 `board` 会重建会话（sim-mcp **0.1.1** 起；
    0.1.0 是忽略，只能等空闲回收）。`boot` 本身幂等：同板复用回 `reused: true`。
-   全机会话池只有 8 个、单账号 2 个，空闲 5 分钟由服务端自动回收。**不要反复 boot 来「重试」**，
+   全机会话池只有 8 个、单账号 2 个，空闲 5 分钟（MCP sweeper）/ 15 分钟（服务端 TTL）会被回收 —— 但别指望它，收尾自己关（见铁律 4）。**不要反复 boot 来「重试」**，
    也不要指望有工具去看别人的会话 —— 看不到，这是设计（越权与不存在同回 `404 E_SESS-01`）。
    会话在**服务端内存**：容器重启/升级后旧 `session_id` 全部失效（回 404），重新 `boot` 即可，
    不要当成 bug。
@@ -65,7 +65,13 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
    `(cause, mepc)` 连陷 N 次就报 `E_ENG-04` 中止（跨窗口累计，比配额早得多）——
    handler 死循环时回体是 `stop_reason:"error"` + `error_code`，别读成 guest 停点。
 
-4. **`advance` 是「恰好 n 条」，`run` 是「跑到停点」。** 想复现就只用 `advance`；
+4. **任务收口必调 `close_session`，不要把会话留给 sweeper。** 一轮调试/一次交付结束就关：
+   单账号只有 **2 条**配额，同账号的多个令牌、浏览器页面共用这一个池子；开着不关，
+   下一个任务很可能直接 `429 E_SESS-05`。命令行走 `python3 scripts/sim_call.py --tool xxx --close`
+   （或 `--upload fw.elf --close`），代码里放 `finally` —— 异常、超时、中途放弃也要关。
+   它是幂等的，多关一次只是回 `closed:false`，不会误删别人的会话。
+
+5. **`advance` 是「恰好 n 条」，`run` 是「跑到停点」。** 想复现就只用 `advance`；
    `run` 默认 5 秒墙钟，撞钟回 `504`，但 **body 仍是完整停点报告** —— 读它，不是报失败。
    `run` 的 `stop_reason = "budget"` 意思是**指令预算用尽**（前缀模式缺省 1e6 条，回体
    `budget_exhausted:true` 会明说），不是死锁 —— 给 `steps` 再来。
@@ -89,6 +95,7 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 
 `close_session` **始终注册**（正常生命周期，不是破坏性）：只删本客户端映射的那一条，
 浏览器页面 / 别的令牌开的会话不碰；没有会话时按幂等回「无需释放」。
+**用完不关 = 占着配额**（单账号 2 条），所以每个任务收尾都要调一次 —— 见 §2 铁律 4。
 
 `reset` / `drop_session` 属**破坏性**，只有服务端设了 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册。
 工具列表里没有它们，就是闸门关着 —— 告诉用户去开，**别绕过 MCP 直连 `:9876`**。
@@ -102,10 +109,11 @@ boot {"board":"qemu-virt"}                      → session_id
 load_image hex=9302200093821200 name=fw8.bin    → entry=0x0，段 [0x0+8]
 advance n=2                                     → executed=2 · pc=8 · t_ps=2000 · stop_reason=steps
 inspect kind=state                              → x5(t0)=3
-close_session                                    → 会话已删，配额立即可用
 events since=0                                  → next=4，含 ImageLoaded / SimStateDelta
+close_session                                    → 会话已删，配额立即可用（**收尾必做**）
 ```
 
+顺序很关键：`close_session` 放**最后**。先关再读，后续每个工具都会回 `404 E_SESS-01`。
 这是**验收基线**：跑出 `pc=8 · x5=3` 说明链路（隧道→MCP→server→内核）全通。
 哪一跳不对，先证链路，再怀疑固件。
 

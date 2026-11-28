@@ -116,7 +116,9 @@ content-type: application/octet-stream
 - 无参；`DELETE /api/sessions/{id}` 删本客户端映射的那一条，随即清掉客户端映射
 - 返回：`{session_id, closed, status}`；服务端已经 404（TTL 回收过）仍按幂等成功回
 - 没有映射（还没 boot / MCP 进程重启丢了内存态）⇒ `{session_id:null, closed:false}`，不删任何东西
+- **强约定：每个任务收尾必须调一次**（含异常退出），否则占着单账号 2 条配额，下一个任务会撞 `429 E_SESS-05`
 - 用途：**跑完/交付完立刻还配额**，别等 MCP 侧 5 分钟 sweeper 或服务端 15 分钟 TTL
+- 必须在**所有读取动作之后**调；先关再 `inspect` / `events` 只会拿到 `404 E_SESS-01`
 - ⚠️ 只动自己的会话：浏览器页面、别的令牌开的会话（同账号共用配额池）都不碰
 
 ## reset / drop_session（默认不注册）

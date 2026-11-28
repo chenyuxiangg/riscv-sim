@@ -769,9 +769,10 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         return _rpc_result(msg_id, {
             "protocolVersion": PROTOCOL if asked != PROTOCOL else asked,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "sim-mcp", "version": "0.1.5"},
+            "serverInfo": {"name": "sim-mcp", "version": "0.1.6"},
             "instructions": ("先 boot，再 load_image(hex=原始字节的十六进制)，然后 advance(n)。"
-                             "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"),
+                             "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"
+                             "任务收尾务必调 close_session 释放会话（单账号配额 2 条，别等空闲回收）。"),
         })
     if method in ("notifications/initialized", "notifications/cancelled"):
         return None

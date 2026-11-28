@@ -10,6 +10,7 @@
     python3 scripts/sim_call.py --tool inspect --json '{"kind":"state"}' --raw
     python3 scripts/sim_call.py --upload ./fw.elf              # 真文件走这里（零 token）
     python3 scripts/sim_call.py --upload ./fw.elf --name fw.elf
+    python3 scripts/sim_call.py --tool inspect --json '{"kind":"state"}' --close   # 跑完释放会话
 
 只依赖标准库：客户端 SDK 版本各异，这条路径是「协议本身」的最低公共分母。
 """
@@ -63,6 +64,18 @@ class Mcp:
         return result.get("structuredContent") or {}
 
 
+def _maybe_close(mcp: "Mcp", want: bool) -> None:
+    """--close：任务收尾释放会话。幂等；没会话时只回一句「无需释放」。"""
+    if not want:
+        return
+    try:
+        out = mcp.call("close_session", {})
+    except SystemExit as e:  # 关不掉不该盖掉主命令的结果
+        print(f"# close_session 失败：{e}", file=sys.stderr)
+        return
+    print(f"# close_session: {out.get('summary')}", file=sys.stderr)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default=DEFAULT_URL)
@@ -74,6 +87,8 @@ def main() -> int:
     ap.add_argument("--tool", help="工具名")
     ap.add_argument("--json", default="{}", help="工具参数（JSON）")
     ap.add_argument("--raw", action="store_true", help="原样打印 structuredContent")
+    ap.add_argument("--close", action="store_true",
+                    help="命令跑完后释放会话（close_session）：单账号只有 2 条配额，收尾必须还")
     a = ap.parse_args()
 
     if not a.token:
@@ -105,6 +120,7 @@ def main() -> int:
               f"entry={out.get('entry', 0):#x} 段 {seg}")
         if a.raw:
             print(json.dumps(out, indent=2, ensure_ascii=False))
+        _maybe_close(mcp, a.close)
         return 0
 
     if a.list:
@@ -123,6 +139,7 @@ def main() -> int:
         data = out.get("data")
         if data is not None:
             print(json.dumps(data, ensure_ascii=False)[:1200])
+    _maybe_close(mcp, a.close)
     return 0
 
 
