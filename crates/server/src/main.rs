@@ -223,6 +223,8 @@ async fn serve(cfg: Config) -> Result<(), String> {
         None => None,
     };
     let state = AppState::new(&cfg, local).with_accounts(accounts);
+    // console 落盘文件的定期清理（只按年龄：默认超过 24 h 才删）。
+    session::spawn_console_gc();
     eprintln!(
         "riscv_sim_server {} listening on http://{local} (board={}, session_ttl={}s, max_console={}B, front={})",
         env!("CARGO_PKG_VERSION"),

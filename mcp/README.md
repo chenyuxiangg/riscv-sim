@@ -14,14 +14,22 @@
 | 令牌 | 谁持有 | 能干什么 |
 |---|---|---|
 | `SIM_TOKEN` | **只有本进程**（env） | 建/删/查所有会话、跑任意固件 |
-| `SIM_MCP_TOKEN` | 客户端 | 只能调 11 个工具，且只见自己的会话 |
+| `SIM_MCP_TOKEN` | 客户端 | 只能调 12 个工具，且只见自己的会话 |
 
 启动时若两条令牌相同 ⇒ 直接拒绝启动（那等于把两层凭据退化成一层）。
 
 ## 工具面（写细分 / 读合并）
 
-`boot` · `load_image` · `advance` · `run` · `stop_policy` · `poll_job` · `inspect` · `disasm` · `breakpoints` · `events` · `close_session`
+`boot` · `load_image` · `advance` · `run` · `stop_policy` · `poll_job` · `inspect` · `disasm` · `breakpoints` · `events` · `keepalive` · `close_session`
 （`close_session` 是**正常生命周期**工具，始终注册：**每个任务收尾都要调**，跑完主动还配额；`reset` / `drop_session` 属破坏性，需 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才注册）
+
+`keepalive` 只续空闲窗口：客户端 `ping` 也算（协议层心跳顺手 touch），服务端
+`POST /api/sessions/{id}/touch` 有 60 秒节流；连续只保活、没有真实工具调用时最多延长
+`SIM_MCP_MAX_HOLD_SECS`（默认 3600）秒，之后照样被回收 —— 防「忘了关又被 ping 钉死」。
+收尾仍要 `close_session`。
+
+`inspect {kind:"console"}` 用**绝对 offset** 读、读不消费内容，回 `base/total/next/lost`；
+默认 4 KiB，窗口丢了回 `base` 让客户端重新对齐（服务端 409 `E_SESS-04`）。
 
 `run` 只回 `job`，长任务用 `poll_job` —— 因为 `max_run_ms` 默认 5000，同步等必然撞墙钟。
 

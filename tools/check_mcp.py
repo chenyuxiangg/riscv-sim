@@ -76,6 +76,11 @@ def main() -> int:
     sid = boot["data"]["session_id"]
     print("boot →", sid, boot["data"]["board"], "reused" if boot["data"]["reused"] else "new")
 
+    ka = mcp.call("keepalive")
+    print("keepalive →", ka["summary"])
+    assert ka["data"]["session_id"] == sid, ka["data"]
+    mcp.rpc("ping")  # 协议层心跳也走同一条保活路径，回体必须还是空结果
+
     img = mcp.call("load_image", {"hex": FW_HEX, "name": "fw8.bin"})
     print("load_image →", img["summary"])
 
@@ -87,6 +92,13 @@ def main() -> int:
     st = mcp.call("inspect", {"kind": "state"})
     print("inspect →", st["summary"])
     assert st["data"]["registers"][5] == 3, st["data"]["registers"]
+
+    c1 = mcp.call("inspect", {"kind": "console", "offset": 0})
+    c2 = mcp.call("inspect", {"kind": "console", "offset": 0})
+    assert c1["data"]["text"] == c2["data"]["text"], "同 offset 重读必须一致（读不消费）"
+    assert c1["data"]["base"] == c2["data"]["base"] and c1["data"]["total"] == c2["data"]["total"]
+    assert c1["data"].get("lost", 0) == 0, c1["data"]
+    print("console →", c1["summary"][:120])
 
     # 7) 文件上行：真文件不该走工具参数（base64 会烧上下文），走 POST /images
     base = args.url.rsplit("/mcp", 1)[0] if args.url.endswith("/mcp") else args.url

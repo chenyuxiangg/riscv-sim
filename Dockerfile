@@ -70,13 +70,18 @@ RUN chmod 0755 /usr/local/bin/riscv_sim_server /usr/local/bin/sim-entrypoint \
 
 USER sim
 
+# console 原文落盘：环只留 1 MiB / 会话，超过就进 /data/console，单会话 64 MiB；
+# 只按年龄清（24 h），会话删了也留一天，方便事后翻日志。
 ENV SIM_BIND=0.0.0.0 \
     SIM_PORT=9876 \
     SIM_FRONT_DIR=/app/front \
     SIM_IMAGE_ROOT=/data/images \
     SIM_MCP_PORT=8877 \
     SIM_MCP_HOST=0.0.0.0 \
-    SIM_MCP_ALLOW_REMOTE=1
+    SIM_MCP_ALLOW_REMOTE=1 \
+    SIM_CONSOLE_LOG_DIR=/data/console \
+    SIM_CONSOLE_LOG_MAX=67108864 \
+    SIM_CONSOLE_LOG_RETENTION=86400
 
 # 8877 是 MCP：容器内必须绑 0.0.0.0（端口映射打到容器 IP，不是回环），
 # 但**宿主侧只发布 127.0.0.1** ⇒ 公网仍然没有这个端口，AI 走 SSH 隧道进来。

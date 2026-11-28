@@ -87,10 +87,11 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 | `run` | 跑到停点 | `steps` / `timeout_ms` / `prefix`（console 命中）/ `until`（breakpoint\|halt）/ `background` |
 | `poll_job` | 读异步作业 | `job`（`run(background=true)` 回体里的） |
 | `stop_policy` | 会话级陷阱交付策略（**R-1**）+ 异常连环守卫（**B-2**） | `stop_on_trap`（true=交付即停，默认）；`false` 时 `max_trap_events` **必填**；可选 `stall_guard`（≥2，同一 (cause,mepc) 连陷 N 次 ⇒ `E_ENG-04`） |
-| `inspect` | 读状态/串口/内存 | `kind`=state\|console\|memory；`addr` `len` `format`(u32\|asc) `offset` `limit` |
+| `inspect` | 读状态/串口/内存 | `kind`=state\|console\|memory；console 用**绝对 offset**（默认 4 KiB，回 `base/total/next/lost`，按 `next` 续读，窗口丢了从 `base` 重来）；`addr` `len` `format`(u32\|asc) `limit` |
 | `disasm` | 反汇编 | `addr` `count` |
 | `breakpoints` | 断点表 | `op`=list\|set\|clear\|enable（set 三选一：`addr`/`symbol`/`condition`） |
 | `events` | 增量拉事件 | `since`=`next`，`limit` |
+| `keepalive` | 续空闲窗口（长思考/人机来回时用） | 无参；客户端 `ping` 同效；最多延长 3600s，收尾仍要 `close_session` |
 | `close_session` | 主动释放自己的会话（幂等） | 无参；跑完就还配额，不必等空闲回收 |
 
 `close_session` **始终注册**（正常生命周期，不是破坏性）：只删本客户端映射的那一条，

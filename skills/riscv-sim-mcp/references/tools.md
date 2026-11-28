@@ -1,4 +1,4 @@
-# 工具面细节（sim-mcp 0.1.1）
+# 工具面细节（sim-mcp 0.1.7）
 
 所有工具都是 `tools/call`，返回 `structuredContent = {summary, data}`：`summary` 是给人读的
 一行，`data` 是给判断用的结构。失败时 `isError: true`，`content[0].text` 带错误码。
@@ -110,6 +110,17 @@ content-type: application/octet-stream
 - 帧已被**压平**：`SimStateDelta` 只留 pc/t_ps 与最多 8 个非零寄存器；
   console 帧只留字节数与 120 字文本。要全量寄存器就 `inspect`
 - `seq` 单调，所以增量拉取不需要长连 WS（隧道会断，正好用这个）
+
+## keepalive（始终注册）
+
+- 无参。刷本客户端会话的空闲窗口：MCP 侧 sweeper 与**服务端 15 分钟 TTL** 同时重置
+- 客户端发的协议层 `ping` 也会触发同一保活路径（老客户端不配工具也能续窗口）
+- 服务端 `POST /api/sessions/{id}/touch` 有 60 秒节流；一分钟内重复调只刷本地窗口，回
+  `data.throttled=true`
+- **硬上限**：连续只有 ping/keepalive、没有真实工具调用时，最多延长
+  `SIM_MCP_MAX_HOLD_SECS`（默认 3600s），之后照样被回收 —— 保活不是免死金牌
+- 返回：`{session_id, idle_left_s, mcp_ttl_s, max_hold_left_s, touched_server, server:{idle_ms,ttl_s}}`
+- 会话已被服务端回收 ⇒ `404 E_SESS-01`，映射清掉，重新 `boot`
 
 ## close_session（始终注册）
 
