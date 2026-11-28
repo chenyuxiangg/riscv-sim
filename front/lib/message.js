@@ -151,8 +151,9 @@
 //   （v0.77 · STAGE-53）；**v18**：观察表达式整块下线（v0.138 · 删 3 条命令 +
 //   1 条事件 + 2 个 DTO）；**v19**：装载回执 `EventPayload::ImageLoaded`
 //   上线（v0.144 · M-24 · R-04 · 多 1 条事件 + 1 个 DTO `ImageSegment`）
-//   ⇒ ⇒ 前端镜像跟契约层**同批**。
-export const SCHEMA_VERSION = 20;
+//   ⇒ ⇒ 前端镜像跟契约层**同批**；**v21**：`HaltReason::BudgetExhausted`
+//   （窗口预算用尽 ≠ 执行结束）⇒ 枚举多 1 个变体，信封形状不变。
+export const SCHEMA_VERSION = 21;
 
 /**
  * 转储长度上限（字节）—— mirrors `riscv_sim_contract::DUMP_MAX_BYTES`.
@@ -355,6 +356,8 @@ export const HALT_REASON = Object.freeze({
     StepOver: "StepOver",
     Watchpoint: "Watchpoint",
     EndOfExecution: "EndOfExecution",
+    // v21：本窗口预算用尽（机器还在跑），**不是**终止。
+    BudgetExhausted: "BudgetExhausted",
     Trap: "Trap",
     UserPause: "UserPause",
     Watchdog: "Watchdog",

@@ -315,7 +315,8 @@ JSON 解析同时压垮。两层各管一段：
 | 命中观察点 | `Watchpoint` |
 | 非法指令 / 总线错误 | `Trap` |
 | 宿主 `Pause` | `UserPause` |
-| 跑满指令预算（`Continue` 的上限） | `EndOfExecution` |
+| 跑满指令预算（`Continue` 的上限） | `BudgetExhausted`（**v21**；v20 及以前借 `EndOfExecution`） |
+| 程序真的没东西可执行（窗口内一条都没跑动） | `EndOfExecution` |
 
 ### 3.7 `Snapshot` 的语义（第 1 阶段：**只分配 id**）
 

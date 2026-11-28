@@ -1020,8 +1020,8 @@ fn cleared_breakpoint_no_longer_halts() {
     let (reason, _) = first_halted(&events);
     assert_eq!(
         reason,
-        HaltReason::EndOfExecution,
-        "断点被清掉后只能跑到预算上限"
+        HaltReason::BudgetExhausted,
+        "断点被清掉后只能跑到预算上限（v21 起这个停因叫 `BudgetExhausted`，         不再是 `EndOfExecution`）"
     );
 }
 

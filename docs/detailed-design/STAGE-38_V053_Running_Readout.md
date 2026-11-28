@@ -42,7 +42,7 @@
 
 | 编号 | 事实 |
 | --- | --- |
-| F1 | `Continue` **一定**产出一条 `Halted`（内核侧 `crates/kernel/src/kernel_host/mod.rs`：`steps.is_none()` ⇒ 必有 `HaltReason::EndOfExecution`）⇒ ⇒ 「在途 `Continue` 计数」可以被 `Halted` **精确**抵消 |
+| F1 | `Continue` **一定**产出一条 `Halted`（⚠️ **契约 v21** 起那条的 `reason` 是 `BudgetExhausted`，不再借 `EndOfExecution`；「一定有 `Halted`」这条前提不变）（内核侧 `crates/kernel/src/kernel_host/mod.rs`：`steps.is_none()` ⇒ 必有 `HaltReason::EndOfExecution`）⇒ ⇒ 「在途 `Continue` 计数」可以被 `Halted` **精确**抵消 |
 | F2 | `StepN` **通常不产** `Halted`（同处：`steps.is_some()` ⇒ `reason` 为 `None`，除非命中断点 / 陷阱）⇒ ⇒ 在途计数**只数 `Continue`**（否则要两条退休路径 ⇒ ⇒ 两个真相） |
 | F3 | 界面的「暂停」**不发** `Pause` 命令（v0.52 裁决 E · F6 实测）⇒ ⇒ 暂停**不**产生 `Halted` ⇒ ⇒ 在途计数**不受**暂停影响 |
 | F4 | `Halted` 是**唯一**的「一次执行结束」报告 ⇒ ⇒ 在途计数的**退休点只有一处** |

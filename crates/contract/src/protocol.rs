@@ -1076,7 +1076,19 @@ pub enum HaltReason {
     /// Hit a watchpoint.
     Watchpoint,
     /// Reached end of execution (e.g. `mret` to non-existent PC).
+    ///
+    /// ⚠️ v21 起**不再兼职**「本窗口预算用尽」——那一半走
+    /// [`HaltReason::BudgetExhausted`]。两者以前共用一个变体，驱动方
+    /// 无法区分「跑完了」与「这一窗到点了，再发一次就能续」（B-3 备注）。
     EndOfExecution,
+    /// 本窗口的**指令预算用尽**，机器**没停**（v21 · R-2 后续）。
+    ///
+    /// 语义：`Continue` 一个窗口跑满了内核的预算（`DEFAULT_INSTRUCTION_BUDGET`），
+    /// guest 还在正常执行 ⇒ 调用方**再发一次 `Continue`** 就从这里续上。
+    ///
+    /// ⚠️ **不是终止**：别把它当成「程序结束」或「出错」；也不该为它读回
+    /// 寄存器 / 触发「运行结束」的界面状态。
+    BudgetExhausted,
     /// Illegal instruction or bus error.
     Trap,
     /// Engine pause requested by host.
@@ -1158,8 +1170,9 @@ mod tests {
     /// `stop_on_trap = false` 时发）⇒ ⇒ 线上**多一个命令变体 + 一个事件
     /// 变体**；`HaltReason` **一个变体都不加**。
     #[test]
-    fn the_schema_version_is_twenty() {
-        assert_eq!(crate::SCHEMA_VERSION, 20);
+    fn the_schema_version_is_twenty_one() {
+        // v21：`HaltReason::BudgetExhausted`（窗口预算用尽 ≠ 执行结束）。
+        assert_eq!(crate::SCHEMA_VERSION, 21);
     }
 
     /// **批 C**（STAGE-55）：`Halted` 多一个**可选**的 `trigger_addr`
@@ -1506,8 +1519,9 @@ mod tests {
         // ⚠️ **v17（v0.77 · STAGE-53）**：`SetBudget` 变体退役；
         //    **v18（v0.138）**：观察表达式整块下线（3 条命令 + 1 条事件）；
         //    **v19（v0.144 · M-24）**：装载回执 `ImageLoaded` 上线；
-        //    **v20（R-1）**：陷阱交付策略 `SetStopPolicy` + `TrapSummary`。
-        assert_eq!(json["schema_version"], 20);
+        //    **v20（R-1）**：陷阱交付策略 `SetStopPolicy` + `TrapSummary`；
+        //    **v21**：`HaltReason::BudgetExhausted`（枚举多一个变体）。
+        assert_eq!(json["schema_version"], 21);
     }
 
     // -----------------------------------------------------------------

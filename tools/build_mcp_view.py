@@ -249,7 +249,7 @@ svg.append(card(CX2 + 16, CY + 448, CW2 - 32, 140, "还没做（如实登记）"
 
 # ------------------------------------------------------------------ D. 契约带
 svg.append(rect(40, 754, 1620, 92, "#f6f3fd", "#b9a8dd", sw=1.8))
-svg.append(text(60, 782, "唯一接缝 · crates/contract（schema v20）—— 工具面的唯一来源，也是升版时唯一要谈的地方", 14.5, 700, "#3f2f66"))
+svg.append(text(60, 782, "唯一接缝 · crates/contract（schema v21）—— 工具面的唯一来源，也是升版时唯一要谈的地方", 14.5, 700, "#3f2f66"))
 svg.append(text(60, 806, "Command 信封 39 个变体 ⇒ 10 个工具：写操作细分（可审计、可分级），读操作合并（省上下文）；MCP 层不重新设计能力面。", 11.4, 400, "#4a3f66"))
 svg.append(text(60, 828, "server 升 schema ⇒ sim-mcp 的 contract 冒烟必须变红。工具面对 HTTP 路由无知：传输可换（stdio / Streamable HTTP / 内嵌 Rust），换个壳不用重写工具。", 11.4, 400, "#4a3f66"))
 

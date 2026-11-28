@@ -1718,6 +1718,9 @@ fn stop_label(stop: RunStop) -> &'static str {
         RunStop::Halted(HaltReason::StepOver) => "step-over",
         RunStop::Halted(HaltReason::Watchpoint) => "watchpoint",
         RunStop::Halted(HaltReason::EndOfExecution) => "end",
+        // v21：本窗口预算用尽，机器还在跑（`run` 走显式 steps 分块，正常不会
+        // 出现；留着是为了「枚举加一个变体就有一处翻译」这条不漏）。
+        RunStop::Halted(HaltReason::BudgetExhausted) => "budget",
         RunStop::Halted(HaltReason::Trap) => "trap",
         RunStop::Halted(HaltReason::UserPause) => "pause",
         RunStop::Halted(HaltReason::Watchdog) => "watchdog",

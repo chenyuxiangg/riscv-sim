@@ -48,6 +48,13 @@ import {
 } from "./run-loop.js";
 
 /**
+ * 本窗口预算用尽（v21）—— 与 `run-loop.js` 里那份**同一个字面量**。
+ *
+ * ⚠️ 不能从 `run-loop.js` 导入（那会改它的导出集合 ⇒ 旧缓存白屏，见文件头）。
+ */
+const HALT_REASON_BUDGET_EXHAUSTED = "BudgetExhausted";
+
+/**
  * 这个停下原因**是不是「真停」**。
  *
  * ⚠️ **不另写一张表** ⇒ ⇒ 直接问 `nextRunAction`（「idle 模式下会不会停」）
@@ -189,7 +196,8 @@ export function readbackReasonOf(haltReason) {
 export function shouldAutoReadback(input) {
     const reason = typeof input?.haltReason === "string" ? input.haltReason : null;
     if (reason === null) return false;
-    if (reason === HALT_REASON_END_OF_EXECUTION) {
+    if (reason === HALT_REASON_END_OF_EXECUTION || reason === HALT_REASON_BUDGET_EXHAUSTED) {
+        // v21：预算用尽也是「窗口边界」⇒ 只有「用户在等暂停」才读回。
         return input?.pausePending === true;
     }
     return isTrueStopReason(reason);

@@ -1534,6 +1534,11 @@ mod tests_v059_reset;
 #[cfg(test)]
 mod tests_r1_stop_policy;
 
+/// 契约 **v21**：`Continue` 的窗口边界 = `HaltReason::BudgetExhausted`
+/// （不再借 `EndOfExecution`）。
+#[cfg(test)]
+mod tests_v21_budget_halt;
+
 /// STAGE-43 · v0.66 批 —— **内核侧中间层**的宿主侧门禁（K 组）。
 ///
 /// ⚠️ 盯的是「内核怎么算」：器件类型注册表的内容 + 逐实例状态的**推导**

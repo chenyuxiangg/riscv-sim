@@ -81,6 +81,17 @@ export const RUN_ACTION_NONE = "none";
 export const HALT_REASON_END_OF_EXECUTION = "EndOfExecution";
 
 /**
+ * 本窗口**预算用尽**（v21）—— 机器还在跑，只是这一窗到点了。
+ *
+ * 与 [`HALT_REASON_END_OF_EXECUTION`] **同一种驱动语义**（running 态续发），
+ * 但含义不同：那个是「guest 真的没东西可执行了」。
+ *
+ * ⚠️ **导出**会改既有模块的导出集合 ⇒ 旧缓存白屏（见 `readback.js` 顶部那条
+ * 纪律）⇒ ⇒ 本常量**只在本模块内用**，别的模块各自写同一份字面量。
+ */
+const HALT_REASON_BUDGET_EXHAUSTED = "BudgetExhausted";
+
+/**
  * 内核的停下原因：命中断点。
  *
  * @type {string}
@@ -225,8 +236,8 @@ export function liveValue(running, text) {
  *
  * | `mode` | `reason` | 结果 |
  * | --- | --- | --- |
- * | `running` | `EndOfExecution` | `continue` |
- * | `idle` | `EndOfExecution` | `none` |
+ * | `running` | `EndOfExecution` / `BudgetExhausted` | `continue` |
+ * | `idle` | `EndOfExecution` / `BudgetExhausted` | `none` |
  * | 任意 | `Breakpoint` / `Watchpoint` / `Trap` / `UserPause` | `stop` |
  * | 任意 | 其它 / 未知 / `null` | `none` |
  *
@@ -243,7 +254,7 @@ export function liveValue(running, text) {
 export function nextRunAction(input) {
     const mode = input?.mode === RUN_MODE_RUNNING ? RUN_MODE_RUNNING : RUN_MODE_IDLE;
     const reason = typeof input?.reason === "string" ? input.reason : null;
-    if (reason === HALT_REASON_END_OF_EXECUTION) {
+    if (reason === HALT_REASON_END_OF_EXECUTION || reason === HALT_REASON_BUDGET_EXHAUSTED) {
         return mode === RUN_MODE_RUNNING ? RUN_ACTION_CONTINUE : RUN_ACTION_NONE;
     }
     if (reason !== null && STOP_REASONS.has(reason)) {
