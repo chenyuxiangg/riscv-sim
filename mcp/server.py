@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sim-mcp —— 把 riscv_sim 的 HTTP 面收成 10 个 MCP 工具（只依赖标准库）。
+"""sim-mcp —— 把 riscv_sim 的 HTTP 面收成 11 个 MCP 工具（只依赖标准库）。
 
 设计口径（与 docs/architecture/mcp-view.svg 对齐）：
   1. 凭据：客户端持**自己的令牌**（服务端账号库里那把）；MCP 原样转给服务端，

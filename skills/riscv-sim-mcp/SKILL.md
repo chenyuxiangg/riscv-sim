@@ -1,6 +1,6 @@
 ---
 name: riscv-sim-mcp
-description: 通过 sim-mcp（10 个 MCP 工具）驱动远端 RISC-V 仿真器 riscv_sim：装固件、单步推进、跑到停点、调陷阱交付策略、读寄存器/内存/console、反汇编、设断点、回放事件。当用户要求在 RISC-V 仿真器里跑固件或调试、问 pc/寄存器/x5/t_ps/断点/反汇编/串口输出、问「AI 怎么驱动仿真器」，或提到 riscv_sim、sim-mcp、MCP 仿真、RISC-V 调试时使用。不用于编译固件，也不替代 HTTP 契约调试。
+description: 通过 sim-mcp（11 个 MCP 工具）驱动远端 RISC-V 仿真器 riscv_sim：装固件、单步推进、跑到停点、调陷阱交付策略、读寄存器/内存/console、反汇编、设断点、回放事件。当用户要求在 RISC-V 仿真器里跑固件或调试、问 pc/寄存器/x5/t_ps/断点/反汇编/串口输出、问「AI 怎么驱动仿真器」，或提到 riscv_sim、sim-mcp、MCP 仿真、RISC-V 调试时使用。不用于编译固件，也不替代 HTTP 契约调试。
 ---
 
 # 用 sim-mcp 驱动 RISC-V 仿真器
@@ -24,7 +24,7 @@ HEAD  Authorization: Bearer <你自己的账号令牌>
   不是给客户端用的全权凭据。
 - 客户端不支持自定义 header ⇒ 用 URL 形态 `https://rsimmcp.lczyzs.xyz/mcp/<令牌>`。
 - 先探一次健康：`GET https://rsimmcp.lczyzs.xyz/healthz`（免鉴权），期望
-  `{"ok":true,"tools":10,"base":"http://127.0.0.1:9876"}`。`base` 不是 `:9876` ⇒ MCP 上游指错，
+  `{"ok":true,"tools":11,"base":"http://127.0.0.1:9876"}`。`base` 不是 `:9876` ⇒ MCP 上游指错，
   每个工具都会 502，别怀疑工具。
 - `401` 是令牌问题（`E_SESS-07` / `E_MCP-08`）：令牌被吊销、抄错、或拿了别人的。
 - `502` 是反代到不了 ali_hy（端口/安全组/容器在重启），交给运维，不要反复重试。
