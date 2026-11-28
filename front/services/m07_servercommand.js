@@ -103,6 +103,10 @@ export async function postCommand(options) {
                 ...authHeaders(options.token ?? null),
             },
             body: JSON.stringify(commandBody(options.message, options.reqId ?? null)),
+            // ⚠️ **同源页面靠 cookie 认人**（账号模式 `sim_auth`）：命令面若把
+            //    cookie 丢掉，登录后的页面每条命令都吃 401。跨源页面照旧带
+            //    `x-auth-token`，`same-origin` 不会把 cookie 送出去。
+            credentials: "same-origin",
         });
     } catch (err) {
         // 网络层失败（服务没起 / 端口不通）也要有码：M-05 按码分派。

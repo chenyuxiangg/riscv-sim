@@ -118,7 +118,14 @@ async function readError(response) {
 }
 
 /**
- * 一条请求（统一 `credentials: "omit"` —— 令牌走请求头，不需要 cookie）。
+ * 一条请求（`credentials: "same-origin"` —— 「同源页面」与「跨源带令牌」两种
+ * 形态都要认）。
+ *
+ * ⚠️ **别改回 `omit`**：页面由服务端自己发出来时（`--front-dir`，一个端口），
+ *    身份是 `POST /api/login` 换来的 `sim_auth` cookie；`omit` 把 cookie 丢掉 ⇒
+ *    `POST /api/sessions` 一律 401 ⇒ 页面拿不到 `sessionId` ⇒ 状态栏只剩
+ *    「E_TRX-03 未配置 WebSocket URL」（账号模式一登录就踩）。跨源页面
+ *    （`serve-front.py`）拿不到 cookie，仍按 `x-auth-token` 走，行为不变。
  *
  * @param {string} url
  * @param {{method?: string, headers?: Record<string,string>, body?: string, fetchImpl?: Function, timeoutMs?: number}} options
@@ -132,7 +139,7 @@ async function requestJson(url, options = {}) {
     const init = {
         method: options.method ?? "GET",
         headers: options.headers ?? {},
-        credentials: "omit",
+        credentials: "same-origin",
     };
     if (options.body !== undefined) init.body = options.body;
     console.debug?.("[M-07] server-mode →", init.method, url);
