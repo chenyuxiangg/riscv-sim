@@ -52,10 +52,23 @@ B-1 的 `stop_causes` 落地后可把守卫限定到 fault 类 cause，进一步
 **待办（需要 OSZ 侧配合）**：要他们出事那版的 wasm 产物（或 commit）+ 板子 + 三条
 读的相邻时间戳，否则只能停在「结构已消掉、症状未复现」。
 
-**另外发现（与本项无关，记在这里免得丢）**：`Continue`（窗口循环）在
-`pc=0x80006B34` 这类「跑飞进数据区」的状态下会以 `Halted(EndOfExecution)` 收尾
-（零进展判据），而同一状态用 `StepN{1000}` 分块可以继续跑完 —— 两种驱动路径对
-「零进展」的判定不一致，`.github` 无覆盖。
+**另外发现（与本项无关，记在这里免得丢）**：`Continue` 一个窗口 = **恰好一个指令预算**
+（`DEFAULT_INSTRUCTION_BUDGET`，实测 10 000 条 = 10 000 000 ps），窗口跑满后
+**无条件**回 `Halted{EndOfExecution}`（`execute.rs` 里那句「`Continue` 跑到预算
+上限也是一个合法的停止条件，契约里最接近的取值是 `EndOfExecution`」）。实测同一
+状态连发三次 `Continue`：ps 20M → 30M → 40M、pc 一路在走 ⇒ **机器没停**，
+`Halted` 只是「本窗口预算用尽」。
+
+⇒ 这是**语义重载**（`EndOfExecution` 同时表示「程序跑完」和「窗口到点」），不是引擎
+停滞。代价：
+- 浏览器侧一次「运行」只覆盖 10k 条，得驱动方自己再发（前端按「窗口结束」处理，
+  见 `front/tests/{stale-surfaces,readback}.test.mjs`）；
+- 服务端 `run` 用显式 `steps` 分块绕开了它，但 `stop_reason="end"` 也可能只是预算用尽；
+- 第三方驱动（`agent-bridge`/MCP）若按「没 halt 就继续」写循环，会在 10k 条处误判「执行结束」。
+
+两种收口（需统筹方拍板）：① 契约加「本窗口预算用尽」的非终止语义（`HaltReason`
+加变体 ⇒ `SCHEMA_VERSION` 升 21，OSZ 侧要同步）；② v20 冻结期不动契约，只把
+「`Continue` = 一个预算窗口」写成驱动层不变量 + 文档口径，谁用谁循环。
 
 ## B-4 · `run` 的 `budget_exhausted` 之外，把「默认 1e6」写进 USER_GUIDE
 
