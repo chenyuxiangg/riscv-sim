@@ -1195,7 +1195,13 @@ async function bootstrap() {
     let serverFailure = null;
     if (serverParams) {
         try {
-            serverBinding = await serverModeApi.ensureSession(serverParams);
+            // 同源页面（`detected`）：开页先**复用**最近一条空闲会话，别每次
+            // 刷新都新建 —— 账号模式的会话配额默认只有 2 条，两条用光后
+            // 第三次开页会直接 E_CTX-04（表现就是状态栏 E_TRX-03）。
+            serverBinding = await serverModeApi.ensureSession({
+                ...serverParams,
+                reuse: Boolean(serverParams.detected),
+            });
         } catch (err) {
             // ⚠️ **不吞**：会话没建起来就如实记下，下面 `startServerMirror`
             //    把原因写到页脚；传输层那条（没有 sessionId ⇒ E_TRX-03）
