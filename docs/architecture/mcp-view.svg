@@ -19,7 +19,7 @@
 <text x="71" y="184" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">AI 客户端（任选一个）</text>
 <text x="71" y="201" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#243043" text-anchor="start" opacity="1">Claude Code / Cursor / 自研 agent 都行</text>
 <text x="71" y="218" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">Streamable HTTP（或本地 stdio 桥）</text>
-<text x="71" y="235" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">只持 SIM_MCP_TOKEN：也只能调 10 个工具</text>
+<text x="71" y="235" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">只持自己的账号令牌：也只能调 10 个工具</text>
 <text x="71" y="252" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">对仿真器一无所知：不拼 curl、不认识 8876</text>
 <text x="71" y="269" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">换客户端只改 config，工具面不动</text>
 <rect x="58" y="306" width="388" height="108" rx="10" ry="10" fill="#eef3f9" stroke="#a9b9cd" stroke-width="1.4" opacity="1"/>
@@ -29,7 +29,7 @@
 <text x="71" y="379" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">断开的表现是「连接被拒绝」，不是「仿真器坏了」</text>
 <rect x="58" y="426" width="388" height="104" rx="10" ry="10" fill="#fff7e8" stroke="#e8c98a" stroke-width="1.4" opacity="1"/>
 <text x="71" y="448" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">这里刻意没有的东西</text>
-<text x="71" y="465" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#243043" text-anchor="start" opacity="1">没有 SIM_TOKEN（server 令牌不下发到客户端侧）</text>
+<text x="71" y="465" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#243043" text-anchor="start" opacity="1">没有别人的令牌（服务端只认各自账号的令牌）</text>
 <text x="71" y="482" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">没有 8876 直连（那条是浏览器老路径，与 AI 无关）</text>
 <text x="71" y="499" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="11" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">没有 Docker 引擎 —— Mac 上跑不了镜像，验证只在 ali_hy</text>
 <rect x="58" y="542" width="388" height="96" rx="10" ry="10" fill="#fbfcfe" stroke="#cdd5e0" stroke-width="1.4" opacity="1"/>
@@ -85,7 +85,7 @@
 <text x="597" y="653" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">同一份 crates/kernel 的 native 目标 · CLINT / PLIC / UART / GPIO / Timer</text>
 <text x="597" y="670" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">EventRing seq ⇒ events(since_seq) 增量补拉；run 回 job ⇒ /jobs/{job} 轮询</text>
 <line x1="860" y1="454" x2="860" y2="478" stroke="#3f6fa8" stroke-width="1.6" marker-end="url(#arrow)"/>
-<text x="868" y="474" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="600" fill="#3f6fa8" text-anchor="start" opacity="1">② 回环 9876 · SIM_TOKEN</text>
+<text x="868" y="474" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="600" fill="#3f6fa8" text-anchor="start" opacity="1">② 回环 9876 · 用户令牌透传</text>
 <line x1="1050" y1="478" x2="1050" y2="454" stroke="#8a6b3c" stroke-width="1.6" marker-end="url(#arrow)" stroke-dasharray="5 4"/>
 <text x="1058" y="474" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="600" fill="#8a6b3c" text-anchor="start" opacity="1">③ 应答 / events / job</text>
 <rect x="1312" y="118" width="348" height="618" rx="10" ry="10" fill="#ffffff" stroke="#c3cedb" stroke-width="1.8" opacity="1"/>
@@ -97,9 +97,10 @@
 <text x="1341" y="235" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">9876  容器内  不发布  只在 docker 网络里</text>
 <rect x="1328" y="302" width="316" height="128" rx="10" ry="10" fill="#fff7e8" stroke="#e8c98a" stroke-width="1.4" opacity="1"/>
 <text x="1341" y="324" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">两条令牌，两种权限</text>
-<text x="1341" y="341" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#243043" text-anchor="start" opacity="1">SIM_TOKEN（fc63f4c6…） 全权：建/删/查所有会话</text>
-<text x="1341" y="358" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">⇒ 只给 sim-mcp 进程，永不进客户端</text>
-<text x="1341" y="375" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">SIM_MCP_TOKEN  只能调 10 个工具，且只见自己的会话</text>
+<text x="1341" y="341" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#243043" text-anchor="start" opacity="1">SIM_TOKEN（已收编为 admin 的种子令牌） 全权：建/删/查</text>
+<text x="1341" y="358" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">所有会话</text>
+<text x="1341" y="375" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">⇒ 只给 sim-mcp 进程，永不进客户端</text>
+<text x="1341" y="392" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.2" font-weight="400" fill="#4a5666" text-anchor="start" opacity="1">账号令牌只能调 10 个工具，且只见自己的会话</text>
 <rect x="1328" y="442" width="316" height="112" rx="10" ry="10" fill="#fbfbfc" stroke="#c8ced8" stroke-width="1.4" stroke-dasharray="6 4" opacity="1"/>
 <text x="1341" y="464" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="12.5" font-weight="600" fill="#1c2430" text-anchor="start" opacity="1">为什么先走隧道</text>
 <text x="1341" y="481" font-family="-apple-system,BlinkMacSystemFont,PingFang SC,Helvetica Neue,sans-serif" font-size="10.5" font-weight="400" fill="#243043" text-anchor="start" opacity="1">工具面没冻结前不开口子，少一次公网暴露</text>

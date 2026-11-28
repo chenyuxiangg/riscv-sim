@@ -124,7 +124,7 @@ svg.append(text(MX + 20, MY + 28, "A · 你的 Mac（客户端 + 隧道）", 14.
 svg.append(card(MX + 18, MY + 44, MW - 36, 132, "AI 客户端（任选一个）", [
     "Claude Code / Cursor / 自研 agent 都行",
     "Streamable HTTP（或本地 stdio 桥）",
-    "只持 SIM_MCP_TOKEN：也只能调 10 个工具",
+    "只持自己的账号令牌：也只能调 10 个工具",
     "对仿真器一无所知：不拼 curl、不认识 8876",
     "换客户端只改 config，工具面不动",
 ], fill="#eef3f9", stroke="#a9b9cd"))
@@ -136,7 +136,7 @@ svg.append(card(MX + 18, MY + 188, MW - 36, 108, "本地回环端口 · 隧道�
 ], fill="#eef3f9", stroke="#a9b9cd", mono_lines=(0,), size=10.5))
 
 svg.append(card(MX + 18, MY + 308, MW - 36, 104, "这里刻意没有的东西", [
-    "没有 SIM_TOKEN（server 令牌不下发到客户端侧）",
+    "没有别人的令牌（服务端只认各自账号的令牌）",
     "没有 8876 直连（那条是浏览器老路径，与 AI 无关）",
     "没有 Docker 引擎 —— Mac 上跑不了镜像，验证只在 ali_hy",
 ], fill="#fff7e8", stroke="#e8c98a"))
@@ -213,7 +213,7 @@ svg.append(card(BX + 32, BY + 496, 672, 86, "内核与事件环", [
 
 # sim-mcp → riscv-sim 两条
 svg.append(f'<line x1="{BX + BW // 2 - 60}" y1="{BY + 336}" x2="{BX + BW // 2 - 60}" y2="{BY + 360}" stroke="#3f6fa8" stroke-width="1.6" marker-end="url(#arrow)"/>')
-svg.append(text(BX + BW // 2 - 52, BY + 356, "② 回环 9876 · SIM_TOKEN", 10.5, 600, "#3f6fa8"))
+svg.append(text(BX + BW // 2 - 52, BY + 356, "② 回环 9876 · 用户令牌透传", 10.5, 600, "#3f6fa8"))
 svg.append(f'<line x1="{BX + BW // 2 + 130}" y1="{BY + 360}" x2="{BX + BW // 2 + 130}" y2="{BY + 336}" stroke="#8a6b3c" stroke-width="1.6" marker-end="url(#arrow)" stroke-dasharray="5 4"/>')
 svg.append(text(BX + BW // 2 + 138, BY + 356, "③ 应答 / events / job", 10.5, 600, "#8a6b3c"))
 
@@ -229,9 +229,9 @@ svg.append(card(CX2 + 16, CY + 44, CW2 - 32, 128, "三个端口，三种暴露�
 ], fill="#fbfcfe", stroke="#cdd5e0", size=10.2, mono_lines=(0, 1, 2)))
 
 svg.append(card(CX2 + 16, CY + 184, CW2 - 32, 128, "两条令牌，两种权限", [
-    "SIM_TOKEN（fc63f4c6…） 全权：建/删/查所有会话",
+    "SIM_TOKEN（已收编为 admin 的种子令牌） 全权：建/删/查所有会话",
     "⇒ 只给 sim-mcp 进程，永不进客户端",
-    "SIM_MCP_TOKEN  只能调 10 个工具，且只见自己的会话",
+    "账号令牌只能调 10 个工具，且只见自己的会话",
 ], fill="#fff7e8", stroke="#e8c98a", size=10.2))
 
 svg.append(card(CX2 + 16, CY + 324, CW2 - 32, 112, "为什么先走隧道", [
