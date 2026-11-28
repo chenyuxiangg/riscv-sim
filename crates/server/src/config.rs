@@ -216,11 +216,9 @@ impl Config {
                 }
                 "--max-sessions-per-account" => {
                     let raw = value(&mut it, flag)?;
-                    let sessions = raw
-                        .parse::<usize>()
-                        .map_err(|_| {
-                            format!("bad --max-sessions-per-account value {raw:?}: not a count")
-                        })?;
+                    let sessions = raw.parse::<usize>().map_err(|_| {
+                        format!("bad --max-sessions-per-account value {raw:?}: not a count")
+                    })?;
                     if sessions == 0 {
                         return Err(
                             "bad --max-sessions-per-account value 0: quota must be positive"

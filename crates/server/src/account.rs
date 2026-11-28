@@ -180,7 +180,10 @@ impl Accounts {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => {
-                return Err(format!("cannot read accounts file {}: {err}", path.display()))
+                return Err(format!(
+                    "cannot read accounts file {}: {err}",
+                    path.display()
+                ))
             }
         };
         let store: Store = serde_json::from_str(&raw)

@@ -102,7 +102,9 @@ impl ApiError {
         Self::new(
             StatusCode::TOO_MANY_REQUESTS,
             session_code(E_SESS_05_QUOTA_EXCEEDED),
-            format!("account session quota {max} is in use; DELETE one of your sessions, then retry"),
+            format!(
+                "account session quota {max} is in use; DELETE one of your sessions, then retry"
+            ),
         )
     }
 

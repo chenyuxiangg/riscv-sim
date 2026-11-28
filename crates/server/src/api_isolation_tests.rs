@@ -245,7 +245,12 @@ async fn account_quota_is_per_account() {
     // 别的账号不受影响。
     let (status, body) = call(
         &state,
-        request("POST", "/api/sessions", Some(&fixture.bob_token), Some(json!({}))),
+        request(
+            "POST",
+            "/api/sessions",
+            Some(&fixture.bob_token),
+            Some(json!({})),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -289,7 +294,12 @@ async fn compat_mode_keeps_the_single_token_behaviour() {
     // 兼容模式下所有会话都归 `legacy`，中间件的归属判定必须放行。
     let (status, body) = call(
         &state,
-        request("POST", "/api/sessions", Some("legacy-secret"), Some(json!({}))),
+        request(
+            "POST",
+            "/api/sessions",
+            Some("legacy-secret"),
+            Some(json!({})),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");

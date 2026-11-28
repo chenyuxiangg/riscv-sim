@@ -2127,7 +2127,10 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         }
     }
     let secure = request_is_https(&headers);
-    ([(header::SET_COOKIE, account::clear_cookie(secure))], StatusCode::NO_CONTENT)
+    (
+        [(header::SET_COOKIE, account::clear_cookie(secure))],
+        StatusCode::NO_CONTENT,
+    )
         .into_response()
 }
 
@@ -2145,7 +2148,10 @@ async fn auth_mode(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 /// `GET /api/whoami` —— 当前身份。MCP 用它把「令牌」换成「账号 id」
 /// （同一账号的多把令牌 ⇒ 同一个 client ⇒ 共用会话）。
-async fn whoami(State(state): State<AppState>, Extension(identity): Extension<Identity>) -> Json<serde_json::Value> {
+async fn whoami(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Json<serde_json::Value> {
     Json(json!({
         "accounts": state.isolated(),
         "account": identity.account,
@@ -2424,7 +2430,10 @@ async fn front_or_unknown(
                         }
                         return (
                             [
-                                (header::SET_COOKIE, account::set_cookie(&value, request_is_https(&headers))),
+                                (
+                                    header::SET_COOKIE,
+                                    account::set_cookie(&value, request_is_https(&headers)),
+                                ),
                                 (header::LOCATION, location),
                             ],
                             StatusCode::FOUND,

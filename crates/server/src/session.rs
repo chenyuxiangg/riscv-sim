@@ -2406,7 +2406,11 @@ mod tests {
     fn async_run_reports_through_a_job_slot() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         // ⚠️ 必须先装一个**真的会跑**的镜像：空工程跑 1 条就 `end-of-execution`
@@ -2467,7 +2471,11 @@ mod tests {
     fn snapshot_then_restore_round_trips_a_session() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         // 采集：六段齐全，宿主代填 `t_virt`。
@@ -2553,9 +2561,15 @@ mod tests {
     #[test]
     fn quota_rejects_the_third_session() {
         let registry = registry();
-        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
-        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
-        let err = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap_err();
+        registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
+        registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
+        let err = registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap_err();
         assert_eq!(err.code(), "E_SESS-05");
         assert_eq!(err.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(registry.used(), 2);
@@ -2564,7 +2578,9 @@ mod tests {
     #[test]
     fn delete_removes_the_session_and_a_second_delete_is_not_found() {
         let registry = registry();
-        let info = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
+        let info = registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
         registry.delete(&info.id).unwrap();
         assert_eq!(registry.used(), 0);
         let err = registry.delete(&info.id).unwrap_err();
@@ -2574,7 +2590,9 @@ mod tests {
     #[test]
     fn ttl_reaps_idle_sessions() {
         let registry = SessionRegistry::new(4, Duration::from_millis(20), 1024);
-        let info = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
+        let info = registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(registry.sweep(), 1);
         assert_eq!(registry.used(), 0);
@@ -2584,8 +2602,12 @@ mod tests {
     #[test]
     fn shutdown_reaps_everything() {
         let registry = registry();
-        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
-        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
+        registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
+        registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
         registry.shutdown();
         assert_eq!(registry.used(), 0);
     }
@@ -2656,7 +2678,11 @@ mod tests {
     fn run_stops_on_the_console_prefix() {
         let registry = registry();
         let info = registry
-            .create_for(Some("qemu-virt".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("qemu-virt".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         let program = vec![
@@ -2705,7 +2731,11 @@ mod tests {
     fn run_reports_a_platform_error_abort_instead_of_a_halt() {
         let registry = registry();
         let info = registry
-            .create_for(Some("qemu-virt".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("qemu-virt".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         // 非法指令 @0x0c ⇒ handler 在 0x10 也非法 ⇒ 同一 (cause, mepc) 连环。
@@ -2768,7 +2798,11 @@ mod tests {
     fn reset_returns_to_the_loading_start() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         registry
@@ -2812,7 +2846,9 @@ mod tests {
     #[test]
     fn reset_without_an_image_is_rejected() {
         let registry = registry();
-        let info = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
+        let info = registry
+            .create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
         let err = registry.reset(&info.id).expect_err("空会话不能复位");
         assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
     }
@@ -2822,7 +2858,11 @@ mod tests {
     fn watchpoints_go_through_the_kernel_table() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         let wp = Watchpoint {
@@ -2904,7 +2944,11 @@ mod tests {
     fn contract_command_answers_with_frames_the_front_end_can_decode() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         registry
@@ -2972,7 +3016,11 @@ mod tests {
     fn contract_tick_answer_uses_the_unringed_seq_band() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
 
@@ -3013,7 +3061,11 @@ mod tests {
     fn contract_answer_is_not_duplicated_in_the_event_stream() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         registry
@@ -3071,7 +3123,11 @@ mod tests {
     fn contract_load_project_leaves_resubscription_to_the_client() {
         let registry = registry();
         let info = registry
-            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
+            .create_for(
+                Some("default".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         let id = info.id.clone();
         let before_next = registry.events(&id, 0, 64).unwrap()["next"]
