@@ -229,6 +229,8 @@ docker exec riscv-sim python3 /opt/sim-tools/accounts.py revoke-token --account 
 | 浏览器 cookie | 同一账号的全部会话（含另一把令牌开的） | 换账号看别人的页面会话 |
 | `SIM_TOKEN`（账号模式下的 `ops`） | 只能看到自己开的会话 | 看不见、也删不掉任何账号的会话 |
 
+**镜像路径**：账号模式的镜像根是 `images/<account_id>/`（即容器内 `/data/images/<account_id>/`）。请求里写**相对名**（`{"path":"prog.elf"}`）会自动按自己的根解析，不用、也不该拼 `acc-*` 这一层；绝对路径语义不变，但必须落在自己的根里，否则 400 `E_PROTO-08`。迁移时把现有 `*.elf` 各复制一份到需要它的账号目录即可（`docker cp` 或宿主卷直接拷，属主保持 `10001`）。
+
 配额默认 **全局 8 / 单账号 2**（页面占一个、agent 占一个）；单账号满了回 `429 E_SESS-05`，别人不受影响。要放宽：`--max-sessions-per-account 4`。
 
 **MCP 怎么用**：客户端带自己的令牌即可，MCP 不再需要服务凭据。

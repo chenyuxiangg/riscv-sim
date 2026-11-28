@@ -465,7 +465,8 @@ async fn load_image(
         let request: ImagePathRequest = serde_json::from_slice(&body)
             .map_err(|err| ApiError::bad_request(format!("bad JSON body: {err}")))?;
         let root = image_root_for(&state, &identity);
-        let resolved = upload::whitelist_path(root.as_deref(), &request.path)?;
+        let arg = image_arg_for(root.as_deref(), &request.path);
+        let resolved = upload::whitelist_path(root.as_deref(), &arg)?;
         // ⚠️ 读盘放 blocking 池：16 MiB 的同步读会把 async 工作线程钉住。
         let read_from = resolved.clone();
         let bytes = tokio::task::spawn_blocking(move || std::fs::read(&read_from))
@@ -1639,7 +1640,8 @@ async fn boot(
 
     // 读镜像（与 `POST …/image` 的路径通道同一口径；根按账号切）。
     let root = image_root_for(&state, &identity);
-    let resolved = upload::whitelist_path(root.as_deref(), &path)?;
+    let arg = image_arg_for(root.as_deref(), &path);
+    let resolved = upload::whitelist_path(root.as_deref(), &arg)?;
     let read_from = resolved.clone();
     let bytes = tokio::task::spawn_blocking(move || std::fs::read(&read_from))
         .await
@@ -2044,6 +2046,23 @@ pub(crate) fn image_root_for(state: &AppState, identity: &Identity) -> Option<Pa
     // 首次使用时建目录（幂等）；建不出来就当作「路径通道没开」。
     std::fs::create_dir_all(&dir).ok()?;
     dir.canonicalize().ok()
+}
+
+/// 镜像路径参数 → 交给白名单去规范化的路径。
+///
+/// ⚠️ 账号模式下根是**每个账号一个目录**，客户端只会知道「自己磁盘里那个
+/// 文件叫什么」（MCP 的 `path` 也是这个口径）。所以**相对路径一律按当前
+/// 账号根拼接**，绝对路径原样交给 `whitelist_path` 判越界 —— 这样调用方
+/// 不用说、也不必知道 `acc-xxxx/` 这层目录。
+pub(crate) fn image_arg_for(root: Option<&std::path::Path>, raw: &str) -> String {
+    let path = std::path::Path::new(raw);
+    if path.is_absolute() {
+        return raw.to_string();
+    }
+    match root {
+        Some(root) => root.join(path).to_string_lossy().into_owned(),
+        None => raw.to_string(),
+    }
 }
 
 /// 账号 id → 目录名。账号 id 本来就只含 `[a-z0-9-]`，这里仍然逐字符过滤
