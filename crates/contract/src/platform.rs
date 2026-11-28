@@ -2539,8 +2539,9 @@ mod tests {
     /// ⚠️ **R-1**（契约 v20）moved it **19 → 20**（`SetStopPolicy` 命令 +
     /// `TrapSummary` 事件 ⇒ ⇒ 线上**多一条命令 + 一个事件变体** ⇒ ⇒ 同理）。
     #[test]
-    fn s16_a1_the_contract_schema_version_is_twenty() {
-        assert_eq!(crate::SCHEMA_VERSION, 20);
+    fn s16_a1_the_contract_schema_version_is_twenty_one() {
+        // v21：`HaltReason` 多一个变体（`BudgetExhausted`）。
+        assert_eq!(crate::SCHEMA_VERSION, 21);
     }
     /// **STAGE-16 A-2** — the **description format**'s version is still
     /// `1`.

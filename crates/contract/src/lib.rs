@@ -397,7 +397,22 @@ pub mod snapshot;
 ///   仍是「因陷阱而停」，`stop_on_trap = false` 时只是**不产生**它；
 /// - ⚠️ `SIM_STATE_SCHEMA_VERSION` stays `3`、`PLATFORM_SCHEMA_VERSION`
 ///   stays `1`（快照与描述格式都没变）。
-pub const SCHEMA_VERSION: u32 = 20;
+///
+/// Contract **v21** 把「窗口预算用尽」从 `EndOfExecution` 里**拆出来**：
+///
+/// - `HaltReason` 新增 `BudgetExhausted` —— `Continue` 一个窗口跑满内核的
+///   指令预算（`DEFAULT_INSTRUCTION_BUDGET`，实测 10 000 条）时发它，
+///   意思是「机器还在跑，再发一次 `Continue` 就续上」；
+/// - `EndOfExecution` **回到单一含义**：guest 真的没东西可执行了；
+/// - ⇒ ⇒ `HaltReason` **加了一个变体** ⇒ ⇒ `SCHEMA_VERSION` 20 → 21；
+///   - 前端 JS 镜像（`front/lib/message.js` 的 `HALT_REASON`）必须同步，
+///     否则契约镜像门禁（`front/tests/contract.test.mjs` 直接读 Rust 源）
+///     会红 —— 这是**故意的**：枚举两侧各写一份，靠门禁钉死；
+///   - 驱动层：`running` 态收到 `BudgetExhausted` ⇒ **续发**（不是停）；
+///     `idle` 态收到 ⇒ 不动。服务端 `run` 走显式 `steps` 分块 ⇒ 不受影响，
+///     但 `stop_reason` 映射补了 `"budget"`；
+/// - ⚠️ `SIM_STATE_SCHEMA_VERSION` / `PLATFORM_SCHEMA_VERSION` **都不动**。
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// 契约 crate 自身的版本号 —— 供 `GET /api/version` 回给客户端（M-24 · R-01）。
 ///

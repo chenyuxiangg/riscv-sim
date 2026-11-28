@@ -34,6 +34,11 @@ fn real_halt(events: &[EventPayload]) -> Option<HaltReason> {
             reason: HaltReason::EndOfExecution,
             ..
         } => None,
+        // 同理：窗口预算用尽**不是**真停点（`Continue` 本就没打算在这停）。
+        EventPayload::Halted {
+            reason: HaltReason::BudgetExhausted,
+            ..
+        } => None,
         EventPayload::Halted { reason, .. } => Some(*reason),
         _ => None,
     })
@@ -241,6 +246,9 @@ impl KernelHost {
         //
         // 两条路径共用同一个执行器（`m17_backend::IssExecutor`），所以
         // 「按指令跑」与「按时间跑」不会各自长出一套 ISS 逻辑（D-07）。
+        // 本窗口实际退休了多少条 —— 用来区分「预算用尽但机器活着」与
+        // 「一条都跑不动」（后者才是真·执行结束）。
+        let executed_before = self.total_executed();
         let run = if step_over {
             self.backend.step_over().map(|_| ())
         } else {
@@ -308,15 +316,22 @@ impl KernelHost {
         if let Some(wave) = self.waveform_event(false) {
             events.push(wave);
         }
+        let executed = self.total_executed().saturating_sub(executed_before);
         let reason = self.backend.last_stop_reason().or_else(|| {
-            // `Continue` 跑到预算上限也是一个合法的停止条件（契约里
-            // 最接近的取值是 `EndOfExecution`）；`StepN` 跑满 n 条是
-            // **正常完成**，不是停止。
-            if steps.is_none() && !step_over {
-                Some(HaltReason::EndOfExecution)
-            } else {
-                None
+            // `StepN` 跑满 n 条是 **正常完成**，不是停止。
+            if steps.is_some() || step_over {
+                return None;
             }
+            // `Continue` 走到这里 ⇒ 没有真停点 ⇒ 是「本窗口预算用尽」。
+            //
+            // ⚠️ v21 起**不再**借 `EndOfExecution`（那会让驱动方分不清
+            //    「跑完了」与「这一窗到点了」）：跑过指令 ⇒ `BudgetExhausted`；
+            //    一条都跑不动 ⇒ 才是真的 `EndOfExecution`。
+            Some(if executed > 0 {
+                HaltReason::BudgetExhausted
+            } else {
+                HaltReason::EndOfExecution
+            })
         });
         if let Some(reason) = reason {
             let pc = self.backend.engine().snapshot().pc;

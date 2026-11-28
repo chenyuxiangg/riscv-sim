@@ -66,9 +66,12 @@ B-1 的 `stop_causes` 落地后可把守卫限定到 fault 类 cause，进一步
 - 服务端 `run` 用显式 `steps` 分块绕开了它，但 `stop_reason="end"` 也可能只是预算用尽；
 - 第三方驱动（`agent-bridge`/MCP）若按「没 halt 就继续」写循环，会在 10k 条处误判「执行结束」。
 
-两种收口（需统筹方拍板）：① 契约加「本窗口预算用尽」的非终止语义（`HaltReason`
-加变体 ⇒ `SCHEMA_VERSION` 升 21，OSZ 侧要同步）；② v20 冻结期不动契约，只把
-「`Continue` = 一个预算窗口」写成驱动层不变量 + 文档口径，谁用谁循环。
+**已收口（v21 · 统筹方选 ①）**：`HaltReason` 加 `BudgetExhausted`，`SCHEMA_VERSION`
+20 → 21；`Continue` 跑满预算发它（跑过指令才发，一条没跑动仍是 `EndOfExecution`），
+`real_halt` 不把它当真停点，前端 running 态照旧续发、`idle` 态不动、不读回；
+服务端 `stop_reason` 补 `"budget"`。用例：`tests_v21_budget_halt.rs`（2 条）+
+`tests.rs::cleared_breakpoint_no_longer_halts` 改断言。⚠️ **OSZ 侧要同步
+`SCHEMA_VERSION=21`**（旧客户端连新内核会被 `E_PROTO-01` 拒）。
 
 ## B-4 · `run` 的 `budget_exhausted` 之外，把「默认 1e6」写进 USER_GUIDE
 
