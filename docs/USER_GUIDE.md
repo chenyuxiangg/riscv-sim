@@ -201,7 +201,7 @@ SIM_IMAGE=crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_si
 
 ```bash
 # 1) 建账号库（放在数据卷上，跟着卷一起备份）
-docker exec riscv-sim python3 tools/accounts.py init \
+docker exec riscv-sim python3 /opt/sim-tools/accounts.py init \
   --name admin --password '<选一个强口令>' --token "$SIM_TOKEN"
 #    ↑ 把现有 SIM_TOKEN 收成第一把令牌 ⇒ 老客户端不会因为升级而失效
 
@@ -213,10 +213,10 @@ docker run -d --name riscv-sim --restart unless-stopped \
   <镜像>
 
 # 3) 给同事开账号（默认同时发一把令牌，明文只打印这一次）
-docker exec riscv-sim python3 tools/accounts.py add-account --name alice --password '<口令>'
-docker exec riscv-sim python3 tools/accounts.py list          # 看账号 / 令牌 hint / 吊销状态
-docker exec riscv-sim python3 tools/accounts.py add-token --account alice
-docker exec riscv-sim python3 tools/accounts.py revoke-token --account alice --id tok-2
+docker exec riscv-sim python3 /opt/sim-tools/accounts.py add-account --name alice --password '<口令>'
+docker exec riscv-sim python3 /opt/sim-tools/accounts.py list          # 看账号 / 令牌 hint / 吊销状态
+docker exec riscv-sim python3 /opt/sim-tools/accounts.py add-token --account alice
+docker exec riscv-sim python3 /opt/sim-tools/accounts.py revoke-token --account alice --id tok-2
 ```
 
 启动日志出现 `accounts /data/accounts.json ⇒ N account(s), M token(s), isolation ON` 就说明隔离生效；`GET /api/auth/mode` 应回 `{"mode":"accounts","accounts":true,"login":true}`。

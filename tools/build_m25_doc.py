@@ -625,7 +625,7 @@ fn account_dir_name(account: &str) -> String {
                 "若 sweeper 用 <code>SIM_TOKEN</code> 去删别人的会话，服务端按 owner 判定会回 404 —— 会话删不掉，但配额一直被占，直到服务端 TTL 才释放。"),
 
         ("h3", "sec4-8", "4.8 运维 CLI"),
-        ("p", "<code>tools/accounts.py</code> 是运行期<b>唯一</b>的账号库写入口（服务端只读）。子命令与安全约束："),
+        ("p", "<code>tools/accounts.py</code>（镜像内 <code>/opt/sim-tools/accounts.py</code>）是运行期<b>唯一</b>的账号库写入口（服务端只读）。子命令与安全约束："),
         ("caption", "表 15 · tools/accounts.py 子命令"),
         ("table", {
             "widths": ["18%", "34%", "48%"],
@@ -639,11 +639,11 @@ fn account_dir_name(account: &str) -> String {
             ],
         }),
         ("p", "写文件走 <code>tmp + os.replace</code>（原子）并 <code>chmod 0600</code>："),
-        ("code", """$ python3 tools/accounts.py init --name admin --password '…' --token '<现有 SIM_TOKEN>'
-$ python3 tools/accounts.py add-account --name alice --password '…' --mint-token
+        ("code", """$ docker exec riscv-sim python3 /opt/sim-tools/accounts.py init --name admin --password '…' --token '<现有 SIM_TOKEN>'
+$ docker exec riscv-sim python3 /opt/sim-tools/accounts.py add-account --name alice --password '…' --mint-token
   account acc-c9d46d (alice) created; token tok-1 hint=UW78
   token（只显示这一次）: UW78oxtD…（64 hex）
-$ python3 tools/accounts.py list
+$ docker exec riscv-sim python3 /opt/sim-tools/accounts.py list
   acc-c9d46d  alice  role=user  tokens=1 (1 active)  created=2026-11-27
 """),
     ],
@@ -751,7 +751,7 @@ SECTIONS.append({
 
         ("h3", "sec7-2", "7.2 上线步骤"),
         ("list", [
-            "① 在数据卷上建账号库：<code>docker exec riscv-sim python3 tools/accounts.py init --name admin --password '…' --token \"$SIM_TOKEN\"</code>（把现有 <code>SIM_TOKEN</code> 收成第一把令牌，旧客户端不至于断）；",
+            "① 在数据卷上建账号库：<code>docker exec riscv-sim python3 /opt/sim-tools/accounts.py init --name admin --password '…' --token \"$SIM_TOKEN\"</code>（把现有 <code>SIM_TOKEN</code> 收成第一把令牌，旧客户端不至于断）；",
             "② 重建容器，加 <code>-e SIM_ACCOUNTS=/data/accounts.json</code>（<code>/data</code> 是既有卷，账号库跟着卷走）；",
             "③ 看启动日志：<code>accounts /data/accounts.json ⇒ N account(s), M token(s), isolation ON</code>；",
             "④ <code>curl /api/auth/mode</code> 应回 <code>accounts:true</code>；<code>curl /healthz</code> 看 <code>accounts_count</code>；",

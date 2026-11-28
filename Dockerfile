@@ -55,6 +55,9 @@ COPY docker/entrypoint.sh /usr/local/bin/sim-entrypoint
 COPY docker/supervise.sh /usr/local/bin/sim-supervise
 COPY docker/healthcheck.py /usr/local/bin/sim-healthcheck
 COPY mcp/server.py /opt/sim-mcp/server.py
+# M-25 账号库的离线 CLI：运维用 `docker exec … python3 /opt/sim-tools/accounts.py`
+# 建账号 / 发令牌（服务端本身只读账号库，不写）。
+COPY tools/accounts.py /opt/sim-tools/accounts.py
 COPY front /app/front
 
 # ⚠️ server.py 显式 0444：源文件在开发机上是 600，COPY 会保留 mode ⇒ 非 root 的
@@ -62,7 +65,8 @@ COPY front /app/front
 RUN chmod 0755 /usr/local/bin/riscv_sim_server /usr/local/bin/sim-entrypoint \
        /usr/local/bin/sim-supervise /usr/local/bin/sim-healthcheck \
  && chmod 0444 /opt/sim-mcp/server.py \
- && chown -R sim:sim /app/front /opt/sim-mcp
+ && chmod 0755 /opt/sim-tools/accounts.py \
+ && chown -R sim:sim /app/front /opt/sim-mcp /opt/sim-tools
 
 USER sim
 
