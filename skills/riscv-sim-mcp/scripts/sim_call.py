@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """一个工具，直连 sim-mcp 的 Streamable HTTP：查健康、列工具、调任意一个工具。
 
-    export SIM_MCP_URL=http://127.0.0.1:18877/mcp
-    export SIM_MCP_TOKEN=<MCP 令牌>
+    export SIM_MCP_URL=https://rsimmcp.lczyzs.xyz/mcp
+    export SIM_MCP_TOKEN=<你自己的账号令牌>
     python3 scripts/sim_call.py --health
     python3 scripts/sim_call.py --list
     python3 scripts/sim_call.py --tool boot --json '{"board":"qemu-virt"}'
@@ -20,7 +20,7 @@ import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_URL = os.environ.get("SIM_MCP_URL", "http://127.0.0.1:18877/mcp")
+DEFAULT_URL = os.environ.get("SIM_MCP_URL", "https://rsimmcp.lczyzs.xyz/mcp")
 DEFAULT_TOKEN = os.environ.get("SIM_MCP_TOKEN", "")
 
 
@@ -77,7 +77,7 @@ def main() -> int:
     a = ap.parse_args()
 
     if not a.token:
-        raise SystemExit("缺令牌：--token 或 $SIM_MCP_TOKEN（别用 SIM_TOKEN）")
+        raise SystemExit("缺令牌：--token 或 $SIM_MCP_TOKEN（账号令牌一人一把，向运维要）")
 
     if a.health:
         base = a.url.rsplit("/mcp", 1)[0] if a.url.endswith("/mcp") else a.url
