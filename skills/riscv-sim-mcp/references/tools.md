@@ -44,7 +44,7 @@ content-type: application/octet-stream
 ## advance
 
 - 参数：`n`（1..`SIM_MCP_MAX_STEPS`，默认 100000）
-- 返回：`{executed, pc, t_ps, stop_reason, total_executed, console?:{base,bytes,total}}`
+- 返回：`{executed, pc, t_ps, stop_reason, total_executed, console?:{base,bytes,total,lost}}`
 - 语义是**恰好 n 条**，没有墙钟，可复现；`stop_reason` 可能是 `steps` / `trap` /
   `breakpoint` / `halt` —— 只有 `steps` 才代表「目标达成了」
 - 会话忙 ⇒ `409`（`E_SESS-02`）；等 200ms 重试，别重建会话
@@ -85,7 +85,13 @@ content-type: application/octet-stream
 ## inspect
 
 - `kind=state` ⇒ `{executed, pc, registers[32], t_ps, ...}`（`registers[5]` 就是 `x5`）
-- `kind=console` ⇒ `{base, bytes[], total}`，`offset` / `limit`（默认 1024）
+- `kind=console` ⇒ `{offset, base, total, next, lost, bytes, truncated, text}`
+  - `offset` 是**绝对**位置、读操作零副作用（同 offset 重读一致）；`limit` 默认 4096、
+    上限 64 KiB
+  - `next` 是下次续读位置；`truncated=true` 表示还有更多，按 `next` 继续读
+  - 超过 1 MiB 的原文落盘（单会话 64 MiB），出环的老段照样能按绝对 offset 读回
+  - 窗口丢了 ⇒ `409 E_SESS-04`，body/头**同时**带 `base` 与 `total`：一次就知道丢了
+    多少、现在累计到哪；从 `base` 重新对齐
 - `kind=memory` ⇒ `{addr, bytes[]}`；`addr` 必填，`len` 默认 64，`format`=`u32`|`asc`
 - `kind` 必填，取值只能是这三种；`memory` 缺 `addr` ⇒ `E_MCP-06`
 

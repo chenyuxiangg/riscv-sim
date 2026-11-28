@@ -87,7 +87,7 @@ python3 scripts/sim_call.py ... --tool boot --json '{}'
 | `run` | 跑到停点 | `steps` / `timeout_ms` / `prefix`（console 命中）/ `until`（breakpoint\|halt）/ `background` |
 | `poll_job` | 读异步作业 | `job`（`run(background=true)` 回体里的） |
 | `stop_policy` | 会话级陷阱交付策略（**R-1**）+ 异常连环守卫（**B-2**） | `stop_on_trap`（true=交付即停，默认）；`false` 时 `max_trap_events` **必填**；可选 `stall_guard`（≥2，同一 (cause,mepc) 连陷 N 次 ⇒ `E_ENG-04`） |
-| `inspect` | 读状态/串口/内存 | `kind`=state\|console\|memory；console 用**绝对 offset**（默认 4 KiB，回 `base/total/next/lost`，按 `next` 续读，窗口丢了从 `base` 重来）；`addr` `len` `format`(u32\|asc) `limit` |
+| `inspect` | 读状态/串口/内存 | `kind`=state\|console\|memory；console 用**绝对 offset**（默认 4 KiB，回 `base/total/next/lost`，按 `next` 续读，窗口丢了 409 同时给 `base`/`total`，从 `base` 重来）；`addr` `len` `format`(u32\|asc) `limit` |
 | `disasm` | 反汇编 | `addr` `count` |
 | `breakpoints` | 断点表 | `op`=list\|set\|clear\|enable（set 三选一：`addr`/`symbol`/`condition`） |
 | `events` | 增量拉事件 | `since`=`next`，`limit` |
