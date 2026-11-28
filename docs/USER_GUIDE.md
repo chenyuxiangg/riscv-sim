@@ -141,6 +141,23 @@ crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_sim
 
 workflow 只构建 `linux/amd64`（服务器基本都是它），并用 `docker buildx imagetools inspect` **回读**一次 —— 构建成功 ≠ 推送成功，这一步是给「假绿」上的锁。
 
+### 2.6.1 什么时候必须打 tag 重建镜像
+
+镜像里只有四样东西（见 `Dockerfile`）：Rust 服务端二进制 `/usr/local/bin/riscv_sim_server`、
+MCP 适配层 `/opt/sim-mcp/server.py`、前端 `/app/front`、账号库 CLI `/opt/sim-tools/accounts.py`。
+**不在这四样里的文件，改了都不需要发版。**
+
+| 改动 | 要不要 tag / 重建镜像 |
+|---|---|
+| `skills/**`（`SKILL.md`、`references/*.md`、`scripts/*.py`） | **不用**。给 agent 看的说明书，落点是仓库 + 本机 `.user_skills`，容器看不到 |
+| `mcp/README.md`、`docs/**`（含 `USER_GUIDE.md`） | **不用**。纯文档 |
+| `.github/**`、`deploy.sh`、`compose.yml` | **不用**（构建侧脚手架，服务器只用镜像） |
+| `mcp/server.py` | **要**（工具清单 / `initialize` instructions 都在这里） |
+| `crates/**`、`front/**` | **要**（服务端二进制、页面） |
+
+纯文档 / skill 的改法：`git push main`，再 `rsync -a --delete skills/riscv-sim-mcp/ ~/.doubao/agent_mode/workspace/.user_skills/riscv-sim-mcp/`，
+结束。**别顺手打 tag** —— 打 tag 会跑一遍 CI + 推镜像 + 重启容器，而容器重启会清空服务端内存态会话（旧 `session_id` 全失效），纯文档改动付这个代价是白付。
+
 **第一次发布的实证（2026-11-26，run 45737895110，全绿）**
 
 | 项 | 值 |
