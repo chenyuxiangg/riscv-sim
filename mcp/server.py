@@ -2,7 +2,8 @@
 """sim-mcp —— 把 riscv_sim 的 HTTP 面收成 10 个 MCP 工具（只依赖标准库）。
 
 设计口径（与 docs/architecture/mcp-view.svg 对齐）：
-  1. 凭据两层：客户端只持 `SIM_MCP_TOKEN`；`SIM_TOKEN` 只活在本进程 env 里。
+  1. 凭据：客户端持**自己的令牌**（服务端账号库里那把）；MCP 原样转给服务端，
+     服务端是唯一的判据。`SIM_TOKEN` 只作 MCP→服务端的应急凭据与兼容模式。
   2. 会话归属：`client_id → session_id` 一张表，boot 只建自己的，永不 list 别人的。
   3. 破坏性工具默认不注册；`SIM_MCP_ALLOW_DESTRUCTIVE=1` 才出现。
   4. 审计一行一调用（client / tool / 耗时 / 错误码）。
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import sys
@@ -56,9 +58,7 @@ def die(msg: str) -> None:
 
 if not SIM_TOKEN:
     die("SIM_TOKEN 没设：本进程要拿它访问仿真器，客户端不该看见它")
-if not MCP_TOKEN:
-    die("SIM_MCP_TOKEN 没设：不给客户端令牌，等于把 8877 变成公开端点")
-if MCP_TOKEN == SIM_TOKEN:
+if MCP_TOKEN and MCP_TOKEN == SIM_TOKEN:
     die("SIM_MCP_TOKEN 与 SIM_TOKEN 相同：两层凭据退化成一层，配置错了")
 if HOST not in ("127.0.0.1", "localhost", "::1") and not ALLOW_REMOTE:
     die(f"拒绝绑定 {HOST}：默认只回环（要对外请显式 SIM_MCP_ALLOW_REMOTE=1）")
@@ -72,11 +72,20 @@ class SimError(Exception):
         super().__init__(f"{code}: {detail}")
 
 
+# 每个请求线程「当前是谁」的令牌。工具函数保持 `(client, args)` 签名不变，
+# 真正发 HTTP 时从这里取 —— 这样几十个 `t_*` 一个都不用改。
+_TOKEN_CTX = threading.local()
+
+
+def _current_token() -> str:
+    return getattr(_TOKEN_CTX, "token", "") or SIM_TOKEN
+
+
 def _http(method: str, path: str, *, body=None, raw=None, ctype=None, timeout=20.0,
-          extra_headers: dict | None = None):
+          extra_headers: dict | None = None, token: str | None = None):
     url = SIM_BASE + path
     data = raw
-    headers = {"x-auth-token": SIM_TOKEN}
+    headers = {"x-auth-token": token or _current_token()}
     if extra_headers:
         headers.update(extra_headers)
     if body is not None:
@@ -175,7 +184,11 @@ class Ownership:
         self._lock = threading.Lock()
         self._map: dict[str, dict] = {}
 
-    def boot(self, client: str, board: str | None) -> dict:
+    def boot(self, client: str, board: str | None, token: str | None = None) -> dict:
+        # ⚠️ 令牌随会话一起记着：TTL 回收时**必须用这把会话自己的令牌**去删，
+        #    否则 MCP 的 sweeper 会拿 SIM_TOKEN（`ops`）去删别人的会话 ⇒ 404
+        #    ⇒ 会话一直占着配额直到服务端 TTL。
+        token = token or _current_token()
         with self._lock:
             cur = self._map.get(client)
         if cur:
@@ -187,7 +200,7 @@ class Ownership:
                     # 一直回 E_PLT-22，而 boot 一直「复用成功」，看着像工具坏了。
                     print(json.dumps({"audit": "rebind", "from": cur["board"],
                                       "to": board}), flush=True)
-                    self._drop(cur["sid"])
+                    self._drop(cur)
                     with self._lock:
                         self._map.pop(client, None)
                     cur = None
@@ -200,12 +213,12 @@ class Ownership:
         body = {"board": board} if board else {}
         status, created, _ = _http("POST", "/api/sessions", body=body)
         entry = {"sid": created["session_id"], "board": created.get("board"),
-                 "used": time.time()}
+                 "used": time.time(), "token": token}
         with self._lock:
             old = self._map.get(client)
             self._map[client] = entry
         if old and old["sid"] != entry["sid"]:
-            self._drop(old["sid"])
+            self._drop(old)
         return {"session_id": entry["sid"], "board": entry["board"], "reused": False}
 
     def sid(self, client: str) -> str:
@@ -216,9 +229,9 @@ class Ownership:
         entry["used"] = time.time()
         return entry["sid"]
 
-    def _drop(self, sid: str) -> None:
+    def _drop(self, entry: dict) -> None:
         try:
-            _http("DELETE", f"/api/sessions/{sid}")
+            _http("DELETE", f"/api/sessions/{entry['sid']}", token=entry.get("token"))
         except SimError:
             pass
 
@@ -230,7 +243,7 @@ class Ownership:
                 self._map.pop(key, None)
         for _, entry in stale:
             print(json.dumps({"audit": "idle-drop", "session": entry["sid"]}), flush=True)
-            self._drop(entry["sid"])
+            self._drop(entry)
 
 
 OWNER = Ownership()
@@ -257,7 +270,7 @@ def _regs_text(regs) -> str:
 
 def t_boot(client: str, args: dict) -> dict:
     board = args.get("board") or None
-    info = OWNER.boot(client, board)
+    info = OWNER.boot(client, board, _current_token())
     verb = "复用" if info["reused"] else "新建"
     return {
         "text": f"{verb}会话 {info['session_id']}（板 {info['board']}）",
@@ -760,8 +773,39 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         })
 
 
-def _client_id(token: str) -> str:
-    return "c-" + hashlib.sha256(token.encode()).hexdigest()[:8]
+# 令牌 → 租户键（账号 id）的缓存。**同一个账号的多把令牌落到同一个键** ⇒
+# 它们看到同一批会话（「一个账号多个令牌」的口径就是这么来的）。
+_CLIENTS: dict[str, str] = {}
+_CLIENTS_LOCK = threading.Lock()
+
+
+def _resolve_client(token: str) -> tuple[bool, str]:
+    """令牌是否有效 + 它代表哪个租户。
+
+    判据在**服务端**（`GET /api/whoami`）：MCP 不再维护第二套账号库。
+    服务端没有账号库（兼容模式）时退回令牌哈希 —— 与 v0.1.9 的 `client_id`
+    逐字节一致。
+    """
+    if not token:
+        return False, ""
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    if MCP_TOKEN and hmac.compare_digest(token, MCP_TOKEN):
+        # 服务凭据：给本机/运维用，按它自己的哈希分桶（与 v0.1.9 相同）。
+        return True, "c-" + digest[:8]
+    with _CLIENTS_LOCK:
+        cached = _CLIENTS.get(digest)
+    if cached:
+        return True, cached
+    try:
+        _, body, _ = _http("GET", "/api/whoami", token=token, timeout=5)
+    except SimError:
+        return False, ""
+    key = "c-" + digest[:8]
+    if isinstance(body, dict) and body.get("accounts"):
+        key = str(body.get("account") or key)
+    with _CLIENTS_LOCK:
+        _CLIENTS[digest] = key
+    return True, key
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -818,8 +862,11 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        if self._token(urlparse(self.path).path) != MCP_TOKEN:
-            self._json(401, {"error": "unauthorized"})
+        token = self._token(urlparse(self.path).path)
+        _TOKEN_CTX.token = token
+        ok, _ = _resolve_client(token)
+        if not ok:
+            self._json(401, {"code": "E_MCP-08", "detail": "unauthorized"})
             return
         self.send_response(200)
         self.send_header("content-length", "0")
@@ -847,7 +894,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         name = (self.headers.get("x-image-name") or "fw.elf").strip()
         token = self._token(urlparse(self.path).path)
-        client = _client_id(token)
+        _TOKEN_CTX.token = token
+        ok, client = _resolve_client(token)
+        if not ok:
+            self._json(401, {"code": "E_MCP-08", "detail": "unauthorized"})
+            return
         t0 = time.monotonic()
         try:
             sid = OWNER.sid(client)
@@ -869,11 +920,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/images") or parsed.path.startswith("/upload"):
             token = self._token(parsed.path)
-            if token != MCP_TOKEN:
+            _TOKEN_CTX.token = token
+            ok, _ = _resolve_client(token)
+            if not ok:
                 # 读掉 body 再回，否则客户端写不进去、连接被重置
                 int(self.headers.get("content-length", "0")) and self.rfile.read(
                     int(self.headers.get("content-length", "0")))
-                self._json(401, {"error": "unauthorized"})
+                self._json(401, {"code": "E_MCP-08", "detail": "unauthorized"})
                 return
             self._upload()
             return
@@ -881,8 +934,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         token = self._token(parsed.path)
-        if token != MCP_TOKEN:
-            self._json(401, {"error": "unauthorized"})
+        _TOKEN_CTX.token = token
+        ok, client = _resolve_client(token)
+        if not ok:
+            self._json(401, {"code": "E_MCP-08", "detail": "unauthorized"})
             return
         length = int(self.headers.get("content-length", "0"))
         try:
@@ -890,7 +945,6 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(400, _rpc_error(None, -32700, "parse error"))
             return
-        client = _client_id(token)
         replies = []
         batch = msg if isinstance(msg, list) else [msg]
         for one in batch:

@@ -80,3 +80,23 @@ B-1 的 `stop_causes` 落地后可把守卫限定到 fault 类 cause，进一步
 `docs/USER_GUIDE.md` 与 skill 的 troubleshooting。
 
 **为什么现在不做**：属文档债，与代码批解耦，下一批文档整理时一起补。
+
+## B-5 · 对外公开部署（两域名 + nginx 反代 + 证书）—— **未做**
+
+**要什么**：`rsim.lczyzs.xyz`（浏览器）与 `rsimmcp.lczyzs.xyz`（MCP）只走 443（SNI 双 vhost），
+ali_hy 上把容器端口暴露为 `0.0.0.0:8876` / `0.0.0.0:8877` 供反代；nginx 侧需要 WS 的
+`Upgrade`/`Connection`、MCP 的 `proxy_buffering off` + `proxy_read_timeout 3600s` +
+`client_max_body_size 8m`、`Authorization` 原样透传、`X-Forwarded-For` / `X-Forwarded-Proto`。
+建议再加一条安全组规则把 8876/8877 入站限制为 nginx 主机 IP（否则「只能走域名」只是约定）。
+
+**为什么现在不做**：代码已就位（M-25 合入后即可部署），缺的是 nginx 主机 IP、DNS A 记录、
+证书签发方式（HTTP-01 需临时开 80 或改 DNS-01）三个外部输入。
+
+## B-6 · 账号体系 P1（角色分级 / 审计 / 令牌到期）—— **未做**
+
+**要什么**：`role=admin` 的显式开关（代管他人会话，默认关闭）、`TokenRecord` 到期时间、
+按日切的审计日志（登录 / 建会话 / 删会话 / 吊销令牌四条事件）、MCP `/healthz` 报账号模式与
+`accounts_count`。
+
+**为什么现在不做**：本批只要求「看不越过」；再往上就是「能代管」，属于权限模型变更，
+应单独立项评审，不与隔离批混在一起。

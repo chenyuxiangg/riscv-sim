@@ -26,7 +26,10 @@
 //! ⚠️ **退出码 1 与 2 分开**：前者是「你打错了」，后者是「环境/策略不让绑」，
 //! 脚本据此决定是修参数还是换环境。
 
+mod account;
 mod api;
+#[cfg(test)]
+mod api_isolation_tests;
 mod config;
 mod error;
 mod front;
@@ -51,6 +54,9 @@ usage: riscv_sim_server [options]
   --session-ttl <secs>     idle session reaping window (default 900)
   --max-console <bytes>    per-session console buffer cap (default 1048576)
   --max-sessions <n>       concurrent session quota (default 8)
+  --max-sessions-per-account <n>  per-account session quota (default 2)
+  --accounts <path>        accounts/tokens file (default: $SIM_ACCOUNTS, then
+                           /data/accounts.json; absent ⇒ single-token compat mode)
   --allow-image-root <dir> whitelist root for image paths (default: uploads only)
   --max-image-bytes <n>    per-upload image byte cap (default 16777216)
   --max-snapshot-bytes <n> per-restore snapshot body cap (default 33554432)
@@ -65,6 +71,10 @@ usage: riscv_sim_server [options]
 
   GET    /api/version          kernel / schema_version / contract_version / server / bind
   GET    /healthz              liveness + uptime + effective limits
+  GET    /api/auth/mode        {mode: accounts|token, login}  (unauthenticated)
+  POST   /api/login            {username|user, password} -> Set-Cookie sim_auth
+  POST   /api/logout           clear the cookie (idempotent)
+  GET    /api/whoami           {account, name, role, channel, token_id}
   POST   /api/sessions         {board?} -> 201 {session_id, board, board_source, ...}
   GET    /api/sessions         list + quota
   GET    /api/sessions/<id>    detail + a live probe (pc / executed)
@@ -194,7 +204,25 @@ async fn serve(cfg: Config) -> Result<(), String> {
         .local_addr()
         .map_err(|e| format!("cannot read the bound address: {e}"))?;
 
-    let state = AppState::new(&cfg, local);
+    // 账号库（M-25）：文件缺席 ⇒ 兼容模式（单 `SIM_TOKEN`，与 v0.1.9 一致）。
+    // 读不动 / 版本不认识 ⇒ 启动失败（`prepare` 已经确认过路径存在）。
+    let accounts = match cfg.accounts.as_deref() {
+        Some(path) => match account::Accounts::load(path) {
+            Ok(Some(accounts)) => {
+                eprintln!(
+                    "riscv_sim_server: accounts {} ⇒ {} account(s), {} token(s), isolation ON",
+                    path.display(),
+                    accounts.account_count(),
+                    accounts.token_count()
+                );
+                Some(Arc::new(accounts))
+            }
+            Ok(None) => None,
+            Err(err) => return Err(format!("{err} (fix the file or drop --accounts)")),
+        },
+        None => None,
+    };
+    let state = AppState::new(&cfg, local).with_accounts(accounts);
     eprintln!(
         "riscv_sim_server {} listening on http://{local} (board={}, session_ttl={}s, max_console={}B, front={})",
         env!("CARGO_PKG_VERSION"),

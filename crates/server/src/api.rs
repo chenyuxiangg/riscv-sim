@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::{header, HeaderMap, Method, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -30,6 +30,7 @@ use riscv_sim_kernel::kernel_host::platform;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::account::{self, Accounts, Identity};
 use crate::config::{Config, DEFAULT_MAX_CONSOLE};
 use crate::error::ApiError;
 use crate::session::{BoardSource, RunSpec, RunUntil, SessionInfo, SessionRegistry};
@@ -43,7 +44,7 @@ const TOKEN_HEADER: &str = "x-auth-token";
 /// ⚠️ **可读响应头必须列全**：`x-boot-*` / `x-console-*` 是对拍与分页的判据
 /// ⇒ ⇒ 不 expose 的话浏览器 `fetch` 拿不到它们（跨域响应头**默认不可读**），
 /// 客户端会以为「服务端没给」。
-const CORS_ALLOW_HEADERS: &str = "content-type,x-auth-token";
+const CORS_ALLOW_HEADERS: &str = "content-type,x-auth-token,authorization";
 const CORS_ALLOW_METHODS: &str = "GET,POST,PUT,DELETE,OPTIONS";
 const CORS_EXPOSE_HEADERS: &str = "x-boot-stop,x-boot-executed,x-boot-console-total,x-boot-console-lost,x-boot-board-revision,x-boot-ram-window,x-console-offset,x-console-base,x-console-total,x-trace-next,x-trace-lost";
 const CORS_MAX_AGE_SECS: &str = "600";
@@ -109,8 +110,13 @@ pub struct AppState {
     pub max_snapshot_bytes: usize,
     /// `run` 一次请求的墙钟上限（`--max-run-ms`）。
     pub max_run_ms: u64,
-    /// 远程模式令牌；`None` ⇒ 不校验。
+    /// 远程模式令牌；`None` ⇒ 不校验。有了账号库之后它退化成**应急令牌**
+    /// （映射到 `ops` 账号，看不见任何人的会话）。
     pub token: Option<String>,
+    /// 账号库（`accounts.json`）。`None` ⇒ 兼容模式（单令牌，无隔离）。
+    pub accounts: Option<Arc<Accounts>>,
+    /// 单账号并发会话上限。
+    pub max_sessions_per_account: usize,
     /// 显式放行的浏览器 origin（`--cors-origins`）。
     ///
     /// ⚠️ 回环 origin **不靠这张表**：那是[`origin_is_loopback`]的默认判据。
@@ -135,14 +141,29 @@ impl AppState {
             max_snapshot_bytes: cfg.max_snapshot_bytes,
             max_run_ms: cfg.max_run_ms,
             token: cfg.token.clone(),
+            accounts: None,
+            max_sessions_per_account: cfg.max_sessions_per_account,
             cors_origins: cfg.cors_origins.clone(),
             front_dir: cfg.front_dir.clone(),
-            registry: Arc::new(SessionRegistry::new(
-                cfg.max_sessions,
-                cfg.session_ttl,
-                cfg.max_console,
-            )),
+            registry: {
+                let mut registry =
+                    SessionRegistry::new(cfg.max_sessions, cfg.session_ttl, cfg.max_console);
+                registry.set_max_per_account(cfg.max_sessions_per_account);
+                Arc::new(registry)
+            },
         }
+    }
+
+    /// 挂上账号库（`main` 在启动时读盘；`AppState::new` 保持**不碰磁盘**，
+    /// 单测照旧）。
+    pub fn with_accounts(mut self, accounts: Option<Arc<Accounts>>) -> Self {
+        self.accounts = accounts;
+        self
+    }
+
+    /// 身份隔离是否生效（`/healthz` 与启动日志用）。
+    pub fn isolated(&self) -> bool {
+        self.accounts.is_some()
     }
 }
 
@@ -263,14 +284,19 @@ pub fn router(state: AppState) -> Router {
             "/api/sessions/{id}/breakpoints/{bp}/enabled",
             put(enable_breakpoint),
         )
+        .route("/api/whoami", get(whoami))
         .route("/api/boot", post(boot))
         .route("/api/board/templates", get(list_templates))
         .route("/api/board/templates/{id}", get(get_template))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     Router::new()
         .route("/api/version", get(version))
         .route("/healthz", get(healthz))
+        // 登录三件**不经过**鉴权：一个还没登录的人当然没有身份。
+        .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
+        .route("/api/auth/mode", get(auth_mode))
         .merge(guarded)
         .fallback(front_or_unknown)
         // ⚠️ CORS 必须在**最外层**：预检（`OPTIONS`）既没有令牌、也不会被路由
@@ -298,6 +324,9 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         //   之前**就知道「我这条 `timeout_ms` 会不会被 400 拒」，而不是撞一次
         //   才算得出来。
         "max_run_ms": state.max_run_ms,
+        "accounts": state.isolated(),
+        "accounts_count": state.accounts.as_deref().map(Accounts::account_count),
+        "max_sessions_per_account": state.max_sessions_per_account,
         "bind": state.bind.to_string(),
     }))
 }
@@ -322,16 +351,23 @@ pub fn resolve_board(
 /// 「无板」也是**一种合法状态**（装载时才回 `E_PLT-22`），不是建会话失败。
 async fn create_session(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     body: Option<Json<CreateSessionRequest>>,
 ) -> Result<(StatusCode, Json<SessionPayload>), ApiError> {
     let requested = body.and_then(|Json(req)| req.board);
     let (board, source) = resolve_board(requested, state.board.clone());
-    let info = state.registry.create(board, source)?;
+    let info = state
+        .registry
+        .create_for(board, source, &identity.account)?;
     Ok((StatusCode::CREATED, Json(SessionPayload::from_info(&info))))
 }
 
-async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let (infos, max, used) = state.registry.list();
+async fn list_sessions(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Json<serde_json::Value> {
+    // 只列自己的（M-25）。配额报的也是「自己这条上限」。
+    let (infos, max, used) = state.registry.list_for(&identity.account);
     let sessions: Vec<SessionPayload> = infos.iter().map(SessionPayload::from_info).collect();
     Json(json!({
         "sessions": sessions,
@@ -414,6 +450,7 @@ struct ImagePathRequest {
 /// 引导）⇒ ⇒ 服务端**不造第二条判据**。
 async fn load_image(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -427,7 +464,8 @@ async fn load_image(
     let (name, bytes) = if content_type.starts_with("application/json") {
         let request: ImagePathRequest = serde_json::from_slice(&body)
             .map_err(|err| ApiError::bad_request(format!("bad JSON body: {err}")))?;
-        let resolved = upload::whitelist_path(state.allow_image_root.as_deref(), &request.path)?;
+        let root = image_root_for(&state, &identity);
+        let resolved = upload::whitelist_path(root.as_deref(), &request.path)?;
         // ⚠️ 读盘放 blocking 池：16 MiB 的同步读会把 async 工作线程钉住。
         let read_from = resolved.clone();
         let bytes = tokio::task::spawn_blocking(move || std::fs::read(&read_from))
@@ -1570,6 +1608,7 @@ pub struct BootRequest {
 /// 仍由内核 `run_until` 给；这里只做「攒 console / 判前缀 / 判预算」。
 async fn boot(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Json(request): Json<BootRequest>,
 ) -> Result<Response, ApiError> {
     let path = request.path.trim().to_string();
@@ -1598,8 +1637,9 @@ async fn boot(
         Some(timeout_ms) => timeout_ms,
     };
 
-    // 读镜像（与 `POST …/image` 的路径通道同一口径）。
-    let resolved = upload::whitelist_path(state.allow_image_root.as_deref(), &path)?;
+    // 读镜像（与 `POST …/image` 的路径通道同一口径；根按账号切）。
+    let root = image_root_for(&state, &identity);
+    let resolved = upload::whitelist_path(root.as_deref(), &path)?;
     let read_from = resolved.clone();
     let bytes = tokio::task::spawn_blocking(move || std::fs::read(&read_from))
         .await
@@ -1618,9 +1658,11 @@ async fn boot(
         Some(board) => Some(board),
         None => Some("default".to_string()),
     };
-    let info = state
-        .registry
-        .create(board.clone(), crate::session::BoardSource::Request)?;
+    let info = state.registry.create_for(
+        board.clone(),
+        crate::session::BoardSource::Request,
+        &identity.account,
+    )?;
     let id = info.id.clone();
 
     // 板子的 **RAM 窗口**（`base:size`，十进制）⇒ ⇒ 随回执头一起给出（R-12：
@@ -1873,26 +1915,254 @@ async fn delete_session(
     })))
 }
 
-/// 远程模式令牌闸门（R-15）。**只在给了令牌时校验**：回环开发不必带 header。
-async fn require_token(
+/// 鉴权 + 归属闸门（M-25）。
+///
+/// 三件事**在这一个地方**做完，处理器只读结果：
+///
+/// 1. **解析身份**：cookie（浏览器） → `Authorization: Bearer` / `X-Auth-Token`
+///    （MCP / 脚本） → 事件流升级请求的 `?token=`（浏览器 WS 带不了头）→
+///    兼容模式下退回单 `SIM_TOKEN`。
+/// 2. **判归属**：路径是 `/api/sessions/{id}/…` 时，**在这里**比对会话
+///    `owner` 与请求者账号。越权回 404（与「不存在」同一个回答，不泄露
+///    别处有没有这条会话）。
+/// 3. **把身份塞进请求扩展**：`Extension<Identity>` 是处理器唯一的读法。
+///
+/// ⚠️ 判据只有这一处。二十几个处理器各自再查一遍就是二十几个会漏的地方
+/// —— 尤其是以后新加的路径。
+async fn require_auth(
     State(state): State<AppState>,
-    req: Request<axum::body::Body>,
+    mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let Some(expected) = state.token.as_deref() else {
-        return next.run(req).await;
+    let identity = match resolve_identity(&state, req.headers(), req.uri()) {
+        Ok(identity) => identity,
+        Err(err) => return err.into_response(),
     };
-    let presented = req
-        .headers()
-        .get(TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok());
-    let path = req.uri().path().to_string();
-    let query_token = query_parameter(req.uri().query(), "token");
-    if token_accepted(Some(expected), presented, query_token.as_deref(), &path) {
-        next.run(req).await
-    } else {
-        ApiError::unauthorized().into_response()
+    if let Some(session_id) = session_id_in_path(req.uri().path()) {
+        match state.registry.owner_of(&session_id) {
+            Ok(owner) if owner == identity.account => {}
+            Ok(_) => return ApiError::session_not_found(&session_id).into_response(),
+            Err(err) => return err.into_response(),
+        }
     }
+    req.extensions_mut().insert(identity);
+    next.run(req).await
+}
+
+/// 从一条请求里认出「是谁」。兼容模式回 [`Identity::legacy`]。
+fn resolve_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<Identity, ApiError> {
+    let cookie = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok());
+    // cookie 优先：同一个请求既带 cookie 又带令牌时，cookie 才是「这个人」。
+    if let Some(accounts) = state.accounts.as_deref() {
+        if let Some(value) = account::cookie_from_header(cookie) {
+            if let Some(identity) = accounts.resolve_cookie(&value) {
+                return Ok(identity);
+            }
+        }
+    }
+
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let header_token = headers
+        .get(TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let presented_header = header_token.or(bearer);
+    // `?token=` 只对事件流升级放行（浏览器 WS 不接受自定义头）。
+    let query_token = if uri.path().ends_with("/events/ws") {
+        query_parameter(uri.query(), "token")
+    } else {
+        None
+    };
+    let presented = presented_header.map(str::to_string).or(query_token.clone());
+
+    let Some(accounts) = state.accounts.as_deref() else {
+        // 兼容模式：与 v0.1.9 逐字节一致 —— 有令牌就校验，没令牌就不校验。
+        // 判据复用 `token_accepted`，不另写一份。
+        let Some(expected) = state.token.as_deref() else {
+            return Ok(Identity::legacy());
+        };
+        return if token_accepted(
+            Some(expected),
+            presented_header,
+            query_token.as_deref(),
+            uri.path(),
+        ) {
+            Ok(Identity::legacy())
+        } else {
+            Err(ApiError::unauthorized())
+        };
+    };
+
+    if let Some(token) = presented.as_deref() {
+        if let Some(identity) = accounts.authenticate_token(token) {
+            return Ok(identity);
+        }
+        // 应急令牌：`SIM_TOKEN` 仍然能用，但它只是 `ops` 自己的账号 ——
+        // 能登录、能建会话，**看不见任何人的会话**。
+        if let Some(expected) = state.token.as_deref() {
+            if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+                return Ok(Identity::ops());
+            }
+        }
+    }
+    Err(ApiError::unauthorized())
+}
+
+/// 路径里的会话 id（`/api/sessions/{id}/…`）；不是会话路径 ⇒ `None`。
+fn session_id_in_path(path: &str) -> Option<String> {
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    if segments.next() != Some("api") || segments.next() != Some("sessions") {
+        return None;
+    }
+    segments.next().map(str::to_string)
+}
+
+/// 账号的镜像根（`--allow-image-root/<account>`）。兼容模式**不加**这一层
+/// —— 现有部署的 `/data/images/*.elf` 直接还在原处，上线当天不用搬文件。
+pub(crate) fn image_root_for(state: &AppState, identity: &Identity) -> Option<PathBuf> {
+    let root = state.allow_image_root.as_ref()?;
+    if identity.channel == "legacy" {
+        return Some(root.clone());
+    }
+    let dir = root.join(account_dir_name(&identity.account));
+    // 首次使用时建目录（幂等）；建不出来就当作「路径通道没开」。
+    std::fs::create_dir_all(&dir).ok()?;
+    dir.canonicalize().ok()
+}
+
+/// 账号 id → 目录名。账号 id 本来就只含 `[a-z0-9-]`，这里仍然逐字符过滤
+/// —— 目录名来自配置文件，不该让一个手写的 `../` 决定根在哪。
+pub(crate) fn account_dir_name(account: &str) -> String {
+    let mut out = String::with_capacity(account.len());
+    for ch in account.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+/// `POST /api/login` 的请求体。`user` 与 `username` 都收（两种写法都有人用）。
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    /// 账号名。
+    #[serde(alias = "user")]
+    pub username: String,
+    /// 密码。
+    pub password: String,
+}
+
+/// `POST /api/login` —— 账号密码换一个 `HttpOnly` cookie。
+///
+/// ⚠️ **用户名错与密码错回同一个 401**：区分开就等于提供一个「这个账号
+/// 是否存在」的探测接口。
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<LoginRequest>,
+) -> Result<Response, ApiError> {
+    let Some(accounts) = state.accounts.as_deref() else {
+        return Err(ApiError::bad_request(
+            "accounts are not enabled on this server (no accounts file); \
+             use the token header or the ?token= link",
+        ));
+    };
+    if request.username.trim().is_empty() || request.password.is_empty() {
+        return Err(ApiError::bad_request(
+            "fields `username` and `password` are both required",
+        ));
+    }
+    let Some(identity) = accounts.login(&request.username, &request.password) else {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "E_SESS-07",
+            "invalid credentials",
+        ));
+    };
+    let cookie = accounts.issue_cookie(&identity);
+    let secure = request_is_https(&headers);
+    let body = json!({
+        "account": identity.account,
+        "name": identity.name,
+        "role": identity.role,
+    });
+    Ok((
+        [(header::SET_COOKIE, account::set_cookie(&cookie, secure))],
+        Json(body),
+    )
+        .into_response())
+}
+
+/// `POST /api/logout` —— 注销 cookie。**幂等**（没登录也回 204）。
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(accounts) = state.accounts.as_deref() {
+        if let Some(value) = account::cookie_from_header(
+            headers
+                .get(header::COOKIE)
+                .and_then(|value| value.to_str().ok()),
+        ) {
+            accounts.logout(&value);
+        }
+    }
+    let secure = request_is_https(&headers);
+    ([(header::SET_COOKIE, account::clear_cookie(secure))], StatusCode::NO_CONTENT)
+        .into_response()
+}
+
+/// `GET /api/auth/mode` —— 前端在登录前必须先知道「这里要不要登录」。
+///
+/// ⚠️ 这个端点**必须**在鉴权之外：登录页自己还没身份。
+async fn auth_mode(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "mode": if state.isolated() { "accounts" } else { "token" },
+        "accounts": state.isolated(),
+        "login": state.isolated(),
+        "accounts_count": state.accounts.as_deref().map(Accounts::account_count),
+    }))
+}
+
+/// `GET /api/whoami` —— 当前身份。MCP 用它把「令牌」换成「账号 id」
+/// （同一账号的多把令牌 ⇒ 同一个 client ⇒ 共用会话）。
+async fn whoami(State(state): State<AppState>, Extension(identity): Extension<Identity>) -> Json<serde_json::Value> {
+    Json(json!({
+        "accounts": state.isolated(),
+        "account": identity.account,
+        "name": identity.name,
+        "role": identity.role,
+        "channel": identity.channel,
+        "token_id": identity.token_id,
+    }))
+}
+
+/// 请求是不是 HTTPS（`Secure` cookie 只在这种请求上给）。
+fn request_is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
 }
 
 /// 令牌判据：**头优先**，`?token=` 只对事件流的升级请求放行。
@@ -2119,14 +2389,82 @@ async fn front_or_unknown(
     State(state): State<AppState>,
     method: Method,
     uri: axum::http::Uri,
+    headers: HeaderMap,
 ) -> Response {
     let path = uri.path();
     if path == "/api" || path == "/healthz" || path.starts_with("/api/") {
         return ApiError::unknown_route(method.as_str(), path).into_response();
     }
-    match state.front_dir.as_deref() {
-        Some(root) => crate::front::serve(root, path, &method).await,
-        None => ApiError::unknown_route(method.as_str(), path).into_response(),
+    let Some(root) = state.front_dir.as_deref() else {
+        return ApiError::unknown_route(method.as_str(), path).into_response();
+    };
+
+    // 账号模式下的**页面门**（M-25）：没 cookie 就先给登录页。
+    // 判据只针对「人用浏览器打开页面」（`Accept: text/html`）——
+    // 静态资源（js/css/wasm）不拦，否则登录页自己也加载不出来。
+    if let Some(accounts) = state.accounts.as_deref() {
+        if !path.starts_with("/login") && wants_html(&headers) {
+            let cookie_ok = account::cookie_from_header(
+                headers
+                    .get(header::COOKIE)
+                    .and_then(|value| value.to_str().ok()),
+            )
+            .and_then(|value| accounts.resolve_cookie(&value))
+            .is_some();
+            if !cookie_ok {
+                // `?token=` 老链接：换一个 cookie 再回到同一个地址（去掉 token）。
+                // 这样「令牌链接」继续能用，但令牌不会留在地址栏/历史里。
+                if let Some(token) = query_parameter(uri.query(), "token") {
+                    if let Some(identity) = accounts.authenticate_token(&token) {
+                        let value = accounts.issue_cookie(&identity);
+                        let mut location = path.to_string();
+                        if let Some(rest) = query_without(uri.query(), "token") {
+                            location.push('?');
+                            location.push_str(&rest);
+                        }
+                        return (
+                            [
+                                (header::SET_COOKIE, account::set_cookie(&value, request_is_https(&headers))),
+                                (header::LOCATION, location),
+                            ],
+                            StatusCode::FOUND,
+                        )
+                            .into_response();
+                    }
+                }
+                return (
+                    [(header::LOCATION, "/login.html".to_string())],
+                    StatusCode::FOUND,
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    crate::front::serve(root, path, &method).await
+}
+
+/// 这个请求是不是「浏览器在打开一个页面」。
+fn wants_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.contains("text/html"))
+        .unwrap_or(false)
+}
+
+/// 从查询串里去掉一个参数（其余原样保留）。全空 ⇒ `None`。
+fn query_without(query: Option<&str>, drop: &str) -> Option<String> {
+    let query = query?;
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| pair.split('=').next().unwrap_or("") != drop)
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join("&"))
     }
 }
 
@@ -2308,7 +2646,10 @@ mod tests {
         assert_eq!(state.board.as_deref(), Some("minimal"));
 
         let (board, source) = resolve_board(None, state.board.clone());
-        let info = state.registry.create(board, source).unwrap();
+        let info = state
+            .registry
+            .create_for(board, source, crate::account::LEGACY_ACCOUNT)
+            .unwrap();
         assert_eq!(info.board.as_deref(), Some("minimal"));
         assert_eq!(info.board_source.as_str(), "startup-default");
     }

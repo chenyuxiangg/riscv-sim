@@ -20,7 +20,7 @@ OUT_DEFAULT = Path("docs/detailed-design/M-24_SimApiServer.html")
 
 TITLE = "M-24 对外操作接口宿主（riscv-sim-server）模块详细设计"
 SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端形态（P1）落地设计 · 回应《Sim_Agent_API_Requirements v0.1》"
-VERSION = ("HTML 版 v1.12（2026-11-25；<b>一个端口</b>：<code>--front-dir</code> 让服务端自己托管页面（同源 ⇒ 无需第二个进程、"
+VERSION = ("HTML 版 v1.13（2026-11-28；<b>账号与多用户隔离</b>由新模块 <b>M-25</b> 承担（本文件只保留「令牌仍是 MCP 主路」这一条边界，账号模型 / 新端点 / 归属与配额看 M-25）；<b>一个端口</b>：<code>--front-dir</code> 让服务端自己托管页面（同源 ⇒ 无需第二个进程、"
            "无需 CORS、页面自动进 server 模式）+ <b>R-15 的唯一例外</b>：令牌只对事件流升级请求放行 <code>?token=</code>"
            "（浏览器 <code>WebSocket</code> 不能带自定义头）+ Dockerfile / compose / <code>deploy.sh</code> 一键部署）· 需求基线 docs/requirements/"
            "Sim_Agent_API_Requirements_v0.1.html · 代码基线 main（契约 schema v19 / 内核 0.1.0）")
@@ -248,7 +248,7 @@ SECTIONS.append({
                 ["R-12", "CI / 脚本友好", "<code>POST /api/boot</code> 是<b>唯一</b>判定口径；<code>osz-boot</code> 改为该端点的<b>客户端</b>（离线 runner 已移除，<code>--print-memory</code> 取回执头 <code>x-boot-ram-window</code>）", "§3.2 §5.2 附录 A", "P0"],
                 ["R-13", "事件流（WS）", "复用 M-07 的 <code>{type,seq,sessionId,role,reqId,payload}</code> 帧，<code>payload</code> = <b>完整</b>契约 <code>Message</code> 信封；背压/关闭通知走 <code>resume</code> 帧（前端 <code>decodeFrame</code> 放行该类型）；前端 server-mode 给 <code>serverUrl + sessionId</code> 即推出端点；<b>v1.10 起页面地址带 <code>?server=</code> 就能直接用</b>（REST 建/验会话 + 状态水合）；<b>v1.11 起页面在 server-mode 也能下令</b>（<code>POST …/command</code> 吃整条契约消息，回体是应答帧 ⇒ 事件流仍只往外推）；<b>v1.12 起 <code>?server=</code> 也能省</b>（页面由服务端自己托管时，同源探测 <code>GET /api/version</code> 命中即进 server-mode）", "§3.6", "P1"],
                 ["R-14", "快照 / 复位 / trace", "复用 <code>Snapshot</code>/<code>Restore</code>/<code>SetTraceEnabled</code>/<code>ExportTrace</code>；复位的实现是重发 <code>LoadProject</code>", "§5.5", "P1"],
-                ["R-15", "安全边界", "默认只绑回环；镜像路径白名单 + 规范化；非回环需显式开关与 token；<b>令牌只认头</b>（<code>x-auth-token</code>），唯一例外 = 事件流升级请求可用 <code>?token=</code>（浏览器 <code>WebSocket</code> 不能带自定义头，v1.12）", "§3.4 §5.4", "P0"],
+                ["R-15", "安全边界", "默认只绑回环；镜像路径白名单 + 规范化；非回环需显式开关与 token；<b>令牌走 HTTP 头</b>（<code>Authorization: Bearer</code>，兼容 <code>x-auth-token</code>），唯一例外 = 事件流升级请求可用 <code>?token=</code>（浏览器 <code>WebSocket</code> 不能带自定义头，v1.12）；<b>v1.13 起多用户隔离交给 M-25</b>（契约不动）", "§3.4（账号见 M-25）", "P0"],
             ],
         }),
         ("callout", "约束", "R-03 的「不得回退到 v0.76 之前的自动选档」是一条<b>结构约束</b>：M-24 的配板动作必须是客户端可见的一次命令，"

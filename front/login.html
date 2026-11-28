@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · RISC-V Sim</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #0d1117; color: #c9d1d9;
+    font: 15px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  form {
+    width: min(360px, calc(100vw - 48px));
+    padding: 28px 28px 22px; border-radius: 12px;
+    background: #161b22; border: 1px solid #30363d;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+  }
+  h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; letter-spacing: .02em; }
+  p.hint { margin: 0 0 20px; font-size: 13px; color: #8b949e; }
+  label { display: block; font-size: 13px; color: #8b949e; margin-bottom: 6px; }
+  input {
+    width: 100%; box-sizing: border-box; margin-bottom: 14px;
+    padding: 9px 11px; border-radius: 8px; border: 1px solid #30363d;
+    background: #0d1117; color: inherit; font: inherit;
+  }
+  input:focus { outline: none; border-color: #388bfd; box-shadow: 0 0 0 3px rgba(56, 139, 253, .18); }
+  button {
+    width: 100%; padding: 10px 0; margin-top: 2px; border: 0; border-radius: 8px;
+    background: #238636; color: #fff; font: 600 15px/1 inherit; cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  #msg { min-height: 20px; margin-top: 12px; font-size: 13px; color: #f85149; }
+</style>
+</head>
+<body>
+<form id="login" autocomplete="on">
+  <h1>RISC-V Sim</h1>
+  <p class="hint">用账号登录。MCP 客户端请直接用令牌，不要走这个页面。</p>
+
+  <label for="username">账号</label>
+  <input id="username" name="username" required autocapitalize="off" spellcheck="false">
+
+  <label for="password">密码</label>
+  <input id="password" name="password" type="password" required>
+
+  <button id="submit" type="submit">登录</button>
+  <div id="msg" role="status" aria-live="polite"></div>
+</form>
+
+<script>
+// 这个页面**故意**不依赖 front/ 的模块：登录时 app.js 还没资格加载，
+// 引一个模块图只会让「登录坏了」和「页面坏了」混成同一个错。
+(() => {
+  const form = document.getElementById("login");
+  const msg = document.getElementById("msg");
+  const submit = document.getElementById("submit");
+
+  const fail = (text) => { msg.textContent = text; };
+
+  // 服务端没有账号库（兼容模式）⇒ 根本不需要登录，直接回去。
+  fetch("/api/auth/mode", { credentials: "same-origin" })
+    .then((response) => response.json())
+    .then((mode) => {
+      if (!mode || !mode.accounts) location.replace("/");
+      msg.textContent = "";
+    })
+    .catch(() => fail("服务端不可达：检查地址或稍后再试"));
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    fail("");
+    try {
+      const response = await fetch("/api/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: form.username.value.trim(),
+          password: form.password.value,
+        }),
+      });
+      if (response.ok) {
+        location.replace("/");
+        return;
+      }
+      const body = await response.json().catch(() => null);
+      fail(body?.detail === "invalid credentials" ? "账号或密码不对" : (body?.detail ?? `登录失败（HTTP ${response.status}）`));
+    } catch (err) {
+      fail(`登录请求没发出去：${err?.message ?? err}`);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

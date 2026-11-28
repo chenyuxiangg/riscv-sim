@@ -658,6 +658,8 @@ struct PingReply {
 pub struct SessionHandle {
     /// 会话 id。
     pub id: String,
+    /// 这条会话属于哪个账号（M-25）。兼容模式一律 `"legacy"`。
+    pub owner: String,
     /// 当前板模板 id。**可写**：`PUT …/board` 改了板之后，列表与详情要跟着
     /// 说新板（否则就是第二个真相）。
     board: Mutex<Option<String>>,
@@ -1048,6 +1050,8 @@ impl SessionHandle {
 pub struct SessionRegistry {
     inner: Arc<Mutex<Inner>>,
     max_sessions: usize,
+    /// 单账号并发上限（M-25）。默认 `usize::MAX` ⇒ 单测与兼容模式不受影响。
+    max_per_account: usize,
     ttl: Duration,
     /// 每会话 console 环上限（`--max-console`）。
     max_console: usize,
@@ -1069,6 +1073,7 @@ impl SessionRegistry {
                 sessions: HashMap::new(),
             })),
             max_sessions,
+            max_per_account: usize::MAX,
             ttl,
             max_console,
         }
@@ -1091,10 +1096,19 @@ impl SessionRegistry {
     ///
     /// ⚠️ 配额检查与登记在**同一把锁**里 ⇒ ⇒ 两个并发 `POST` 不会同时看到
     /// 「还差一个名额」然后各建一条。
-    pub fn create(
+    /// 设置单账号并发上限（M-25）。0 不合法 ⇒ 由 `Config::parse` 拒掉。
+    pub fn set_max_per_account(&mut self, max: usize) {
+        self.max_per_account = max.max(1);
+    }
+
+    /// 建会话并按**账号**记账。配额两条：全局 `max_sessions` 与
+    /// `max_per_account`，**同一把锁里一起判** ⇒ ⇒ 一个账号打满自己的份额
+    /// 不会把别人的名额吃掉，两个并发请求也不会同时看到「还差一个」。
+    pub fn create_for(
         &self,
         board: Option<String>,
         board_source: BoardSource,
+        owner: &str,
     ) -> Result<SessionInfo, ApiError> {
         let mut inner = self
             .inner
@@ -1104,6 +1118,14 @@ impl SessionRegistry {
         inner.sessions.retain(|_, handle| handle.is_alive());
         if inner.sessions.len() >= self.max_sessions {
             return Err(ApiError::session_quota(self.max_sessions));
+        }
+        let mine = inner
+            .sessions
+            .values()
+            .filter(|handle| handle.owner == owner)
+            .count();
+        if mine >= self.max_per_account {
+            return Err(ApiError::account_quota(self.max_per_account));
         }
 
         // ⚠️ **建会话就把板配进内核**，不是只记个名字：P0-3 的冒烟里
@@ -1130,6 +1152,7 @@ impl SessionRegistry {
 
         let handle = Arc::new(SessionHandle {
             id: id.clone(),
+            owner: owner.to_string(),
             board: Mutex::new(board.clone()),
             board_source: Mutex::new(board_source),
             created: Instant::now(),
@@ -1155,20 +1178,39 @@ impl SessionRegistry {
         Ok(info)
     }
 
-    /// 列表：还活着的会话 + 配额用量。
-    pub fn list(&self) -> (Vec<SessionInfo>, usize, usize) {
+    /// 列表：**只列这个账号自己的**会话（M-25）。配额报的是「这个账号自己的
+    /// 用量 / 自己那条上限」—— 别人的会话既看不到，也不该算进我的账。
+    pub fn list_for(&self, owner: &str) -> (Vec<SessionInfo>, usize, usize) {
         let inner = match self.inner.lock() {
             Ok(inner) => inner,
-            Err(_) => return (Vec::new(), 0, self.max_sessions),
+            Err(_) => return (Vec::new(), self.max_per_account, 0),
         };
         let mut infos: Vec<SessionInfo> = inner
             .sessions
             .values()
-            .filter(|handle| handle.is_alive())
+            .filter(|handle| handle.is_alive() && handle.owner == owner)
             .map(|handle| handle.info())
             .collect();
         infos.sort_by(|a, b| a.id.cmp(&b.id));
-        (infos, self.max_sessions, inner.sessions.len())
+        let used = infos.len();
+        (infos, self.max_per_account, used)
+    }
+
+    /// 这条会话属于哪个账号。**不存在也走这一条** ⇒ 404。
+    ///
+    /// ⚠️ 判据只有一处（中间件），不是每个处理器自己再查一遍：多写一遍就是
+    /// 多一个会漏的地方。
+    pub fn owner_of(&self, id: &str) -> Result<String, ApiError> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::session_poisoned("registry"))?;
+        inner
+            .sessions
+            .get(id)
+            .filter(|handle| handle.is_alive())
+            .map(|handle| handle.owner.clone())
+            .ok_or_else(|| ApiError::session_not_found(id))
     }
 
     /// 取一条会话的句柄（**放锁**后调用方才用它干活）。不存在 ⇒ 404。
@@ -2364,7 +2406,7 @@ mod tests {
     fn async_run_reports_through_a_job_slot() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         // ⚠️ 必须先装一个**真的会跑**的镜像：空工程跑 1 条就 `end-of-execution`
@@ -2425,7 +2467,7 @@ mod tests {
     fn snapshot_then_restore_round_trips_a_session() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         // 采集：六段齐全，宿主代填 `t_virt`。
@@ -2478,14 +2520,18 @@ mod tests {
     fn create_lists_and_probes_a_session() {
         let registry = registry();
         let info = registry
-            .create(Some("minimal".to_string()), BoardSource::Request)
+            .create_for(
+                Some("minimal".to_string()),
+                BoardSource::Request,
+                crate::account::LEGACY_ACCOUNT,
+            )
             .unwrap();
         assert_eq!(info.board.as_deref(), Some("minimal"));
         assert_eq!(info.board_source, BoardSource::Request);
         assert_eq!(info.schema_version, SCHEMA_VERSION);
 
-        let (infos, max, used) = registry.list();
-        assert_eq!(max, 2);
+        // `list_for` 报的是**这个账号**的上限（这里没设 ⇒ 无上限），不是全局 2。
+        let (infos, _max, used) = registry.list_for(crate::account::LEGACY_ACCOUNT);
         assert_eq!(used, 1);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].id, info.id);
@@ -2507,9 +2553,9 @@ mod tests {
     #[test]
     fn quota_rejects_the_third_session() {
         let registry = registry();
-        registry.create(None, BoardSource::None).unwrap();
-        registry.create(None, BoardSource::None).unwrap();
-        let err = registry.create(None, BoardSource::None).unwrap_err();
+        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
+        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
+        let err = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap_err();
         assert_eq!(err.code(), "E_SESS-05");
         assert_eq!(err.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(registry.used(), 2);
@@ -2518,7 +2564,7 @@ mod tests {
     #[test]
     fn delete_removes_the_session_and_a_second_delete_is_not_found() {
         let registry = registry();
-        let info = registry.create(None, BoardSource::None).unwrap();
+        let info = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
         registry.delete(&info.id).unwrap();
         assert_eq!(registry.used(), 0);
         let err = registry.delete(&info.id).unwrap_err();
@@ -2528,7 +2574,7 @@ mod tests {
     #[test]
     fn ttl_reaps_idle_sessions() {
         let registry = SessionRegistry::new(4, Duration::from_millis(20), 1024);
-        let info = registry.create(None, BoardSource::None).unwrap();
+        let info = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(registry.sweep(), 1);
         assert_eq!(registry.used(), 0);
@@ -2538,8 +2584,8 @@ mod tests {
     #[test]
     fn shutdown_reaps_everything() {
         let registry = registry();
-        registry.create(None, BoardSource::None).unwrap();
-        registry.create(None, BoardSource::None).unwrap();
+        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
+        registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
         registry.shutdown();
         assert_eq!(registry.used(), 0);
     }
@@ -2610,7 +2656,7 @@ mod tests {
     fn run_stops_on_the_console_prefix() {
         let registry = registry();
         let info = registry
-            .create(Some("qemu-virt".to_string()), BoardSource::Request)
+            .create_for(Some("qemu-virt".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         let program = vec![
@@ -2659,7 +2705,7 @@ mod tests {
     fn run_reports_a_platform_error_abort_instead_of_a_halt() {
         let registry = registry();
         let info = registry
-            .create(Some("qemu-virt".to_string()), BoardSource::Request)
+            .create_for(Some("qemu-virt".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         // 非法指令 @0x0c ⇒ handler 在 0x10 也非法 ⇒ 同一 (cause, mepc) 连环。
@@ -2722,7 +2768,7 @@ mod tests {
     fn reset_returns_to_the_loading_start() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         registry
@@ -2766,7 +2812,7 @@ mod tests {
     #[test]
     fn reset_without_an_image_is_rejected() {
         let registry = registry();
-        let info = registry.create(None, BoardSource::None).unwrap();
+        let info = registry.create_for(None, BoardSource::None, crate::account::LEGACY_ACCOUNT).unwrap();
         let err = registry.reset(&info.id).expect_err("空会话不能复位");
         assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
     }
@@ -2776,7 +2822,7 @@ mod tests {
     fn watchpoints_go_through_the_kernel_table() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         let wp = Watchpoint {
@@ -2858,7 +2904,7 @@ mod tests {
     fn contract_command_answers_with_frames_the_front_end_can_decode() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         registry
@@ -2926,7 +2972,7 @@ mod tests {
     fn contract_tick_answer_uses_the_unringed_seq_band() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
 
@@ -2967,7 +3013,7 @@ mod tests {
     fn contract_answer_is_not_duplicated_in_the_event_stream() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         registry
@@ -3025,7 +3071,7 @@ mod tests {
     fn contract_load_project_leaves_resubscription_to_the_client() {
         let registry = registry();
         let info = registry
-            .create(Some("default".to_string()), BoardSource::Request)
+            .create_for(Some("default".to_string()), BoardSource::Request, crate::account::LEGACY_ACCOUNT)
             .unwrap();
         let id = info.id.clone();
         let before_next = registry.events(&id, 0, 64).unwrap()["next"]

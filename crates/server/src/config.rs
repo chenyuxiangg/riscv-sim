@@ -20,6 +20,13 @@ pub const DEFAULT_SESSION_TTL_SECS: u64 = 900;
 /// 又会被它挡住。
 pub const DEFAULT_MAX_SESSIONS: usize = 8;
 
+/// 单账号的并发会话上限。**比全局 8 小得多**：这条是隔离判据 —— 一个账号
+/// 打满自己的额度不能把别人的名额吃掉。
+pub const DEFAULT_MAX_SESSIONS_PER_ACCOUNT: usize = 2;
+
+/// 账号文件的默认位置（容器里在数据卷上）。文件**不存在** ⇒ 兼容模式。
+pub const DEFAULT_ACCOUNTS_PATH: &str = "/data/accounts.json";
+
 /// 一次上传的镜像字节上限（默认 16 MiB，对齐 M-06 的解析限值）。
 ///
 /// ⚠️ 超限**原样拒**（413 + `E_PROTO-08`），不静默截断 —— 截断一半的 ELF
@@ -55,6 +62,9 @@ pub struct Config {
     pub max_console: usize,
     /// 并发会话上限。
     pub max_sessions: usize,
+    /// 单账号并发会话上限。
+    pub max_sessions_per_account: usize,
+    /// 账号文件（`--accounts`；`None` ⇒ 兼容模式）。
     /// 镜像路径白名单的根（`--allow-image-root`）。`None` ⇒ 只接受上传的字节。
     pub allow_image_root: Option<PathBuf>,
     /// 单次上传的镜像字节上限（`--max-image-bytes`）。
@@ -66,6 +76,7 @@ pub struct Config {
     pub max_snapshot_bytes: usize,
     /// `run` 一次请求的墙钟上限（`--max-run-ms`）。
     pub max_run_ms: u64,
+    pub accounts: Option<PathBuf>,
     /// 是否允许绑定非回环地址。默认 `false`。
     pub allow_remote: bool,
     /// 远程模式令牌。回环模式下即使给了也只在请求校验时生效。
@@ -92,6 +103,8 @@ impl Default for Config {
             session_ttl: Duration::from_secs(DEFAULT_SESSION_TTL_SECS),
             max_console: DEFAULT_MAX_CONSOLE,
             max_sessions: DEFAULT_MAX_SESSIONS,
+            max_sessions_per_account: DEFAULT_MAX_SESSIONS_PER_ACCOUNT,
+            accounts: None,
             allow_image_root: None,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_snapshot_bytes: DEFAULT_MAX_SNAPSHOT_BYTES,
@@ -126,6 +139,8 @@ impl Config {
                 "--session-ttl" => "--session-ttl",
                 "--max-console" => "--max-console",
                 "--max-sessions" => "--max-sessions",
+                "--max-sessions-per-account" => "--max-sessions-per-account",
+                "--accounts" => "--accounts",
                 "--allow-image-root" => "--allow-image-root",
                 "--max-image-bytes" => "--max-image-bytes",
                 "--max-run-ms" => "--max-run-ms",
@@ -199,6 +214,22 @@ impl Config {
                     }
                     cfg.max_sessions = sessions;
                 }
+                "--max-sessions-per-account" => {
+                    let raw = value(&mut it, flag)?;
+                    let sessions = raw
+                        .parse::<usize>()
+                        .map_err(|_| {
+                            format!("bad --max-sessions-per-account value {raw:?}: not a count")
+                        })?;
+                    if sessions == 0 {
+                        return Err(
+                            "bad --max-sessions-per-account value 0: quota must be positive"
+                                .to_string(),
+                        );
+                    }
+                    cfg.max_sessions_per_account = sessions;
+                }
+                "--accounts" => cfg.accounts = Some(PathBuf::from(value(&mut it, flag)?)),
                 "--allow-image-root" => {
                     cfg.allow_image_root = Some(PathBuf::from(value(&mut it, flag)?));
                 }
@@ -310,6 +341,33 @@ impl Config {
                 ));
             }
             self.front_dir = Some(canonical);
+        }
+
+        // 账号文件（M-25）：
+        // - 显式 `--accounts` 给了就必须是**存在的文件**（打错要在启动期失败，
+        //   而不是起好了才发现「怎么谁都能进来」）；
+        // - 没给就看 `SIM_ACCOUNTS`，再看容器里的默认位置；
+        // - **都不存在 ⇒ `None` ⇒ 兼容模式**（与 v0.1.9 逐字节一致）。
+        if let Some(path) = self.accounts.take() {
+            let canonical = path
+                .canonicalize()
+                .map_err(|e| format!("bad --accounts {}: {e}", path.display()))?;
+            if !canonical.is_file() {
+                return Err(format!(
+                    "bad --accounts {}: not a file",
+                    canonical.display()
+                ));
+            }
+            self.accounts = Some(canonical);
+        } else if let Some(path) = std::env::var_os("SIM_ACCOUNTS").map(PathBuf::from) {
+            if path.is_file() {
+                self.accounts = path.canonicalize().ok().or(Some(path));
+            }
+        } else {
+            let fallback = PathBuf::from(DEFAULT_ACCOUNTS_PATH);
+            if fallback.is_file() {
+                self.accounts = fallback.canonicalize().ok().or(Some(fallback));
+            }
         }
 
         Ok(())

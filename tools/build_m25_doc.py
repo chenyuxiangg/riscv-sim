@@ -1,0 +1,1087 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""生成 M-25（账号与多用户隔离）的 HTML 单文件详细设计。
+
+数据驱动：正文、表格、流程图全部在 `SECTIONS` / `FIG_*` 里，渲染器只管排版
+⇒ 改内容不动版式。版式与结构对齐《M-13 RISC-V ISS 模块详细设计》（13 表 / 指令级深度 / SVG 流程图 / 移动端适配）。
+
+产物：docs/detailed-design/M-25_AccountsIsolation.html
+用法：python3 tools/build_m25_doc.py [输出路径]
+"""
+
+from __future__ import annotations
+
+import html
+import re
+import sys
+from pathlib import Path
+
+OUT_DEFAULT = Path("docs/detailed-design/M-25_AccountsIsolation.html")
+
+TITLE = "M-25 账号与多用户隔离模块详细设计"
+SUBTITLE = "RISC-V 仿真平台 · 模块详细设计系列 · 服务端多租户（P1）落地设计 · 回应「两个域名对外公开」的需求"
+VERSION = ("HTML 版 v1.0（2026-11-28；<b>一用户一账号、一账号多 token</b>：浏览器走 cookie 会话、MCP 走 <code>Authorization: Bearer</code>；"
+           "会话 / 镜像根 / 配额按账号切；<b>契约与 schema 一律不动</b>（登录是 REST、令牌是头）· 代码基线 <code>feat/accounts-isolation</code>"
+           "（自 <code>origin/main</code> = 1632854 切出；契约 schema v21 / 内核 0.1.0）")
+
+KPI = [
+    ("5", "条需求承接", "账号 / 多 token / 会话归属 / 配额 / 镜像根，逐条有落点"),
+    ("0", "处契约改动", "SCHEMA_VERSION 停在 21；登录与令牌都不进契约"),
+    ("4", "个新 REST 端点", "login / logout / auth-mode / whoami，全部与内核无关"),
+    ("17", "条新用例", "账号 8 + 端到端隔离 9，全部走真 HTTP"),
+]
+
+FIG1 = """
+<figure class="fig">
+<svg class="flow-svg" viewBox="0 0 1120 470" role="img" aria-label="M-25 鉴权判定链">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1e3a8a"/></marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
+  </defs>
+
+  <rect x="24" y="40" width="168" height="72" rx="8" fill="#f1f4f9" stroke="#1e3a8a"/>
+  <text x="40" y="64" font-size="12" font-weight="700" fill="#1e3a8a">请求进入</text>
+  <text x="40" y="84" font-size="11" fill="#4b5563">浏览器 / MCP / curl</text>
+  <text x="40" y="102" font-size="11" fill="#6b7280">同一条 require_auth</text>
+
+  <line x1="192" y1="76" x2="236" y2="76" stroke="#1e3a8a" marker-end="url(#a1)"/>
+
+  <rect x="240" y="26" width="238" height="98" rx="8" fill="#ffffff" stroke="#d8dee9"/>
+  <text x="256" y="50" font-size="12" font-weight="700" fill="#1f2937">① 取凭据（固定次序）</text>
+  <text x="256" y="70" font-size="11" fill="#4b5563">1 cookie sim_auth</text>
+  <text x="256" y="88" font-size="11" fill="#4b5563">2 Authorization: Bearer</text>
+  <text x="256" y="106" font-size="11" fill="#4b5563">3 X-Auth-Token（MCP 兼容）</text>
+
+  <line x1="478" y1="76" x2="522" y2="76" stroke="#1e3a8a" marker-end="url(#a1)"/>
+
+  <rect x="526" y="26" width="200" height="98" rx="8" fill="#ffffff" stroke="#d8dee9"/>
+  <text x="542" y="50" font-size="12" font-weight="700" fill="#1f2937">② 例外：WS 升级</text>
+  <text x="542" y="70" font-size="11" fill="#4b5563">仅 /events/ws 允许</text>
+  <text x="542" y="88" font-size="11" fill="#4b5563">?token=&lt;令牌&gt;</text>
+  <text x="542" y="106" font-size="11" fill="#6b7280">浏览器 WS 不能带自定义头</text>
+
+  <line x1="726" y1="76" x2="770" y2="76" stroke="#1e3a8a" marker-end="url(#a1)"/>
+
+  <rect x="774" y="26" width="316" height="98" rx="8" fill="#fffbeb" stroke="#fcd34d"/>
+  <text x="790" y="50" font-size="12" font-weight="700" fill="#92400e">③ 解析为 Identity</text>
+  <text x="790" y="70" font-size="11" fill="#92400e">账号库命中 ⇒ {account,name,role,token_id}</text>
+  <text x="790" y="88" font-size="11" fill="#92400e">SIM_TOKEN ⇒ Identity::ops()（运维视角）</text>
+  <text x="790" y="106" font-size="11" fill="#6b7280">兼容模式 ⇒ legacy（无账号库时）</text>
+
+  <path d="M912 124 L912 176 L326 176 L326 126" stroke="#1e3a8a" stroke-width="1.5" fill="none" marker-end="url(#a1)"/>
+  <text x="470" y="168" font-size="10.5" fill="#1e3a8a">未命中 / 已吊销 / 过期 ⇒ 401 + E_SESS-07（detail：token 或浏览器登录）</text>
+
+  <rect x="240" y="200" width="420" height="112" rx="8" fill="#ffffff" stroke="#1e3a8a"/>
+  <text x="256" y="224" font-size="12" font-weight="700" fill="#1e3a8a">④ 路径含 /api/sessions/{id} ⇒ 归属校验</text>
+  <text x="256" y="246" font-size="11.5" fill="#4b5563">owner_of(id) 取记录归属，与 identity.account 比对</text>
+  <text x="256" y="266" font-size="11.5" fill="#4b5563">越权与不存在<b>同回 404 + E_SESS-01</b>（不泄露 id 是否存在）</text>
+  <text x="256" y="288" font-size="11" fill="#6b7280">没有 id 的端点（建会话 / 列表 / 装载）按 identity 直接分根</text>
+
+  <line x1="660" y1="256" x2="706" y2="256" stroke="#b45309" marker-end="url(#a2)"/>
+  <rect x="710" y="200" width="380" height="112" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="726" y="224" font-size="12" font-weight="700" fill="#374151">⑤ 身份注入请求上下文</text>
+  <text x="726" y="246" font-size="11.5" fill="#4b5563">Extension&lt;Identity&gt; 交给 handler</text>
+  <text x="726" y="266" font-size="11.5" fill="#4b5563">建会话 ⇒ create_for(owner=account)</text>
+  <text x="726" y="288" font-size="11" fill="#6b7280">handler 里不再有第二处鉴权判断</text>
+
+  <rect x="24" y="200" width="192" height="112" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="40" y="224" font-size="12" font-weight="700" fill="#374151">页面门（另一条路）</text>
+  <text x="40" y="246" font-size="11.5" fill="#4b5563">Accept: text/html</text>
+  <text x="40" y="264" font-size="11.5" fill="#4b5563">无有效 cookie ⇒ 302</text>
+  <text x="40" y="282" font-size="11.5" fill="#4b5563">/login.html</text>
+  <text x="40" y="302" font-size="11" fill="#6b7280">?token= 有效 ⇒ 换 cookie 后 302</text>
+
+  <rect x="240" y="352" width="850" height="96" rx="8" fill="#f1f4f9" stroke="#1e3a8a"/>
+  <text x="256" y="376" font-size="12" font-weight="700" fill="#1e3a8a">不变的边界</text>
+  <text x="256" y="398" font-size="11.5" fill="#4b5563">内核不知道账号：KernelHost 仍是 !Send 的会话内对象，M-25 只在 HTTP 层切「谁能碰哪个会话」</text>
+  <text x="256" y="418" font-size="11.5" fill="#4b5563">契约不知道账号：SCHEMA_VERSION=21 不动，登录/令牌全是 REST 与 HTTP 头</text>
+  <text x="256" y="438" font-size="11" fill="#6b7280">单一判点：鉴权只在 require_auth 判一次，handler 拿到的身份已被判定</text>
+</svg>
+<div class="figcap">图 1 · 鉴权判定链：五个步骤一条直线，越权与不存在同码同状态</div>
+</figure>
+"""
+
+FIG2 = """
+<figure class="fig">
+<svg class="flow-svg" viewBox="0 0 1120 500" role="img" aria-label="账号、令牌、会话、配额的关系">
+  <defs>
+    <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1e3a8a"/></marker>
+  </defs>
+
+  <rect x="36" y="34" width="250" height="120" rx="10" fill="#ffffff" stroke="#1e3a8a"/>
+  <text x="52" y="58" font-size="12.5" font-weight="700" fill="#1e3a8a">AccountRecord</text>
+  <text x="52" y="80" font-size="11" font-family="monospace" fill="#1f2937">id      acc-c9d46d</text>
+  <text x="52" y="98" font-size="11" font-family="monospace" fill="#1f2937">name    alice</text>
+  <text x="52" y="116" font-size="11" font-family="monospace" fill="#1f2937">role    user</text>
+  <text x="52" y="134" font-size="11" font-family="monospace" fill="#1f2937">password pbkdf2_sha256$…</text>
+
+  <line x1="286" y1="94" x2="330" y2="94" stroke="#1e3a8a" marker-end="url(#b1)"/>
+  <text x="288" y="86" font-size="10.5" fill="#1e3a8a">1 : N</text>
+
+  <rect x="334" y="34" width="270" height="150" rx="10" fill="#ffffff" stroke="#b45309"/>
+  <text x="350" y="58" font-size="12.5" font-weight="700" fill="#b45309">TokenRecord（一账号多 token）</text>
+  <text x="350" y="80" font-size="11" font-family="monospace" fill="#1f2937">id      tok-1</text>
+  <text x="350" y="98" font-size="11" font-family="monospace" fill="#1f2937">hint    abcd（前 4 字符）</text>
+  <text x="350" y="116" font-size="11" font-family="monospace" fill="#1f2937">hash    sha256(token) hex</text>
+  <text x="350" y="134" font-size="11" font-family="monospace" fill="#1f2937">created / revoked</text>
+  <text x="350" y="158" font-size="11" fill="#6b7280">明文只出现一次：签发时打印</text>
+
+  <line x1="604" y1="94" x2="648" y2="94" stroke="#1e3a8a" marker-end="url(#b1)"/>
+  <text x="606" y="86" font-size="10.5" fill="#1e3a8a">校验后得</text>
+
+  <rect x="652" y="34" width="250" height="120" rx="10" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="668" y="58" font-size="12.5" font-weight="700" fill="#374151">Identity（请求内）</text>
+  <text x="668" y="80" font-size="11" font-family="monospace" fill="#1f2937">account  acc-c9d46d</text>
+  <text x="668" y="98" font-size="11" font-family="monospace" fill="#1f2937">token_id tok-1 / null</text>
+  <text x="668" y="116" font-size="11" font-family="monospace" fill="#1f2937">channel  bearer|cookie</text>
+  <text x="668" y="134" font-size="11" font-family="monospace" fill="#1f2937">role     user</text>
+
+  <line x1="776" y1="154" x2="776" y2="206" stroke="#1e3a8a" marker-end="url(#b1)"/>
+
+  <rect x="600" y="210" width="330" height="150" rx="10" fill="#ffffff" stroke="#1e3a8a"/>
+  <text x="616" y="234" font-size="12.5" font-weight="700" fill="#1e3a8a">SessionHandle（服务端会话）</text>
+  <text x="616" y="256" font-size="11" font-family="monospace" fill="#1f2937">id     sess-000001</text>
+  <text x="616" y="274" font-size="11" font-family="monospace" fill="#1f2937">owner  acc-c9d46d</text>
+  <text x="616" y="292" font-size="11" font-family="monospace" fill="#1f2937">state  Idle / Running</text>
+  <text x="616" y="310" font-size="11" font-family="monospace" fill="#1f2937">ctrl   AtomicU8</text>
+  <text x="616" y="334" font-size="11" fill="#6b7280">owner 是唯一归属判据；同账号多 token 共享</text>
+
+  <rect x="36" y="210" width="330" height="150" rx="10" fill="#fffbeb" stroke="#fcd34d"/>
+  <text x="52" y="234" font-size="12.5" font-weight="700" fill="#92400e">两条配额（同一把锁内判）</text>
+  <text x="52" y="256" font-size="11.5" fill="#3f2d0a">全局：max_sessions（默认 8）⇒ E_SESS-05</text>
+  <text x="52" y="276" font-size="11.5" fill="#3f2d0a">单账号：max_sessions_per_account（默认 2）</text>
+  <text x="52" y="296" font-size="11.5" fill="#3f2d0a">超限 ⇒ 429 + detail account_quota</text>
+  <text x="52" y="320" font-size="11" fill="#6b7280">先判全局再判账号：两次都在 create_for 内</text>
+  <text x="52" y="342" font-size="11" fill="#6b7280">列表只报自己那条上限，不暴露全局余量</text>
+
+  <rect x="36" y="386" width="894" height="88" rx="10" fill="#f1f4f9" stroke="#1e3a8a"/>
+  <text x="52" y="410" font-size="12" font-weight="700" fill="#1e3a8a">镜像根（按账号分根，惰性创建）</text>
+  <text x="52" y="432" font-size="11.5" fill="#4b5563">兼容模式：<code>--allow-image-root</code> 原根不动，现有 /data/images/*.elf 上线当天不搬文件</text>
+  <text x="52" y="452" font-size="11.5" fill="#4b5563">账号模式：<code>root/&lt;account_dir&gt;</code>，首次访问 <code>create_dir_all</code>；<code>account_dir_name</code> 把非 <code>[a-zA-Z0-9_-]</code> 逐字符拍成 <code>_</code>（<code>../../etc</code> ⇒ ______etc）</text>
+  <text x="52" y="470" font-size="11" fill="#6b7280">白名单仍在 upload::whitelist_path 里（canonicalize + starts_with(root)），M-25 只换根</text>
+</svg>
+<div class="figcap">图 2 · 账号 → 令牌 → 身份 → 会话：owner 一处判归属，配额两条在同一把锁里判</div>
+</figure>
+"""
+
+FIG3 = """
+<figure class="fig">
+<svg class="flow-svg" viewBox="0 0 1120 520" role="img" aria-label="浏览器登录与 MCP 令牌透传时序">
+  <defs>
+    <marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1e3a8a"/></marker>
+  </defs>
+
+  <text x="30" y="28" font-size="12" font-weight="700" fill="#1e3a8a">A · 浏览器（cookie 会话）</text>
+  <text x="30" y="52" font-size="11" font-family="monospace" fill="#4b5563">浏览器</text>
+  <text x="330" y="52" font-size="11" font-family="monospace" fill="#4b5563">M-24 服务端</text>
+  <line x1="30" y1="62" x2="540" y2="62" stroke="#d8dee9"/>
+
+  <line x1="120" y1="84" x2="360" y2="84" stroke="#1e3a8a" marker-end="url(#c1)"/>
+  <text x="126" y="78" font-size="10.5" font-family="monospace" fill="#1f2937">GET / （Accept: text/html）</text>
+  <line x1="360" y1="100" x2="120" y2="100" stroke="#9aa1af" stroke-dasharray="4 3"/>
+  <text x="130" y="116" font-size="10.5" font-family="monospace" fill="#4b5563">302 /login.html（无 cookie）</text>
+
+  <line x1="120" y1="146" x2="360" y2="146" stroke="#1e3a8a" marker-end="url(#c1)"/>
+  <text x="126" y="140" font-size="10.5" font-family="monospace" fill="#1f2937">GET /api/auth/mode</text>
+  <line x1="360" y1="162" x2="120" y2="162" stroke="#9aa1af" stroke-dasharray="4 3"/>
+  <text x="130" y="178" font-size="10.5" font-family="monospace" fill="#4b5563">{mode:"accounts", login:true}</text>
+
+  <line x1="120" y1="208" x2="360" y2="208" stroke="#1e3a8a" marker-end="url(#c1)"/>
+  <text x="126" y="202" font-size="10.5" font-family="monospace" fill="#1f2937">POST /api/login {username,password}</text>
+  <line x1="360" y1="224" x2="120" y2="224" stroke="#9aa1af" stroke-dasharray="4 3"/>
+  <text x="130" y="240" font-size="10.5" font-family="monospace" fill="#4b5563">200 + Set-Cookie sim_auth（HttpOnly）</text>
+
+  <line x1="120" y1="270" x2="360" y2="270" stroke="#1e3a8a" marker-end="url(#c1)"/>
+  <text x="126" y="264" font-size="10.5" font-family="monospace" fill="#1f2937">GET /（带 cookie）</text>
+  <line x1="360" y1="286" x2="120" y2="286" stroke="#9aa1af" stroke-dasharray="4 3"/>
+  <text x="130" y="302" font-size="10.5" font-family="monospace" fill="#4b5563">200 页面 + 自动同源进 server-mode</text>
+
+  <line x1="120" y1="332" x2="360" y2="332" stroke="#1e3a8a" marker-end="url(#c1)"/>
+  <text x="126" y="326" font-size="10.5" font-family="monospace" fill="#1f2937">GET /api/whoami</text>
+  <line x1="360" y1="348" x2="120" y2="348" stroke="#9aa1af" stroke-dasharray="4 3"/>
+  <text x="130" y="364" font-size="10.5" font-family="monospace" fill="#4b5563">{name:"alice",channel:"cookie"}</text>
+
+  <line x1="30" y1="388" x2="540" y2="388" stroke="#d8dee9"/>
+  <text x="30" y="410" font-size="10.5" fill="#6b7280">cookie 12 h 滑动续期；logout 后 204 + 清 cookie（幂等）</text>
+
+  <text x="600" y="28" font-size="12" font-weight="700" fill="#b45309">B · MCP（令牌透传）</text>
+  <text x="600" y="52" font-size="11" font-family="monospace" fill="#4b5563">客户端 / agent</text>
+  <text x="830" y="52" font-size="11" font-family="monospace" fill="#4b5563">mcp/server.py</text>
+  <text x="1020" y="52" font-size="11" font-family="monospace" fill="#4b5563">M-24</text>
+  <line x1="600" y1="62" x2="1100" y2="62" stroke="#d8dee9"/>
+
+  <line x1="660" y1="90" x2="860" y2="90" stroke="#b45309" marker-end="url(#c1)"/>
+  <text x="666" y="84" font-size="10.5" font-family="monospace" fill="#1f2937">Authorization: Bearer &lt;自己的令牌&gt;</text>
+  <line x1="860" y1="112" x2="1030" y2="112" stroke="#b45309" marker-end="url(#c1)"/>
+  <text x="866" y="106" font-size="10.5" font-family="monospace" fill="#1f2937">GET /api/whoami（首次，缓存）</text>
+  <line x1="1030" y1="128" x2="860" y2="128" stroke="#9aa1af" stroke-dasharray="4 3"/>
+  <text x="866" y="144" font-size="10.5" font-family="monospace" fill="#4b5563">{account:"acc-…", accounts:true}</text>
+
+  <line x1="860" y1="170" x2="1030" y2="170" stroke="#b45309" marker-end="url(#c1)"/>
+  <text x="866" y="164" font-size="10.5" font-family="monospace" fill="#1f2937">后续所有调用带同一令牌</text>
+  <text x="866" y="186" font-size="10" fill="#6b7280">POST /api/sessions · /run · /state</text>
+
+  <rect x="600" y="208" width="490" height="150" rx="8" fill="#fffbeb" stroke="#fcd34d"/>
+  <text x="616" y="232" font-size="12" font-weight="700" fill="#92400e">租户键 = account（不是 token hash）</text>
+  <text x="616" y="254" font-size="11.5" fill="#3f2d0a">旧口径 client_id = sha256(token)[:8] ⇒ 只有一把令牌时全体共用一个 client，互顶会话</text>
+  <text x="616" y="276" font-size="11.5" fill="#3f2d0a">新口径：whoami 命中账号 ⇒ 租户键取 account；同账号多 token 共享一份 client 状态</text>
+  <text x="616" y="298" font-size="11.5" fill="#3f2d0a">未命中 ⇒ 回退 c-&lt;hash8&gt;（与 v0.1.9 行为一致，兼容模式不退化）</text>
+  <text x="616" y="322" font-size="11" fill="#6b7280">失败的解析 ⇒ 401 + E_MCP-08，不静默用服务凭据</text>
+  <text x="616" y="344" font-size="11" fill="#6b7280">会话记录里钉住<b>创建它的令牌</b>：sweeper 回收时用它自己的令牌 DELETE</text>
+
+  <rect x="600" y="376" width="490" height="118" rx="8" fill="#f8fafc" stroke="#d8dee9"/>
+  <text x="616" y="400" font-size="12" font-weight="700" fill="#374151">两条路径的同一个终点</text>
+  <text x="616" y="422" font-size="11.5" fill="#4b5563">无论 cookie 还是 Bearer，都收敛成 <code>Identity</code>，再收敛成 owner</text>
+  <text x="616" y="442" font-size="11.5" fill="#4b5563">⇒ 隔离只有一处判据，不因入口不同而出现第二套规则</text>
+  <text x="616" y="464" font-size="11" fill="#6b7280">MCP 不再持「服务凭据即全权」；<code>SIM_MCP_TOKEN</code> 只在等于 SIM_TOKEN 时报错退出</text>
+</svg>
+<div class="figcap">图 3 · 两条入口、一个终点：浏览器拿 cookie、MCP 拿自己的令牌，最后都落到 Identity.account</div>
+</figure>
+"""
+
+# SVG 里不能放 HTML 元素（浏览器会整段不渲染）：把 <code>/<b> 之类拍平成纯文本
+for _k in ("FIG1", "FIG2", "FIG3"):
+    globals()[_k] = re.sub(r"</?(?:code|b|i|em|strong)>", "", globals()[_k])
+
+SECTIONS = []
+
+# ---------------------------------------------------------------- 1
+SECTIONS.append({
+    "id": "sec1",
+    "h": "1 功能概述",
+    "subs": [("sec1-1", "1.1 模块定位"), ("sec1-2", "1.2 需求承接"), ("sec1-3", "1.3 范围与不做")],
+    "blocks": [
+        ("h3", "sec1-1", "1.1 模块定位"),
+        ("p", "M-25 是 riscv_sim 的<b>身份与隔离层</b>：它把「谁在用这台仿真器」变成可判定的事实，并保证<b>一个账号看不到、也碰不到另一个账号的会话、console 与镜像</b>。"
+              "它回答三个问题：这个请求是谁（鉴权）、这个会话属于谁（归属）、这个账号还能再开几个（配额）。"),
+        ("p", "它<b>不是内核模块</b>。M-13 仍然解释指令，M-12 仍然持有虚拟时钟，M-17 仍然是执行后端 —— 内核完全不知道「账号」这个概念存在。"
+              "M-25 只做四件事：<b>凭据解析</b>（cookie / Bearer / 兼容头）、<b>归属判定</b>（SessionHandle.owner）、<b>资源分根</b>（镜像目录按账号切）、<b>配额</b>（全局 + 单账号）。"),
+        ("p", "三条设计红线："),
+        ("list", [
+            "<b>不改契约</b>：SCHEMA_VERSION 停在 21。登录是 REST、令牌是 HTTP 头 —— 会话归属不进 <code>Message</code>，也不进 <code>boot</code> 回体。",
+            "<b>单点判定</b>：鉴权只在 <code>require_auth</code> 判一次；handler 只使用已判定的 <code>Identity</code>，不重复判、不各自造规则。",
+            "<b>默认兼容</b>：没有账号库时一切照旧（单令牌 <code>SIM_TOKEN</code> 行为不变），上线不要求一次性搬完所有东西。",
+        ]),
+
+        ("h3", "sec1-2", "1.2 需求承接"),
+        ("p", "需求来自「两个域名对外公开」的拍板口径：<code>rsim.lczyzs.xyz</code> 给浏览器、<code>rsimmcp.lczyzs.xyz</code> 给 MCP，"
+              "账号体系为「一用户一账号、一账号多 token、token 用于 MCP」。五条要点全部有落点。"),
+        ("caption", "表 1 · 需求承接矩阵"),
+        ("table", {
+            "widths": ["10%", "26%", "46%", "12%", "12%"],
+            "head": ["编号", "需求要点", "本设计的落点", "设计章节", "优先级"],
+            "rows": [
+                ["U-01", "一用户一账号", "账号库 <code>accounts.json</code>（version=1）；<code>AccountRecord</code> 一账号一条；用户名大小写不敏感、密码 pbkdf2_sha256", "§2.1 §4.2", "P0"],
+                ["U-02", "一账号多 token", "<code>TokenRecord</code> 挂在账号下（1:N）；同账号多令牌解析出<b>同一</b> <code>Identity.account</code>，故共享同一批会话与同一份 MCP client 状态", "§2.1 §4.1 §4.7", "P0"],
+                ["U-03", "token 用于 MCP", "MCP 原样透传客户端令牌（<code>Authorization: Bearer</code>），服务端是唯一判据；<code>_resolve_client</code> 以 account 作租户键", "§4.7", "P0"],
+                ["U-04", "会话不越界", "<code>SessionHandle.owner</code> + <code>owner_of</code>；越权与不存在同回 <code>404 E_SESS-01</code>；列表只列自己", "§2.3 §4.4", "P0"],
+                ["U-05", "资源不越界", "镜像根 <code>root/&lt;account_dir&gt;</code>；配额全局 + 单账号两条，超限 <code>429 E_SESS-05</code>", "§2.4 §4.5", "P0"],
+                ["U-06", "浏览器可用（派生）", "页面门 302 → <code>front/login.html</code>；登录成功发 HttpOnly cookie；<code>?token=</code> 可一次性换 cookie（去掉 URL 里的令牌）", "§4.3 §4.6", "P0"],
+                ["U-07", "可运维（派生）", "<code>tools/accounts.py</code> 离线建账号 / 发令牌 / 吊销 / 列举；原子写 + 0600；<code>/api/whoami</code> 自查", "§4.8", "P0"],
+                ["U-08", "上线不破坏旧部署（派生）", "账号库缺席 ⇒ 兼容模式（单令牌）；<code>SIM_TOKEN</code> 在账号模式下映射 <code>Identity::ops()</code>，能建会话但看不见任何账号会话", "§2.2 §7.4", "P0"],
+            ],
+        }),
+        ("callout", "约束", "U-02 的「多 token」是<b>同一身份的多把钥匙</b>，不是多身份：换令牌不换租户。"
+                  "这条约束是 MCP 侧会话表能否复用的前提 —— 若把 token 当租户，同一个人换一把钥匙就会被判成另一个人，会话表立刻撕裂。"),
+
+        ("h3", "sec1-3", "1.3 范围与不做"),
+        ("caption", "表 2 · 范围与优先级"),
+        ("table", {
+            "widths": ["12%", "58%", "30%"],
+            "head": ["档位", "内容", "验收口径"],
+            "rows": [
+                ["P0（本批）", "账号库 / 令牌校验 / cookie 登录 / 归属校验 / 配额 / 镜像分根 / 页面门 / 运维 CLI / MCP 透传", "服务端 89 条用例全绿；真机 curl 冒烟"],
+                ["P1（下一批）", "角色分级（admin 可代管他人会话）/ 令牌到期时间 / 审计日志（谁在何时开了哪个会话）/ MCP <code>/healthz</code> 报账号模式", "本批只留字段与钩子位"],
+                ["P2（后续）", "外部 IdP（OIDC / LDAP）/ 计费与用量统计 / 跨进程共享账号库", "不进入本批排期"],
+                ["明确不做", "改契约 / 把账号塞进内核 / 一个 token 属于多个账号 / 自动把旧会话迁移给新账号 / 在 API 层做密码找回", "评审逐条确认"],
+            ],
+        }),
+    ],
+})
+
+# ---------------------------------------------------------------- 2
+SECTIONS.append({
+    "id": "sec2",
+    "h": "2 数据描述",
+    "subs": [("sec2-1", "2.1 账号库"), ("sec2-2", "2.2 身份与渠道"),
+             ("sec2-3", "2.3 会话归属"), ("sec2-4", "2.4 镜像根与配额")],
+    "blocks": [
+        ("h3", "sec2-1", "2.1 账号库"),
+        ("p", "账号库是<b>唯一</b>的身份来源，一个 JSON 文件，启动时读一次进内存，运行期只读不写（增删账号走 <code>tools/accounts.py</code>）。"
+              "结构固定为三层：文件 → 账号 → 令牌。"),
+        ("caption", "表 3 · 账号库字段（accounts.json）"),
+        ("table", {
+            "widths": ["18%", "20%", "18%", "44%"],
+            "head": ["层级", "字段", "类型", "语义与约束"],
+            "rows": [
+                ["文件", "version", "u32", "必须为 <b>1</b>；不等于 1 ⇒ <code>Accounts::load</code> 回 <code>Err</code>，启动失败（不猜别的版本）"],
+                ["", "accounts", "Vec&lt;AccountRecord&gt;", "账号全表；文件缺席 ⇒ <code>Ok(None)</code> ⇒ 兼容模式"],
+                ["AccountRecord", "id", "String（<code>acc-XXXXXX</code>）", "随机 6 位十六进制；<b>会话 owner / 镜像目录名都用它</b>，改名不动它"],
+                ["", "name", "String", "登录名；比对时转小写（<code>Alice</code> 与 <code>alice</code> 是同一个账号）"],
+                ["", "role", "String（<code>user</code> / <code>ops</code>）", "本批只做标记与回显，<b>不做权限分级</b>；P1 才按 role 放行代管"],
+                ["", "password", "String", "<code>pbkdf2_sha256$&lt;iter&gt;$&lt;salt_b64url&gt;$&lt;hash_b64url&gt;</code>；默认 200 000 轮"],
+                ["", "tokens", "Vec&lt;TokenRecord&gt;", "一账号多令牌；可空（只有 cookie 登录、不接 MCP 的账号允许没有令牌）"],
+                ["", "created", "u64（秒）", "建账号时间；仅用于列举与审计展示，<b>不参与判定</b>"],
+                ["TokenRecord", "id", "String（<code>tok-N</code>）", "令牌 id；<code>/api/whoami</code> 回 <code>token_id</code>，用于对着 CLI 吊销"],
+                ["", "hint", "String（前 4 字符）", "给人看的前缀，便于「这把钥匙是哪把」；<b>不足以登入</b>（校验只看 hash）"],
+                ["", "hash", "String（64 hex）", "<code>sha256(token)</code> 小写十六进制；比对走常数时间，比较的是 hex 串"],
+                ["", "created / revoked", "u64 / bool", "<code>revoked=true</code> 即不再认；<b>保留记录</b>而不是删行，便于事后追「谁吊销过什么」"],
+            ],
+        }),
+        ("callout", "约束", "密码与令牌<b>都只存不可逆摘要</b>：密码是 pbkdf2 派生，令牌是 sha256。明文令牌只在签发那一刻打印一次，"
+                  "文件权限固定 <code>0600</code>，<code>tools/accounts.py list</code> 也不回显明文 —— 这三条是「账号库被读走也不等于被登入」的全部本钱。"),
+        ("p", "文件首行的示例（脱敏）如下。注意 <code>hint</code> 与 <code>hash</code> 的关系：前者是名字，后者是判据。"),
+        ("code", """{
+  "version": 1,
+  "accounts": [
+    {
+      "id": "acc-c9d46d",
+      "name": "alice",
+      "role": "user",
+      "password": "pbkdf2_sha256$200000$Yk9x…$3f2a…",
+      "tokens": [
+        { "id": "tok-1", "hint": "UW78", "hash": "6f1c…（sha256 全 64 hex）",
+          "created": 1795750000, "revoked": false }
+      ],
+      "created": 1795750000
+    }
+  ]
+}"""),
+
+        ("h3", "sec2-2", "2.2 身份与渠道"),
+        ("p", "<code>Identity</code> 是<b>请求级</b>结构：一次请求解析一次，活在 handler 的 <code>Extension</code> 里，不进会话、不进契约。"
+              "它把四种凭据渠道收敛成同一组字段 —— 这是「两条入口一个终点」的实现面。"),
+        ("caption", "表 4 · Identity 字段与凭据渠道"),
+        ("table", {
+            "widths": ["16%", "18%", "20%", "46%"],
+            "head": ["项", "类型", "来源渠道", "语义与约束"],
+            "rows": [
+                ["account", "String", "全部渠道", "<b>归属判据</b>。账号模式下来自 <code>AccountRecord.id</code>；<code>SIM_TOKEN</code> 下固定为 <code>ops</code>；兼容模式固定为 <code>legacy</code>"],
+                ["name", "String", "全部渠道", "展示名；与 <code>account</code> 分开，因为 id 不可读、name 可读"],
+                ["role", "String", "全部渠道", "<code>user</code> / <code>ops</code>；本批只回显"],
+                ["token_id", "Option&lt;String&gt;", "Bearer / <code>X-Auth-Token</code> / <code>?token=</code>", "命中的 <code>TokenRecord.id</code>；<b>cookie 渠道为 null</b>（cookie 不代表某一把令牌）"],
+                ["channel", "String", "<b>系统判定</b>", "<code>cookie</code> / <code>bearer</code> / <code>header</code> / <code>query</code> / <code>compat</code>；只用于回显与排障，<b>不参与授权</b>"],
+                ["—", "—", "cookie <code>sim_auth</code>", "优先级 1；<code>HttpOnly; SameSite=Lax; Max-Age=43200</code>；<code>Secure</code> 只在 <code>X-Forwarded-Proto: https</code> 时给"],
+                ["—", "—", "<code>Authorization: Bearer</code>", "优先级 2；MCP 与 CI 的主路；后端只认这一个标准头，MCP 内部另有 <code>x-mcp-token</code> 的对内兼容"],
+                ["—", "—", "<code>X-Auth-Token</code>", "优先级 3；v0.1.9 之前的旧客户端的兼容头，等价于 Bearer"],
+                ["—", "—", "<code>?token=</code>（仅 <code>/events/ws</code>）", "优先级 4；<b>唯一允许出现在 URL 的令牌</b>，因为浏览器 <code>WebSocket</code> 不能带自定义头"],
+                ["—", "—", "<code>SIM_TOKEN</code>（进程环境）", "兼容兜底：账号模式下映射 <code>Identity::ops()</code>；<b>看不见任何账号会话</b>（owner 不匹配），只能建自己的"],
+            ],
+        }),
+        ("note", "<b>为什么叫 ops 而不是「管理员」</b>：它没有「看别人会话」的权力，只保留「进程级应急」的能力 —— 上线当天忘记建账号时不至于把自己锁在门外，"
+                "同时不给运维一个默认的越权通道。真正的代管能力（role=admin 看他人会话）留给 P1，并要求显式开关。"),
+
+        ("h3", "sec2-3", "2.3 会话归属"),
+        ("p", "归属是<b>一个字段</b>，不是一张映射表：<code>SessionHandle.owner</code> 在 <code>create_for</code> 时写入，之后不可变（会话不可转让）。"
+              "所有「这个会话归谁」的判定都从它出发。"),
+        ("caption", "表 5 · 归属相关结构与判定"),
+        ("table", {
+            "widths": ["17%", "17%", "20%", "46%"],
+            "head": ["对象", "字段/方法", "类型", "语义与约束"],
+            "rows": [
+                ["SessionHandle", "owner", "String", "创建时的 <code>Identity.account</code>；<b>不可变</b>；随会话一起被回收"],
+                ["SessionRegistry", "max_per_account", "usize", "默认 <code>usize::MAX</code>（未配置即不限额）；由 <code>set_max_per_account</code> 在启动时设一次"],
+                ["", "<code>create_for(board, source, owner)</code>", "→ Result&lt;SessionId&gt;", "全局与单账号两条配额在同一把锁里判：先全局（<code>E_SESS-05</code> detail 为空）再账号（detail <code>account_quota</code>）"],
+                ["", "<code>list_for(owner)</code>", "→ (Vec&lt;Info&gt;, max, used)", "只列 <code>owner</code> 匹配的会话；<code>max</code> 报的是<b>该账号</b>上限（不是全局），避免把全局余量泄露给别人"],
+                ["", "<code>owner_of(id)</code>", "→ Option&lt;String&gt;", "会话不存在 ⇒ <code>None</code> ⇒ 调用方回 404；<b>不做</b>「存在但无权」的第二条错误分支"],
+                ["reaper", "TTL 扫表", "—", "按 <code>session_ttl</code> 回收；与 owner 无关 —— 空闲会话被回收不因账号不同而区别对待"],
+            ],
+        }),
+        ("callout", "约束", "「越权与不存在同回 404」是<b>安全要求</b>：若越权回 403、不存在回 404，攻击者可以用状态码差异探测会话 id 是否有效。"
+                  "因此 <code>owner_of</code> 与 <code>get</code> 的失败在 HTTP 层必须<b>折叠成同一个响应</b>，detail 也不得泄漏另一个账号的名字。"),
+
+        ("h3", "sec2-4", "2.4 镜像根与配额"),
+        ("caption", "表 6 · 镜像根映射"),
+        ("table", {
+            "widths": ["18%", "26%", "26%", "30%"],
+            "head": ["模式", "根路径", "创建时机", "约束"],
+            "rows": [
+                ["兼容（无账号库）", "<code>--allow-image-root</code> 原值（如 <code>/data/images</code>）", "启动即存在（运维建）", "现有 <code>/data/images/*.elf</code> 原地不动，<b>上线当天不用搬文件</b>"],
+                ["账号模式", "<code>&lt;root&gt;/&lt;account_dir&gt;</code>", "首次访问该账号的装载/读取时 <code>create_dir_all</code>", "目录名由 <code>account_dir_name(account)</code> 得到：非 <code>[a-zA-Z0-9_-]</code> 逐字符拍成 <code>_</code>"],
+                ["账号模式 + 无根", "<code>None</code>", "—", "<code>image_root_for</code> 回 <code>None</code> ⇒ 沿用 <code>whitelist_path</code> 的默认（仅仓库根），不报错"],
+            ],
+        }),
+        ("p", "目录名过滤是<b>防御性</b>而不是功能性：<code>account</code> 由服务端生成（<code>acc-XXXXXX</code>），理论上不会带斜杠与点；"
+              "但账号库是外部可编辑的 JSON，若有人手改成 <code>../../etc</code>，这一层必须自己挡住 —— 用例断言 <code>account_dir_name(\"../../etc\") == \"______etc\"</code>。"),
+        ("caption", "表 7 · 两条配额"),
+        ("table", {
+            "widths": ["16%", "18%", "18%", "48%"],
+            "head": ["配额", "配置", "默认", "触发与响应"],
+            "rows": [
+                ["全局会话数", "<code>--max-sessions</code> / <code>SIM_MAX_SESSIONS</code>", "8", "超过 ⇒ <code>429 + E_SESS-05</code>，detail 不指名账号（任何账号都可能撞到）"],
+                ["单账号会话数", "<code>--max-sessions-per-account</code>", "2", "超过 ⇒ <code>429 + E_SESS-05</code>，detail <code>account session quota N is in use</code>"],
+                ["会话 TTL", "<code>--session-ttl</code>", "900 s", "到期回收；回收后该账号的 <code>used</code> 立即降下来（配额按<b>活会话</b>计）"],
+                ["镜像体积", "<code>--max-image-bytes</code>", "16 MiB", "与账号无关；超限 <code>413</code>"],
+            ],
+        }),
+        ("svg", "FIG2"),
+        ("note", "<b>为什么单账号默认是 2 不是 1</b>：浏览器页面占一个（boot 后一直活着），MCP agent 再占一个 —— 1 会让「人看页面 + agent 跑脚本」互踢。"
+                "2 是这两个入口各一份的最小值；再多就是同一入口开多份，属于滥用。"),
+    ],
+})
+
+# ---------------------------------------------------------------- 3
+SECTIONS.append({
+    "id": "sec3",
+    "h": "3 体系结构",
+    "subs": [("sec3-1", "3.1 组件与边界"), ("sec3-2", "3.2 请求处理路径"), ("sec3-3", "3.3 与既有模块的关系")],
+    "blocks": [
+        ("h3", "sec3-1", "3.1 组件与边界"),
+        ("p", "M-25 由五个零件组成，全部在 <code>crates/server</code> 内：账号库、凭据解析中间件、归属与配额（在 <code>SessionRegistry</code> 上）、"
+              "镜像分根（一个纯函数）、页面门（在 <code>front_or_unknown</code> 里）。没有新 crate、没有新进程。"),
+        ("caption", "表 8 · 组件与职责边界"),
+        ("table", {
+            "widths": ["18%", "22%", "26%", "34%"],
+            "head": ["组件", "文件", "职责", "不负责"],
+            "rows": [
+                ["账号库 <code>Accounts</code>", "<code>src/account.rs</code>", "加载/校验账号库；令牌与密码校验；cookie 会话表（签发/解析/登出）", "不知道会话、不知道 HTTP、不写文件"],
+                ["鉴权中间件 <code>require_auth</code>", "<code>src/api.rs</code>", "按固定次序取凭据 → 解析 <code>Identity</code> → 归属校验 → 注入 <code>Extension</code>", "不做配额（配额在 create 里）、不做分根"],
+                ["归属与配额", "<code>src/session.rs</code>", "<code>owner</code> 字段、<code>create_for</code> / <code>list_for</code> / <code>owner_of</code>、两条配额", "不判凭据、不碰磁盘"],
+                ["镜像分根 <code>image_root_for</code>", "<code>src/api.rs</code>", "按 identity 选根并按需建目录", "不做路径规范化（那是 <code>whitelist_path</code> 的事）"],
+                ["页面门", "<code>src/api.rs</code>（<code>front_or_unknown</code>）", "静态资源与 <code>/</code>：账号模式 + <code>Accept: text/html</code> + 无 cookie ⇒ 302；<code>?token=</code> 有效 ⇒ 换 cookie 后 302", "不拦 <code>/api/*</code> 与 <code>/login.html</code> 本身（否则死循环）"],
+                ["运维 CLI", "<code>tools/accounts.py</code>", "离线 init/add-account/add-token/revoke-token/list；与 Rust 同一文件格式、同一 PBKDF2 参数", "不在运行期调用服务端；不存明文"],
+                ["MCP 租户解析", "<code>mcp/server.py</code>", "<code>_resolve_client(token)</code>：whoami → account 作租户键；会话记录钉住令牌", "不做鉴权判定（服务端才是判据）"],
+            ],
+        }),
+
+        ("h3", "sec3-2", "3.2 请求处理路径"),
+        ("p", "一个请求的路径是固定的一条直线，没有分支式中间件链：<b>解析凭据 → 归属校验（若有会话 id）→ handler</b>。"
+              "三个 handler 之外没有第二处鉴权，这也是「不重复造规则」的结构保证。"),
+        ("svg", "FIG1"),
+        ("caption", "表 9 · 各端点的判定点"),
+        ("table", {
+            "widths": ["30%", "14%", "14%", "42%"],
+            "head": ["端点", "鉴权", "归属校验", "说明"],
+            "rows": [
+                ["<code>GET /api/auth/mode</code>", "无", "—", "唯一<b>不需要</b>鉴权的 REST 端点：登录页要用它判断「这台上有没有账号体系」"],
+                ["<code>POST /api/login</code>", "无（收 username/password）", "—", "账号模式才有意义；兼容模式回 <code>404</code>（无账号库即无登录）"],
+                ["<code>POST /api/logout</code>", "无（有 cookie 才清）", "—", "幂等：无 cookie、过期 cookie 都回 204"],
+                ["<code>GET /api/whoami</code>", "有", "—", "回 <code>account/name/role/channel/token_id</code>；MCP 用它做租户解析"],
+                ["<code>POST /api/sessions</code>", "有", "—", "<code>create_for(owner=identity.account)</code>；配额在注册表内判"],
+                ["<code>GET /api/sessions</code>", "有", "—", "<code>list_for(owner)</code>；只回自己的"],
+                ["<code>…/api/sessions/{id}/**</code>", "有", "<b>是</b>", "<code>owner_of(id)</code> 与 identity.account 比对；失败即 404"],
+                ["<code>POST /api/boot</code>", "有", "—", "内部先建会话再装载；owner 同 <code>/api/sessions</code>"],
+                ["<code>GET /events/ws</code>", "有（可 <code>?token=</code>）", "<b>是</b>", "订阅某会话事件流；跨账号订阅回 404"],
+                ["<code>/</code> 与静态资源", "页面门", "—", "账号模式 + HTML 请求 + 无 cookie ⇒ 302；其余放行"],
+                ["<code>/healthz</code>", "无", "—", "回 <code>accounts / accounts_count / max_sessions_per_account</code>，供运维核查"],
+            ],
+        }),
+
+        ("h3", "sec3-3", "3.3 与既有模块的关系"),
+        ("p", "关系可以一句话概括：<b>M-25 只改「谁能进」，不改「进去之后发生什么」</b>。"),
+        ("list", [
+            "M-24（HTTP 宿主）：M-25 是它的一个中间件 + 一组端点 + 一个分根函数；M-24 的路由表、错误映射、线程模型都不动。",
+            "M-04（会话管理，浏览器侧）：服务端侧的对应物是 <code>SessionRegistry</code>；M-25 只给它加 <code>owner</code> 与两条配额。",
+            "M-07（传输适配）：WS 的 <code>?token=</code> 例外仍按原样保留，M-25 只是同意在解析阶段接受它。",
+            "M-18（Probe）/ M-19（波形）/ M-22（HMS）：与账号无关，全部沿用。",
+            "内核（M-12/M-13/M-17）：<b>零改动</b>。内核不认识账号，这正是本设计能「不动契约」的根因。",
+        ]),
+    ],
+})
+
+# ---------------------------------------------------------------- 4
+SECTIONS.append({
+    "id": "sec4",
+    "h": "4 详细设计",
+    "subs": [("sec4-1", "4.1 凭据解析"), ("sec4-2", "4.2 口令与 cookie"), ("sec4-3", "4.3 会话归属与配额"),
+             ("sec4-4", "4.4 镜像分根"), ("sec4-5", "4.5 页面门"), ("sec4-6", "4.6 错误映射"),
+             ("sec4-7", "4.7 MCP 侧透传"), ("sec4-8", "4.8 运维 CLI")],
+    "blocks": [
+        ("h3", "sec4-1", "4.1 凭据解析"),
+        ("p", "解析次序<b>固定</b>且不可配置（cookie → Bearer → <code>X-Auth-Token</code> → 仅 WS 的 <code>?token=</code> → 兼容 <code>SIM_TOKEN</code>）。"
+              "固定次序的意义是：同一个请求带两种凭据时，结果可预测，不会因部署差异而变。"),
+        ("code", """// crates/server/src/api.rs（示意，非逐字代码）
+fn resolve_identity(state, headers, uri) -> Option<Identity> {
+    // 1. cookie：账号模式的名字牌（HttpOnly，JS 读不到）
+    if let Some(cookie) = cookie_from_header(headers) { if let Some(id) = accounts.resolve_cookie(&cookie) { return Some(id); } }
+    // 2. Bearer / 3. X-Auth-Token：MCP 与 CI 的主路
+    for token in bearer_tokens(headers) {
+        if let Some(id) = accounts.authenticate_token(&token) { return Some(id); }
+        if token_accepted(&state.token, &token) { return Some(Identity::ops()); }   // 兼容兜底
+    }
+    // 4. ?token=：只认 /events/ws（浏览器 WS 不能带自定义头）
+    if wants_ws(uri) { if let Some(t) = query_token(uri) { … } }
+    None
+}"""),
+        ("callout", "约束", "<b>常数时间比较</b>：令牌比对用 <code>constant_time_eq</code> 逐字节等时，避免「按前缀长度提前返回」把令牌泄漏成计时侧信道。"
+                  "同理，登录失败时<b>错用户与错密码同为 <code>None</code></b>，不区分「没这个人」与「密码不对」。"),
+
+        ("h3", "sec4-2", "4.2 口令与 cookie"),
+        ("p", "密码用 PBKDF2-HMAC-SHA256 自实现（不引第三方 crate 之外的依赖），参数写进字符串本身，便于以后调迭代数而不破坏旧记录。"),
+        ("caption", "表 10 · 口令与 cookie 参数"),
+        ("table", {
+            "widths": ["18%", "20%", "22%", "40%"],
+            "head": ["项", "取值", "位置", "说明"],
+            "rows": [
+                ["口令格式", "<code>pbkdf2_sha256$&lt;iter&gt;$&lt;salt&gt;$&lt;hash&gt;</code>", "账号库 <code>password</code>", "salt/hash 用 base64url 无填充；<code>iter</code> 默认 200 000"],
+                ["口令校验", "按记录里的 iter / salt 重算后等时比对", "登录与 CLI", "RFC 向量（c=1 / c=2）在单测里钉住，防止自实现跑偏"],
+                ["cookie 名", "<code>sim_auth</code>", "<code>Set-Cookie</code>", "常量 <code>COOKIE_NAME</code>；前端与文档都不得另起名字"],
+                ["cookie 属性", "<code>Path=/; HttpOnly; SameSite=Lax; Max-Age=43200</code>", "响应头", "<code>SameSite=Lax</code> 让「从外部链接点进来」也能带上 cookie，同时挡住跨站 POST"],
+                ["<code>Secure</code>", "<b>仅</b>当 <code>X-Forwarded-Proto: https</code>", "响应头", "反代后面才加 https，本地 http 开发若硬加 <code>Secure</code> 会导致 cookie 存不下"],
+                ["会话 TTL", "12 h，滑动续期", "<code>session.rs</code>（cookie 表）", "每次解析成功即续期；过期即 <code>None</code>（等价于未登录）"],
+                ["登出", "删 cookie 表项 + <code>Set-Cookie Max-Age=0</code>", "<code>POST /api/logout</code>", "幂等：重复登出仍 204"],
+            ],
+        }),
+
+        ("h3", "sec4-3", "4.3 会话归属与配额"),
+        ("p", "两件事在同一把锁里做，是为了避免「先判全局再判账号」之间被别的线程插队："),
+        ("list", [
+            "① 全局活会话数 ≥ <code>max_sessions</code> ⇒ 429（detail 不提账号）；",
+            "② 该账号活会话数 ≥ <code>max_sessions_per_account</code> ⇒ 429（detail <code>account_quota</code>）；",
+            "③ 两条都过 ⇒ 分配 id、写 <code>owner</code>、登记，返回 <code>201</code>。",
+        ]),
+        ("caption", "表 11 · 隔离判定矩阵"),
+        ("table", {
+            "widths": ["22%", "15%", "15%", "48%"],
+            "head": ["操作", "同账号另一 token", "另一账号", "判定依据"],
+            "rows": [
+                ["读会话状态（<code>/state</code>）", "200（允许）", "<b>404</b>", "<code>owner</code> 相同即可读 —— 这是「一账号多 token」的核心语义"],
+                ["列出会话", "同一批（含彼此创建的）", "各自一批", "<code>list_for(owner)</code>"],
+                ["跑 / 单步 / 暂停 / 复位", "允许", "<b>404</b>", "同上；跨账号连「忙不忙」都不告诉"],
+                ["订阅事件流", "允许", "<b>404</b>", "WS 升级时也过归属校验，不能借 WS 绕过"],
+                ["装载镜像", "各自根", "各自根", "<code>image_root_for(identity)</code>"],
+                ["新建会话（配额已满）", "<b>429</b> <code>account_quota</code>", "201（不受影响）", "配额按账号计，别人的满不影响你"],
+                ["<code>SIM_TOKEN</code>（ops）", "看不见", "看不见", "owner 不匹配 ⇒ 404/空列表；但可自己建会话"],
+            ],
+        }),
+
+        ("h3", "sec4-4", "4.4 镜像分根"),
+        ("p", "一个纯函数 + 一次 <code>create_dir_all</code>："),
+        ("code", """pub(crate) fn image_root_for(state: &AppState, identity: &Identity) -> Option<PathBuf> {
+    let root = state.image_root.as_ref()?;
+    if state.accounts.is_none() { return Some(root.clone()); }        // 兼容：原根不动
+    let dir = root.join(account_dir_name(&identity.account));
+    std::fs::create_dir_all(&dir).ok()?;                              // 惰性创建
+    Some(dir)
+}
+
+fn account_dir_name(account: &str) -> String {
+    account.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+}"""),
+        ("note", "分根之后<b>白名单逻辑不变</b>：<code>upload::whitelist_path(root, path)</code> 仍做 <code>canonicalize</code> + <code>starts_with(root)</code>。"
+                "两层的分工是：M-25 保证「根是这个人该看的根」，白名单保证「路径出不了这个根」。任一层单独都不够。"),
+
+        ("h3", "sec4-5", "4.5 页面门"),
+        ("p", "页面门的规则只有三条，且<b>只作用于 HTML 请求</b>（<code>Accept: text/html</code>），避免把 API 与静态资源误伤成 302："),
+        ("caption", "表 12 · 页面门判定"),
+        ("table", {
+            "widths": ["30%", "18%", "18%", "34%"],
+            "head": ["条件", "动作", "目标", "理由"],
+            "rows": [
+                ["账号模式 + HTML + 无有效 cookie", "302", "<code>/login.html</code>", "人到门口先登录，专项页而不是弹窗"],
+                ["同上，但 URL 带有效 <code>?token=</code>", "发 cookie + 302", "去掉 <code>token</code> 的原地址", "让「点链接进来」的人也能用；<b>并且把令牌从 URL 上抹掉</b>，避免留在历史记录/日志里"],
+                ["兼容模式（无账号库）", "放行", "<code>/</code>", "不强制登录，旧部署行为不变"],
+                ["账号模式 + 已登录", "放行", "<code>/</code>", "页面自己用 whoami 显示当前账号"],
+                ["<code>Accept</code> 非 HTML（API/资源）", "放行", "—", "页面门不替代鉴权；API 由 <code>require_auth</code> 判"],
+                ["<code>/login.html</code> 本身", "放行", "—", "否则重定向死循环"],
+            ],
+        }),
+        ("p", "去掉 <code>token</code> 的方式是<b>重建 query</b>（<code>query_without</code>）：只删这一个键，其余参数（如 <code>board=…</code>）原样保留。"
+              "这比「整串丢掉」更符合直觉，也不会让用户丢配置。"),
+
+        ("h3", "sec4-6", "4.6 错误映射"),
+        ("p", "M-25 不新造错误族，只复用 <code>SESS</code> 族并补两个场景码："),
+        ("caption", "表 13 · 错误码增量与复用"),
+        ("table", {
+            "widths": ["14%", "12%", "10%", "58%"],
+            "head": ["码", "HTTP", "新增?", "触发与 detail"],
+            "rows": [
+                ["<code>E_SESS-01</code>", "404", "复用", "会话不存在<b>或</b>不属于当前身份；detail 只描述「不存在」，不泄漏归属"],
+                ["<code>E_SESS-02</code>", "409", "复用", "同一会话已有推进者（<code>run</code>/<code>step</code> 忙）"],
+                ["<code>E_SESS-03</code>", "500", "复用", "会话线程中毒（panic 兜底）"],
+                ["<code>E_SESS-04</code>", "409", "复用", "console 读取区间已丢弃"],
+                ["<code>E_SESS-05</code>", "429", "扩展 detail", "配额超限：全局 detail 空；单账号 detail <code>account session quota N is in use…</code>"],
+                ["<code>E_SESS-07</code>", "401", "新增", "鉴权失败（无凭据 / 令牌无效 / 已吊销 / cookie 过期）；登录失败也用此码 + detail <code>invalid credentials</code>"],
+                ["<code>E_MCP-08</code>", "401", "新增（MCP 侧）", "MCP 无法解析调用者令牌（whoami 失败）⇒ 不代跑，直接回 401"],
+                ["其余（<code>E_PLT-*</code> / <code>E_BUS-*</code> / …）", "原映射", "不变", "M-25 不改变任何既有码的 status 与语义"],
+            ],
+        }),
+        ("callout", "约束", "<code>unauthenticated</code> 的 detail 从「token 无效」改成「提供 token（Authorization: Bearer 或 X-Auth-Token）或浏览器登录」—— "
+                  "因为现在有两条合法入口，只说 token 会让浏览器用户以为没救。<b>detail 不出现账号名、不出现令牌片段。</b>"),
+
+        ("h3", "sec4-7", "4.7 MCP 侧透传"),
+        ("p", "MCP 从「服务凭据即全权」改成「<b>谁的令牌就用谁的身份</b>」。三个改动点："),
+        ("list", [
+            "① 令牌不再强制：<code>SIM_MCP_TOKEN</code> 只在「设了且等于 <code>SIM_TOKEN</code>」时报错退出（防误配成同一把）；",
+            "② 每次请求把客户端令牌放进线程本地 <code>_TOKEN_CTX</code>，<code>_http(..., token=None)</code> 默认取它（回退 <code>SIM_TOKEN</code>）；",
+            "③ <code>_resolve_client(token)</code>：先认 <code>SIM_MCP_TOKEN</code>（服务凭据 ⇒ <code>c-&lt;hash8&gt;</code>），否则查缓存 / 调 <code>GET /api/whoami</code>，账号模式取 <code>account</code> 作租户键。",
+        ]),
+        ("caption", "表 14 · MCP 租户键与回收"),
+        ("table", {
+            "widths": ["20%", "20%", "24%", "36%"],
+            "head": ["情形", "租户键", "会话表", "回收行为"],
+            "rows": [
+                ["账号模式（whoami 命中）", "<code>account</code>（如 <code>acc-c9d46d</code>）", "同账号多 token 共用一份", "<code>_drop(entry)</code> 用<b>创建该会话的令牌</b> DELETE"],
+                ["兼容模式（无账号库）", "<code>c-&lt;sha256[:8]&gt;</code>", "与 v0.1.9 一致", "同左；令牌即 <code>SIM_TOKEN</code>"],
+                ["服务凭据 <code>SIM_MCP_TOKEN</code>", "<code>c-&lt;hash8&gt;</code>", "运维视角，独立一份", "同上"],
+                ["令牌解析失败", "—", "不建会话", "回 <code>401 E_MCP-08</code>，<b>不</b>静默降级用 <code>SIM_TOKEN</code>"],
+            ],
+        }),
+        ("note", "<b>为什么回收必须用「会话自己的令牌」</b>：配额按账号算、TTL 到点由服务端回收，但 MCP 的 sweeper 也要主动删空闲会话。"
+                "若 sweeper 用 <code>SIM_TOKEN</code> 去删别人的会话，服务端按 owner 判定会回 404 —— 会话删不掉，但配额一直被占，直到服务端 TTL 才释放。"),
+
+        ("h3", "sec4-8", "4.8 运维 CLI"),
+        ("p", "<code>tools/accounts.py</code> 是运行期<b>唯一</b>的账号库写入口（服务端只读）。子命令与安全约束："),
+        ("caption", "表 15 · tools/accounts.py 子命令"),
+        ("table", {
+            "widths": ["18%", "34%", "48%"],
+            "head": ["子命令", "作用", "关键约束"],
+            "rows": [
+                ["<code>init</code>", "建第一个账号（通常是 admin），可 <code>--token</code> 收现有 <code>SIM_TOKEN</code> 或 <code>--mint-token</code> 新发", "文件已存在则拒绝覆盖，除非显式 <code>--force</code>"],
+                ["<code>add-account</code>", "新增账号，默认同时发一把令牌", "同名（大小写不敏感）即拒；<code>--password</code> 缺省则随机生成并打印"],
+                ["<code>add-token</code>", "给已有账号追加令牌", "打印<b>一次</b>明文；之后只留 hint"],
+                ["<code>revoke-token</code>", "按 <code>tok-N</code> 或 hint 吊销", "置 <code>revoked=true</code>，保留记录"],
+                ["<code>list</code>", "列账号 / 令牌 / 吊销状态 / 会话数（不含明文）", "不打印 hash 全文，只给 hint 与状态"],
+            ],
+        }),
+        ("p", "写文件走 <code>tmp + os.replace</code>（原子）并 <code>chmod 0600</code>："),
+        ("code", """$ python3 tools/accounts.py init --name admin --password '…' --token '<现有 SIM_TOKEN>'
+$ python3 tools/accounts.py add-account --name alice --password '…' --mint-token
+  account acc-c9d46d (alice) created; token tok-1 hint=UW78
+  token（只显示这一次）: UW78oxtD…（64 hex）
+$ python3 tools/accounts.py list
+  acc-c9d46d  alice  role=user  tokens=1 (1 active)  created=2026-11-27
+"""),
+    ],
+})
+
+# ---------------------------------------------------------------- 5
+SECTIONS.append({
+    "id": "sec5",
+    "h": "5 关键流程",
+    "subs": [("sec5-1", "5.1 浏览器登录"), ("sec5-2", "5.2 MCP 一次调用"), ("sec5-3", "5.3 越权判定的折叠")],
+    "blocks": [
+        ("svg", "FIG3"),
+        ("h3", "sec5-1", "5.1 浏览器登录"),
+        ("list", [
+            "① 打开 <code>/</code>：账号模式 + HTML + 无 cookie ⇒ 302 <code>/login.html</code>；",
+            "② 登录页先探 <code>/api/auth/mode</code>：<code>accounts:false</code> ⇒ 直接 <code>replace(\"/\")</code>（兼容模式无需登录）；",
+            "③ 提交 <code>POST /api/login</code>：成功 200 + <code>Set-Cookie</code> + <code>{account,name,role}</code>；失败 401 + detail <code>invalid credentials</code>，页面显示「账号或密码不对」；",
+            "④ 回 <code>/</code>：页面同源探测 <code>/api/version</code> 命中即进 server-mode，WS 用 cookie（浏览器会自动带上）；",
+            "⑤ <code>GET /api/whoami</code>：页面右上角显示当前账号（可选）。",
+        ]),
+
+        ("h3", "sec5-2", "5.2 MCP 一次调用"),
+        ("list", [
+            "① 客户端带 <code>Authorization: Bearer &lt;自己的令牌&gt;</code> 调 MCP；",
+            "② <code>do_POST</code> 取令牌 → <code>_resolve_client</code> → 首次调 <code>/api/whoami</code> 拿 <code>account</code>（进程内缓存）；",
+            "③ 建会话：MCP <code>POST /api/sessions</code>（服务端按令牌解析身份、按账号配额判定），会话记录里钉住这把令牌；",
+            "④ 后续 <code>/step</code>、<code>/state</code>、<code>/console</code> 全部原样透传该令牌 ⇒ 服务端每次都判同一身份；",
+            "⑤ 空闲回收：用会话自己的令牌 <code>DELETE</code>，配额立即释放。",
+        ]),
+
+        ("h3", "sec5-3", "5.3 越权判定的折叠"),
+        ("p", "越权判定的实现只有两步，且<b>失败在 HTTP 层折叠</b>："),
+        ("code", """// 归属校验（示意）
+let owner = registry.owner_of(&session_id).ok_or_else(ApiError::session_not_found)?;
+if owner != identity.account { return Err(ApiError::session_not_found()); }
+// ⇒ 越权与不存在走的是同一个错误构造，status / code / detail 完全一致"""),
+        ("note", "折叠带来的<b>性能副作用是好的</b>：越权请求在进内核之前就被拒，不占会话线程、不改内核状态 —— 与被拒的非法迁移「动手之前拒绝」同一纪律。"),
+    ],
+})
+
+# ---------------------------------------------------------------- 6
+SECTIONS.append({
+    "id": "sec6",
+    "h": "6 对外接口",
+    "subs": [("sec6-1", "6.1 新增 REST 端点"), ("sec6-2", "6.2 既有端点变化"), ("sec6-3", "6.3 契约与兼容")],
+    "blocks": [
+        ("h3", "sec6-1", "6.1 新增 REST 端点"),
+        ("caption", "表 16 · 四个新端点（全部与内核无关）"),
+        ("table", {
+            "widths": ["18%", "10%", "26%", "46%"],
+            "head": ["端点", "鉴权", "请求", "响应 / 错误"],
+            "rows": [
+                ["<code>GET /api/auth/mode</code>", "无", "—", "<code>{mode:\"accounts\"|\"token\", accounts:bool, login:bool, accounts_count:n}</code>"],
+                ["<code>POST /api/login</code>", "无", "<code>{username|user, password}</code>（JSON 或表单）", "200 + <code>Set-Cookie</code> + <code>{account,name,role}</code>；401 <code>E_SESS-07</code>；兼容模式 404"],
+                ["<code>POST /api/logout</code>", "无", "—", "204 + <code>Set-Cookie Max-Age=0</code>；幂等"],
+                ["<code>GET /api/whoami</code>", "有", "—", "<code>{account,name,role,channel,token_id}</code>；<code>E_SESS-07</code> 401"],
+            ],
+        }),
+
+        ("h3", "sec6-2", "6.2 既有端点变化"),
+        ("caption", "表 17 · 既有端点的行为变化（向后兼容）"),
+        ("table", {
+            "widths": ["24%", "30%", "46%"],
+            "head": ["端点", "变化", "对旧客户端的影响"],
+            "rows": [
+                ["<code>POST /api/sessions</code>", "会话带 owner；单账号配额生效", "无账号库时不限额（<code>usize::MAX</code>）⇒ 行为不变"],
+                ["<code>GET /api/sessions</code>", "只列自己的；<code>quota.max</code> 报该账号上限", "兼容模式全部归 <code>legacy</code> ⇒ 仍是同一批；<code>max</code> 与全局相同（未设单账号配额时）"],
+                ["<code>…/sessions/{id}/**</code>", "越权 ⇒ 404（与不存在同响应）", "单用户部署永远命中自己的会话 ⇒ 不变"],
+                ["<code>POST …/image</code>", "路径解析的根按账号切", "兼容模式原根不动 ⇒ 现有 <code>/data/images/*.elf</code> 照旧"],
+                ["<code>POST /api/boot</code>", "内部建会话带 owner", "回体字段不变"],
+                ["<code>GET /healthz</code>", "增 <code>accounts / accounts_count / max_sessions_per_account</code>", "纯增量字段，老解析器忽略即可"],
+                ["CORS", "允许头增 <code>authorization</code>", "原来只用 <code>x-auth-token</code> 的部署不受影响"],
+                ["<code>GET /</code>（HTML）", "账号模式未登录 ⇒ 302", "无账号库时不触发"],
+            ],
+        }),
+
+        ("h3", "sec6-3", "6.3 契约与兼容"),
+        ("list", [
+            "<b>SCHEMA_VERSION 停在 21</b>：M-25 不新增 <code>Message</code> 变体、不改 DTO。登录是 REST、令牌是头。",
+            "<b>若将来要在 <code>boot</code> 回体加 <code>owner</code></b>：用 <code>serde(default)</code> 且不升 schema —— 但这属于 P1，本批不做。",
+            "<b>前端门禁不可破</b>：<code>front/login.html</code> 是独立页面，<b>不 import</b> <code>front/</code> 的任何模块，也不改既有模块的导出集合（838 条前端用例一行不动）。",
+            "<b>兼容窗口</b>：账号库缺席 = 兼容模式；<code>SIM_TOKEN</code> 在账号模式下降级为 <code>ops</code> 而不是失效 —— 两条都保证「换版本不至于把现有调用打死」。",
+        ]),
+    ],
+})
+
+# ---------------------------------------------------------------- 7
+SECTIONS.append({
+    "id": "sec7",
+    "h": "7 配置与部署",
+    "subs": [("sec7-1", "7.1 旗标与环境变量"), ("sec7-2", "7.2 上线步骤"), ("sec7-3", "7.3 反代要点"), ("sec7-4", "7.4 兼容模式")],
+    "blocks": [
+        ("h3", "sec7-1", "7.1 旗标与环境变量"),
+        ("caption", "表 18 · 新增配置项"),
+        ("table", {
+            "widths": ["24%", "18%", "14%", "44%"],
+            "head": ["旗标", "环境变量", "默认", "说明"],
+            "rows": [
+                ["<code>--accounts &lt;path&gt;</code>", "<code>SIM_ACCOUNTS</code>", "<code>/data/accounts.json</code>，缺席 ⇒ 兼容", "显式给出则<b>必须存在且是文件</b>，否则启动失败（不静默降级成兼容模式）"],
+                ["<code>--max-sessions-per-account N</code>", "—", "2", "单账号配额；0 视为不限额（<code>usize::MAX</code>）"],
+                ["<code>--max-sessions N</code>", "<code>SIM_MAX_SESSIONS</code>", "8", "全局配额（既有）"],
+                ["<code>--session-ttl</code>", "—", "900 s", "会话与 cookie 表都按这个量级走（cookie 表固定 12 h）"],
+            ],
+        }),
+
+        ("h3", "sec7-2", "7.2 上线步骤"),
+        ("list", [
+            "① 在数据卷上建账号库：<code>docker exec riscv-sim python3 tools/accounts.py init --name admin --password '…' --token \"$SIM_TOKEN\"</code>（把现有 <code>SIM_TOKEN</code> 收成第一把令牌，旧客户端不至于断）；",
+            "② 重建容器，加 <code>-e SIM_ACCOUNTS=/data/accounts.json</code>（<code>/data</code> 是既有卷，账号库跟着卷走）；",
+            "③ 看启动日志：<code>accounts /data/accounts.json ⇒ N account(s), M token(s), isolation ON</code>；",
+            "④ <code>curl /api/auth/mode</code> 应回 <code>accounts:true</code>；<code>curl /healthz</code> 看 <code>accounts_count</code>；",
+            "⑤ 建第二个账号，从两台机器（或两把令牌）互查会话，确认 404 折叠；",
+            "⑥ 退役 <code>SIM_MCP_TOKEN</code>（或改成不与 <code>SIM_TOKEN</code> 相同），MCP 侧改由客户端自带令牌。",
+        ]),
+
+        ("h3", "sec7-3", "7.3 反代要点"),
+        ("p", "M-25 本身不处理 TLS，但它对反代有<b>三个硬要求</b>，缺一个就会出「cookie 存不下」「WS 401」「大镜像 413」这类怪症："),
+        ("caption", "表 19 · 反代与 cookie 的相互作用"),
+        ("table", {
+            "widths": ["22%", "30%", "48%"],
+            "head": ["要求", "位置", "不满足时的症状"],
+            "rows": [
+                ["<code>proxy_set_header X-Forwarded-Proto $scheme</code>", "nginx → ali_hy", "后端永远看不到 https ⇒ <code>Set-Cookie</code> 不带 <code>Secure</code>（可接受）；但若反代自己加了 <code>Secure</code> 又会因 HTTP 后端不一致而丢"],
+                ["<code>proxy_set_header X-Forwarded-For</code>", "同上", "日志里全是反代 IP，无法按账号定位问题"],
+                ["WS：<code>Upgrade</code> / <code>Connection</code> 透传", "两 vhost 都要", "<code>/events/ws</code> 握手失败，页面进 server-mode 但收不到事件"],
+                ["MCP：<code>proxy_buffering off</code> + <code>proxy_read_timeout 3600s</code>", "<code>rsimmcp</code> vhost", "长任务被反代提前断开；<code>POST /images</code> 需 <code>client_max_body_size 8m</code>"],
+                ["<code>Authorization</code> 原样透传", "两 vhost", "MCP 侧 401 <code>E_MCP-08</code>（令牌被反代吃掉）"],
+            ],
+        }),
+
+        ("h3", "sec7-4", "7.4 兼容模式"),
+        ("p", "兼容模式不是「降级补丁」，而是<b>一条正式形态</b>：没有账号库时，服务的行为必须与 v0.1.9 一致到可以被旧脚本原样复用。判据："),
+        ("list", [
+            "单令牌：仍认 <code>SIM_TOKEN</code>（<code>Authorization: Bearer</code> 或 <code>X-Auth-Token</code>）；",
+            "归属统一为 <code>legacy</code>：所有会话同 owner ⇒ 列表与详情行为不变；",
+            "镜像根不动：<code>/data/images/*.elf</code> 原地可装载；",
+            "页面不拦：无账号库时不 302；",
+            "配额不生效：<code>max_per_account = usize::MAX</code>。",
+        ]),
+    ],
+})
+
+# ---------------------------------------------------------------- 8
+SECTIONS.append({
+    "id": "sec8",
+    "h": "8 测试与验收",
+    "subs": [("sec8-1", "8.1 用例清单"), ("sec8-2", "8.2 门禁与实测")],
+    "blocks": [
+        ("h3", "sec8-1", "8.1 用例清单"),
+        ("p", "账号模块 8 条单测 + 端到端隔离 9 条（<code>tower::ServiceExt::oneshot</code> 走真 HTTP，不 mock handler）："),
+        ("caption", "表 20 · 验收用例"),
+        ("table", {
+            "widths": ["8%", "52%", "40%"],
+            "head": ["#", "用例", "断言口径"],
+            "rows": [
+                ["1", "跨账号读会话状态", "404 <code>E_SESS-01</code>，detail 不出现对方名字"],
+                ["2", "列表按账号过滤", "只回自己的；<code>quota.max</code> = 单账号上限"],
+                ["3", "同账号多 token 共享会话", "两把令牌都能读同一会话（200）"],
+                ["4", "单账号配额 429", "detail 含 <code>account quota</code>；另一账号不受影响"],
+                ["5", "无令牌", "401 <code>E_SESS-07</code>，detail 提两种入口"],
+                ["6", "兼容模式单令牌", "原行为不变（owner=legacy）"],
+                ["7", "<code>SIM_TOKEN</code> 看不见账号会话", "列表为空、详情 404"],
+                ["8", "登录 / whoami", "200 + cookie；whoami 回 account/name/role/channel"],
+                ["9", "镜像根按账号 + 目录名过滤", "两账号不同根；<code>account_dir_name(\"../../etc\") == \"______etc\"</code>"],
+                ["10", "PBKDF2 RFC 向量 c=1 / c=2", "与参考值一致"],
+                ["11", "令牌常数时间比对", "等长/不等长都走同一路径（无早退）"],
+                ["12", "已吊销令牌", "认证失败 ⇒ <code>None</code>"],
+                ["13", "cookie 12 h 滑动续期 / 登出", "续期后仍有效；登出后 <code>None</code>；重复登出仍成功"],
+                ["14", "账号库缺失", "<code>Ok(None)</code> ⇒ 兼容模式"],
+                ["15", "账号库畸形 / version≠1", "<code>Err</code> ⇒ 启动失败（不猜）"],
+                ["16", "用户名大小写不敏感", "<code>Alice</code> 与 <code>alice</code> 同一账号"],
+                ["17", "登录失败不区分原因", "错用户与错密码同回 <code>None</code>"],
+            ],
+        }),
+
+        ("h3", "sec8-2", "8.2 门禁与实测"),
+        ("p", "<b>门禁</b>（本批实测，2026-11-28）："),
+        ("list", [
+            "<code>cargo test -p riscv_sim_server</code> ⇒ <b>89 passed</b>（72 既有 + 8 账号 + 9 隔离）；",
+            "<code>cargo test --workspace</code> ⇒ contract <b>283</b> / kernel lib <b>1568</b> / server <b>89</b>，其余 crate 全绿；",
+            "<code>cargo clippy --workspace --all-targets -- -D warnings</code> ⇒ 干净；",
+            "<code>cd front && node --test tests/*.test.mjs</code> ⇒ <b>838 pass / 0 fail</b>（新增 <code>login.html</code> 不 import 模块 ⇒ 导出集合不变）。",
+        ]),
+        ("p", "<b>真机冒烟</b>（debug 二进制 + 临时账号库 + <code>--max-sessions-per-account 1</code>）："),
+        ("code", """GET  /api/auth/mode                    → {"mode":"accounts","accounts":true,"login":true}
+GET  /healthz                          → accounts=true, accounts_count=3, max_sessions_per_account=1
+GET  /api/sessions            (无凭据) → 401
+GET  /                 (Accept: html)  → 302 /login.html
+POST /api/login  alice/alicepw         → 200 + Set-Cookie sim_auth; HttpOnly; SameSite=Lax; Max-Age=43200
+GET  /api/whoami        (cookie)       → {"account":"acc-c9d46d","name":"alice","channel":"cookie"}
+GET  /?token=<alice>&board=sz          → 302 /?board=sz  + Set-Cookie（令牌从 URL 抹掉）
+POST /api/sessions        (alice)      → 201 sess-000001
+GET  /api/sessions/sess-000001/state   → alice 200 / bob 404 / ops 404
+POST /api/sessions        (alice 第二) → 429 E_SESS-05（account session quota 1）
+POST …/sess-000001/image  {"path":"nope.elf"} → 400，且 /data/images/acc-c9d46d 已被建出"""),
+    ],
+})
+
+# ---------------------------------------------------------------- 9
+SECTIONS.append({
+    "id": "sec9",
+    "h": "9 风险与后续",
+    "subs": [("sec9-1", "9.1 已知风险"), ("sec9-2", "9.2 破例清单"), ("sec9-3", "9.3 下一批")],
+    "blocks": [
+        ("h3", "sec9-1", "9.1 已知风险"),
+        ("caption", "表 21 · 风险与处置"),
+        ("table", {
+            "widths": ["20%", "16%", "38%", "26%"],
+            "head": ["风险", "等级", "现状", "处置 / 建议"],
+            "rows": [
+                ["反代→后端明文 HTTP", "高", "令牌与控制指令在公网裸奔（仅限 nginx↔ali_hy 段）", "建议补自签 TLS + <code>proxy_ssl_verify</code>，或把两段收进私网"],
+                ["令牌出现在 URL（<code>?token=</code>）", "中", "只允许 <code>/events/ws</code>，且页面门会把它换成 cookie 并抹掉", "访问日志里仍可能留痕 ⇒ 反代侧关闭 query 记录，或改用 cookie 登录"],
+                ["无审计日志", "中", "谁在何时开了哪个会话、谁吊销了哪把令牌，目前只在启动/CLI 输出里", "P1 加 <code>audit.jsonl</code>（只追加、按日切）"],
+                ["单账号配额对小团队偏紧", "低", "默认 2（页面 1 + agent 1）", "按需 <code>--max-sessions-per-account</code> 调；不要用「一 token 一身份」绕"],
+                ["账号库是外部可编辑 JSON", "低", "已在目录名与路径两层做防御", "建议 <code>0600</code> + 卷权限；改库需重启（运行期只读）"],
+                ["role 暂无权限语义", "低", "只回显", "P1 引入 <code>admin</code> 代管开关，默认关闭"],
+            ],
+        }),
+
+        ("h3", "sec9-2", "9.2 破例清单"),
+        ("p", "本设计存在三处「故意不统一」，都必须写在这里，否则下一个改动会误以为是 bug："),
+        ("list", [
+            "<b>① 兼容头 <code>X-Auth-Token</code></b>：新代码一律走 <code>Authorization: Bearer</code>，但旧客户端与 MCP 内部仍可能用前者 ⇒ 两个头都要认，且判据是同一个函数。",
+            "<b>② <code>?token=</code> 存在于 URL</b>：这是 WS 的物理限制（浏览器 WebSocket 不能带自定义头），不是偷懒；范围被钉死在 <code>/events/ws</code> 一条路径上。",
+            "<b>③ <code>SIM_TOKEN</code> 在账号模式下降级为 <code>ops</code></b>：它<b>不是</b>管理员，看不见任何账号会话 —— 这是「不给运维默认越权通道」的取舍。",
+        ]),
+
+        ("h3", "sec9-3", "9.3 下一批"),
+        ("list", [
+            "P1：<code>role=admin</code> 代管（显式开关）、令牌到期时间、MCP <code>/healthz</code> 报账号模式与 <code>accounts_count</code>；",
+            "P1：审计日志（登录、建会话、删会话、吊销令牌，四条事件即可覆盖 90% 的追查需求）；",
+            "P2：外部 IdP 与用量统计；跨进程共享账号库（需要一把锁或一个数据库，当前单进程假设下不做）；",
+            "部署（批 2，与代码解耦）：两 vhost + 证书 + DNS + 可选安全组白名单，见 §7.3。",
+        ]),
+    ],
+})
+
+# ---------------------------------------------------------------- renderer
+def esc(t: str) -> str:
+    return html.escape(t, quote=False)
+
+
+def render_table(spec: dict) -> str:
+    widths = spec["widths"]
+    cols = "".join(f'<col style="width:{w}">' for w in widths)
+    head = "".join(f"<th>{c}</th>" for c in spec["head"])
+    rows = []
+    for i, row in enumerate(spec["rows"]):
+        cls = ' class="row1"' if i % 2 else ""
+        cells = "".join(
+            f'<td data-label="{html.escape(strip_tags(spec["head"][j]) if j < len(spec["head"]) else "", quote=True)}">{c}</td>'
+            for j, c in enumerate(row)
+        )
+        rows.append(f"<tr{cls}>{cells}</tr>")
+    return (
+        '<div class="tbl-wrap"><table class="doc-table wide">'
+        f"<colgroup>{cols}</colgroup><thead><tr>{head}</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def strip_tags(t: str) -> str:
+    return re.sub(r"<[^>]+>", "", t)
+
+
+def render_blocks(blocks) -> str:
+    out = []
+    for b in blocks:
+        kind = b[0]
+        val = b[1] if len(b) > 1 else None
+        if kind == "p":
+            out.append(f'<p class="body">{val}</p>')
+        elif kind == "caption":
+            out.append(f'<p class="caption">{val}</p>')
+        elif kind == "table":
+            out.append(render_table(val))
+        elif kind == "code":
+            out.append(f'<pre class="code">{esc(val)}</pre>')
+        elif kind == "list":
+            items = "".join(f"<li>{i}</li>" for i in val)
+            out.append(f'<ul class="list">{items}</ul>')
+        elif kind == "callout":
+            tag, text = (b[1], b[2]) if len(b) >= 3 else (val[0], val[1])
+            out.append(
+                f'<div class="callout"><span class="callout-tag">{tag}</span>'
+                f'<span class="callout-txt">{text}</span></div>'
+            )
+        elif kind == "h3":
+            out.append(f'<h3 id="{b[1]}" class="h-sub3">{b[2]}</h3>')
+        elif kind == "svg":
+            out.append({"FIG1": FIG1, "FIG2": FIG2, "FIG3": FIG3}[val])
+        elif kind == "note":
+            out.append(f'<div class="note">{val}</div>')
+        else:
+            raise SystemExit(f"未知块类型：{kind}")
+    return "\n".join(out)
+
+
+CSS = """
+:root { --ink:#1f2937; --ink-2:#4b5563; --brand:#1e3a8a; --brand-2:#2f5bd6;
+  --line:#d8dee9; --head-bg:#f1f4f9; --zebra:#f8fafc; --bg:#ffffff; --code-bg:#0f172a; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:20px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  font-size:15px; line-height:1.75; }
+.wrap { width:100%; max-width:1120px; margin:0 auto; padding:16px; }
+.doc-title { font-size:26px; line-height:1.4; font-weight:900; color:var(--brand);
+  margin:8px 0 4px; text-align:center; }
+.subtitle { text-align:center; color:var(--ink-2); font-size:14px; margin:0 0 4px; }
+.version { text-align:center; color:#6b7280; font-size:12.5px; margin:0 0 18px; }
+.kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:6px 0 22px; }
+.kpi { background:var(--head-bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+.kpi-n { font-size:22px; font-weight:900; color:var(--brand); line-height:1.2; }
+.kpi-t { font-size:13px; font-weight:700; color:#111827; margin-top:2px; }
+.kpi-d { font-size:12px; color:var(--ink-2); margin-top:3px; }
+.h-sec { font-size:21px; font-weight:800; color:var(--brand);
+  border-bottom:2px solid var(--line); padding-bottom:6px; margin:34px 0 14px; scroll-margin-top:16px; }
+.h-sub3 { font-size:15.5px; font-weight:700; color:#374151; margin:22px 0 8px; scroll-margin-top:16px; }
+.body { margin:0 0 10px; text-align:justify; }
+.tbl-wrap { overflow-x:auto; margin:12px 0 16px; }
+.doc-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; line-height:1.6; background:#fff; }
+.doc-table th { background:var(--head-bg); color:#111827; font-weight:700;
+  border:1px solid var(--line); padding:7px 8px; vertical-align:middle; }
+.doc-table td { border:1px solid var(--line); padding:6px 8px; vertical-align:middle; word-break:break-word; }
+.doc-table tr.row1 { background:var(--zebra); }
+.caption { text-align:left; font-size:12.5px; color:var(--ink-2); margin:14px 0 4px; font-weight:700; }
+.code { background:var(--code-bg); color:#e2e8f0; font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace;
+  font-size:12.5px; line-height:1.62; padding:12px 14px; border-radius:6px; overflow-x:auto;
+  white-space:pre; margin:10px 0 16px; }
+.fig { margin:14px 0 6px; }
+.fig .figcap { text-align:center; font-size:12.5px; color:var(--ink-2); margin-top:4px; }
+.flow-svg { width:100%; height:auto; display:block; }
+.list { margin:8px 0 14px; padding-left:20px; }
+.list li { margin:5px 0; font-size:14.5px; }
+.callout { display:flex; gap:8px; align-items:flex-start; background:#fffbeb; border:1px solid #fcd34d;
+  border-left-width:4px; border-radius:6px; padding:9px 12px; margin:12px 0 16px; }
+.callout-tag { flex:0 0 auto; font-weight:800; color:#92400e; font-size:13px; }
+.callout-txt { font-size:13.5px; color:#3f2d0a; }
+.note { background:var(--head-bg); border:1px solid var(--line); border-radius:6px;
+  padding:9px 12px; margin:12px 0 16px; font-size:13.5px; color:var(--ink-2); }
+.note b { color:#111827; }
+.nav-toggle { margin:14px 0 4px; }
+.nav-toggle summary { cursor:pointer; font-weight:700; color:var(--brand);
+  padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--head-bg); list-style:none; }
+.nav-toggle summary::-webkit-details-marker { display:none; }
+.nav-box { display:flex; flex-direction:column; gap:2px; padding:10px 4px 2px; }
+.nav-l1 { color:var(--brand); font-weight:700; text-decoration:none; padding:3px 4px; }
+.nav-l2 { color:var(--ink-2); text-decoration:none; padding:3px 4px 3px 18px; font-size:13.5px; }
+.nav-l1:hover,.nav-l2:hover { color:var(--brand-2); text-decoration:underline; }
+.foot { margin:40px 0 8px; padding-top:10px; border-top:1px solid var(--line);
+  font-size:12.5px; color:#6b7280; }
+@media (min-width:768px) {
+  .wrap { display:grid; grid-template-columns:250px minmax(0,1fr); gap:26px; align-items:start; }
+  .doc-head { grid-column:1 / -1; }
+  .nav-toggle { position:sticky; top:16px; max-height:calc(100vh - 32px); overflow:auto; }
+  .nav-toggle summary { pointer-events:none; }
+}
+@media (max-width:767px) {
+  .doc-table.wide thead { display:none; }
+  .doc-table.wide, .doc-table.wide tbody, .doc-table.wide tr, .doc-table.wide td { display:block; width:100%; }
+  .doc-table.wide tr { border:1px solid var(--line); margin:10px 0; border-radius:6px; background:#fff; }
+  .doc-table.wide tr.row1 { background:var(--zebra); }
+  .doc-table.wide td { border:none; border-bottom:1px dashed var(--line); padding:6px 10px 6px 104px;
+    position:relative; text-align:left !important; }
+  .doc-table.wide td:last-child { border-bottom:none; }
+  .doc-table.wide td::before { content:attr(data-label); position:absolute; left:10px; top:7px;
+    font-weight:700; color:var(--brand); font-size:12px; width:88px; }
+  .kpis { grid-template-columns:repeat(2,1fr); }
+  .wrap { padding:12px; }
+  .doc-title { font-size:20px; }
+  .h-sec { font-size:18px; }
+}
+@media print {
+  .nav-toggle { display:none; }
+  .wrap { display:block; max-width:none; padding:0; }
+  .doc-table, .fig, .code { break-inside:avoid; }
+}
+"""
+
+
+def build(nav: str, body: str) -> str:
+    kpis = "".join(
+        f'<div class="kpi"><div class="kpi-n">{n}</div><div class="kpi-t">{t}</div>'
+        f'<div class="kpi-d">{d}</div></div>'
+        for n, t, d in KPI
+    )
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{esc(TITLE)}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='3' fill='%231e3a8a'/%3E%3Crect x='9' y='9' width='14' height='14' rx='1.5' fill='%23f8fafc'/%3E%3C/svg%3E">
+<style>{CSS}</style>
+</head>
+<body>
+<div class="wrap">
+<header class="doc-head">
+<h1 class="doc-title">{esc(TITLE)}</h1>
+<p class="subtitle">{esc(SUBTITLE)}</p>
+<p class="version">{esc(VERSION)}</p>
+<div class="kpis">{kpis}</div>
+</header>
+{nav}
+<main>
+{body}
+<p class="foot">本文件由 <b>tools/build_m25_doc.py</b> 数据驱动生成；改内容请改脚本后重跑，不要手改 HTML。<br>
+冻结后的规格若需 DOCX/PDF 副本，另走导出，不以手改的 HTML 为准。</p>
+</main>
+</div>
+</body>
+</html>
+"""
+
+
+def main() -> int:
+    out = Path(sys.argv[1]) if len(sys.argv) > 1 else OUT_DEFAULT
+    nav_items = []
+    for s in SECTIONS:
+        nav_items.append(f'<a class="nav-l1" href="#{s["id"]}">{s["h"]}</a>')
+        for sid, st in s.get("subs", []):
+            nav_items.append(f'<a class="nav-l2" href="#{sid}">{st}</a>')
+    nav = (
+        '<nav class="nav-toggle"><details open><summary>目录</summary>'
+        f'<div class="nav-box">{"".join(nav_items)}</div></details></nav>'
+    )
+    body = "\n".join(
+        f'<h2 class="h-sec" id="{s["id"]}">{s["h"]}</h2>\n{render_blocks(s["blocks"])}'
+        for s in SECTIONS
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(build(nav, body), encoding="utf-8")
+    print(f"generated: {out} ({out.stat().st_size} bytes)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

@@ -193,6 +193,55 @@ SIM_IMAGE=crpi-d990qy21vgojj2m7.cn-heyuan.personal.cr.aliyuncs.com/zyzs/riscv_si
 
 ---
 
+### 2.7 多用户账号与隔离（**v0.1.10 批起**）
+
+一个账号一个人：浏览器用**账号 + 密码**登录（服务端发 `HttpOnly` cookie），MCP / 脚本用**令牌**（`Authorization: Bearer <token>`）。一个账号可以有多把令牌，换令牌不换身份 —— 同一账号的两把钥匙看到的是同一批会话。
+
+**没有账号库时一切照旧**：不传 `--accounts`，服务就是 v0.1.9 的样子（单 `SIM_TOKEN`、`/data/images` 一把梭）。想开隔离只加一个文件，不用改任何客户端。
+
+```bash
+# 1) 建账号库（放在数据卷上，跟着卷一起备份）
+docker exec riscv-sim python3 tools/accounts.py init \
+  --name admin --password '<选一个强口令>' --token "$SIM_TOKEN"
+#    ↑ 把现有 SIM_TOKEN 收成第一把令牌 ⇒ 老客户端不会因为升级而失效
+
+# 2) 重建容器时挂上账号库（/data 是既有卷）
+docker run -d --name riscv-sim --restart unless-stopped \
+  -p 0.0.0.0:8876:9876 -v riscv-sim-data:/data \
+  -e SIM_TOKEN="$SIM_TOKEN" -e SIM_ACCOUNTS=/data/accounts.json \
+  -e SIM_FRONT_DIR=/app/front -e SIM_IMAGE_ROOT=/data/images \
+  <镜像>
+
+# 3) 给同事开账号（默认同时发一把令牌，明文只打印这一次）
+docker exec riscv-sim python3 tools/accounts.py add-account --name alice --password '<口令>'
+docker exec riscv-sim python3 tools/accounts.py list          # 看账号 / 令牌 hint / 吊销状态
+docker exec riscv-sim python3 tools/accounts.py add-token --account alice
+docker exec riscv-sim python3 tools/accounts.py revoke-token --account alice --id tok-2
+```
+
+启动日志出现 `accounts /data/accounts.json ⇒ N account(s), M token(s), isolation ON` 就说明隔离生效；`GET /api/auth/mode` 应回 `{"mode":"accounts","accounts":true,"login":true}`。
+
+**隔离边界（一句话版）**
+
+| 你拥有 | 你能看到 | 你不能 |
+| --- | --- | --- |
+| 一把令牌 / 一个账号 | 自己账号的会话、console、镜像目录 `images/<account_id>/` | 别人的会话（访问回 **404**，与「不存在」同一个响应） |
+| 浏览器 cookie | 同一账号的全部会话（含另一把令牌开的） | 换账号看别人的页面会话 |
+| `SIM_TOKEN`（账号模式下的 `ops`） | 只能看到自己开的会话 | 看不见、也删不掉任何账号的会话 |
+
+配额默认 **全局 8 / 单账号 2**（页面占一个、agent 占一个）；单账号满了回 `429 E_SESS-05`，别人不受影响。要放宽：`--max-sessions-per-account 4`。
+
+**MCP 怎么用**：客户端带自己的令牌即可，MCP 不再需要服务凭据。
+
+```bash
+# 客户端配置（Claude Desktop / 任意 MCP 客户端）
+"env": { "SIM_MCP_URL": "https://rsimmcp.lczyzs.xyz/mcp", "SIM_MCP_TOKEN": "<你自己的令牌>" }
+```
+
+MCP 把你的令牌原样转给服务端，服务端是唯一判据；`SIM_MCP_TOKEN` 设成与 `SIM_TOKEN` 相同时会直接报错退出（防止误配成「服务凭据即全权」）。
+
+**部署提示**：反代到 HTTPS 时记得透传 `X-Forwarded-Proto`（否则 cookie 不加 `Secure`）与 `Authorization`（否则 MCP 401）；`/events/ws` 需要 `Upgrade`/`Connection` 透传，`POST /images` 需要 `client_max_body_size ≥ 8m`。
+
 ## 3. 界面导览
 
 **左侧是分组导航**（v0.49 起）：两个分组——「**运行与调试**」（嵌入式 / 调试 / 寄存器·内存 / 波形 / 终端）与「**平台**」（产品 / 板级内存图 / 源码）⇒ ⇒ 共 **8** 个视图 ⇒ ⇒ 当前视图那项会**高亮**（点它就切路由，URL 里的 `#/xxx` 照旧可用）⇒ ⇒ **窄屏（< 720px）时侧边栏变抽屉**，点左上角**汉堡按钮**拉开。

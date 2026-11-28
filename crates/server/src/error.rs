@@ -93,6 +93,19 @@ impl ApiError {
         )
     }
 
+    /// 429 · **单账号**并发会话配额用尽（M-25）。
+    ///
+    /// ⚠️ 与全局配额**共用场景码** `E_SESS-05`（契约里只有一个「配额」概念），
+    /// 靠 detail 区分是「进程满了」还是「你自己满了」—— 客户端要不要重试的
+    /// 判断是同一件事：先删自己的空闲会话。
+    pub fn account_quota(max: usize) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            session_code(E_SESS_05_QUOTA_EXCEEDED),
+            format!("account session quota {max} is in use; DELETE one of your sessions, then retry"),
+        )
+    }
+
     /// 504 · 作业回执超时（R-11）。
     ///
     /// ⚠️ **不是** `run` 的 `timeout_ms`（那个是内核窗口判定回的
@@ -147,7 +160,9 @@ impl ApiError {
         Self::new(
             StatusCode::UNAUTHORIZED,
             session_code(E_SESS_07_UNAUTHORIZED),
-            "this endpoint requires an X-Auth-Token header".to_string(),
+            "this endpoint requires a token (Authorization: Bearer or X-Auth-Token) \
+             or a browser login (POST /api/login)"
+                .to_string(),
         )
     }
 
