@@ -22,6 +22,9 @@
 //!   推进者在自己下一个窗口边界看到位就停（≤ 1 个量子）。
 
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -57,6 +60,170 @@ const BUSY_GRACE_STEP: Duration = Duration::from_millis(1);
 /// 「回执多久没来」。
 const JOB_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// console 的**落盘老段**（R-06 的「全文」）。
+///
+/// 环只留最近 `--max-console` 字节；环外那段（最多 24 小时 / 64 MiB）落在这里，
+/// 偏移空间与环**共用**一套绝对账 ⇒ ⇒ 读接口不需要知道「这段在环还是在盘」。
+///
+/// ⚠️ 只追加、不清静默：`start` 前移的唯一原因是**文件超上限裁头**，
+///    裁掉多少就前移多少 ⇒ ⇒ 老 offset 会被如实拒绝（`base` 前移），
+///    与环的行为完全一致。
+#[derive(Debug)]
+struct ConsoleLog {
+    file: File,
+    /// 文件里第一个字节的绝对偏移。
+    start: u64,
+    /// 文件当前长度（= total - start，除非写失败被降级）。
+    len: u64,
+    /// 单会话文件上限。
+    cap: usize,
+}
+
+impl ConsoleLog {
+    /// 打开（或续写）`<dir>/<id>.log`。目录不存在就建；权限 `0600`。
+    fn open(dir: &std::path::Path, id: &str, cap: usize, start: u64) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{id}.log"));
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            file,
+            start,
+            len,
+            cap: cap.max(1),
+        })
+    }
+
+    /// 从环境变量打开（没配 `SIM_CONSOLE_LOG_DIR` ⇒ 不落盘，退回纯环）。
+    fn open_from_env(id: &str, cap: usize) -> Option<Self> {
+        let dir = std::env::var("SIM_CONSOLE_LOG_DIR").ok()?;
+        let cap = std::env::var("SIM_CONSOLE_LOG_MAX")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .unwrap_or(cap);
+        match Self::open(std::path::Path::new(&dir), id, cap, 0) {
+            Ok(log) => Some(log),
+            Err(err) => {
+                eprintln!("riscv_sim_server: console log disabled for {id}: {err}");
+                None
+            }
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.file.write_all(bytes)?;
+        self.len += bytes.len() as u64;
+        if self.len > self.cap as u64 {
+            self.trim()?;
+        }
+        Ok(())
+    }
+
+    /// 裁头：留最新 `cap` 字节，`start` 前移裁掉的量。
+    fn trim(&mut self) -> std::io::Result<()> {
+        let cap = self.cap as u64;
+        if self.len <= cap {
+            return Ok(());
+        }
+        let drop = self.len - cap;
+        self.file.seek(SeekFrom::Start(drop))?;
+        let mut tail = Vec::with_capacity(cap as usize);
+        self.file.read_to_end(&mut tail)?;
+        self.file.set_len(0)?;
+        self.file.write_all(&tail)?;
+        self.start += drop;
+        self.len = tail.len() as u64;
+        Ok(())
+    }
+
+    /// 清内容、不归零偏移（D-3）：截断文件，`start` 推到 `total`。
+    fn clear(&mut self, total: u64) -> std::io::Result<()> {
+        self.file.set_len(0)?;
+        self.start = total;
+        self.len = 0;
+        Ok(())
+    }
+
+    /// 读 `[offset, offset+limit)`；窗口外由调用方决定退回环还是报 `base`。
+    fn read(&mut self, offset: u64, limit: usize) -> Option<Vec<u8>> {
+        if offset < self.start || offset >= self.start + self.len {
+            return None;
+        }
+        let skip = offset - self.start;
+        let take = limit.min((self.len - skip) as usize);
+        self.file.seek(SeekFrom::Start(skip)).ok()?;
+        let mut buf = vec![0u8; take];
+        self.file.read_exact(&mut buf).ok()?;
+        Some(buf)
+    }
+}
+
+/// console 落盘文件的**定期清理**：只按年龄，超过 `SIM_CONSOLE_LOG_RETENTION`
+/// 秒（默认 24 h）就删，不看会话在不在。
+///
+/// ⚠️ 与「会话结束立即删」是两种口径：这里刻意**留满一天**，
+///    方便跑完之后回头核对串口日志；唯一的回收判据是年龄。
+pub fn spawn_console_gc() {
+    let dir = match std::env::var("SIM_CONSOLE_LOG_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => dir,
+        _ => return,
+    };
+    let retention = std::env::var("SIM_CONSOLE_LOG_RETENTION")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(24 * 60 * 60);
+    let every = std::env::var("SIM_CONSOLE_LOG_GC_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(600);
+    let spawned = thread::Builder::new()
+        .name("console-gc".to_string())
+        .spawn(move || loop {
+            thread::sleep(Duration::from_secs(every.max(1)));
+            console_gc_once(std::path::Path::new(&dir), Duration::from_secs(retention));
+        });
+    if let Err(err) = spawned {
+        eprintln!("riscv_sim_server: console gc disabled: {err}");
+    }
+}
+
+/// 扫一遍目录，删掉年龄超过 `retention` 的 `.log`。返回删了几个。
+fn console_gc_once(dir: &std::path::Path, retention: Duration) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|age| age >= retention)
+            .unwrap_or(false);
+        if old && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        eprintln!("riscv_sim_server: console gc removed {removed} expired log(s)");
+    }
+    removed
+}
+
 /// 会话的 **console 字节环**（R-06）。
 ///
 /// ⚠️ **环形裁尾 + 记丢弃区间**（不是「静默丢」）：`drop` 之前的偏移读不到
@@ -70,6 +237,8 @@ struct ConsoleRing {
     /// 从会话开始到现在写进环的总字节数（含已被裁掉的）。
     total: u64,
     cap: usize,
+    /// 落盘的老段（没配 `SIM_CONSOLE_LOG_DIR` ⇒ `None`）。
+    log: Option<ConsoleLog>,
 }
 
 impl ConsoleRing {
@@ -79,6 +248,28 @@ impl ConsoleRing {
             base: 0,
             total: 0,
             cap: cap.max(1),
+            log: None,
+        }
+    }
+
+    /// 挂上落盘日志（会话线程启动时一次）。挂了之后「环外老段」可回读。
+    fn attach_log(&mut self, log: Option<ConsoleLog>) {
+        if let Some(mut log) = log {
+            // 新会话：文件若已存在（同 id 复用），从 0 起算 ⇒ 直接截断。
+            let _ = log.clear(0);
+            self.log = Some(log);
+        }
+    }
+
+    /// 对外报的**窗口起点**：环与文件能覆盖的**并集**的起点。
+    ///
+    /// ⚠️ 取小值（不是取大）：文件覆盖 `[start, total)`、环覆盖 `[base, total)`，
+    ///    两个区间都接到 `total` ⇒ ⇒ 并集就是 `[min(start, base), total)`。
+    ///    取大值会把「只在盘上、已出环」的那段判成丢失 —— 落盘就白做了。
+    fn window_base(&self) -> u64 {
+        match &self.log {
+            Some(log) => self.base.min(log.start),
+            None => self.base,
         }
     }
 
@@ -88,6 +279,13 @@ impl ConsoleRing {
             return;
         }
         self.total += bytes.len() as u64;
+        if let Some(log) = &mut self.log {
+            if let Err(err) = log.append(bytes) {
+                // 落盘坏了不该把会话带走：降级成纯环，并在日志里说清。
+                eprintln!("riscv_sim_server: console log write failed, degrade to ring: {err}");
+                self.log = None;
+            }
+        }
         self.buf.extend(bytes.iter().copied());
         if self.buf.len() > self.cap {
             let drop = self.buf.len() - self.cap;
@@ -105,18 +303,31 @@ impl ConsoleRing {
     fn clear(&mut self) {
         self.buf.clear();
         self.base = self.total;
+        if let Some(log) = &mut self.log {
+            if let Err(err) = log.clear(self.total) {
+                eprintln!("riscv_sim_server: console log clear failed: {err}");
+                self.log = None;
+            }
+        }
     }
 
     /// 读 `[offset, offset + limit)`。
     ///
     /// 早于 `base` ⇒ `Err(base)`（窗口丢了，告诉客户端从哪重新读）；
     /// 晚于 `total` ⇒ 空（只是还没产生）。
-    fn read(&self, offset: u64, limit: usize) -> Result<Vec<u8>, u64> {
-        if offset < self.base {
-            return Err(self.base);
+    fn read(&mut self, offset: u64, limit: usize) -> Result<Vec<u8>, u64> {
+        let base = self.window_base();
+        if offset < base {
+            return Err(base);
         }
         if offset >= self.total {
             return Ok(Vec::new());
+        }
+        // 老段在盘上：文件覆盖 [start, start+len)，能读到就直接给。
+        if let Some(log) = &mut self.log {
+            if let Some(bytes) = log.read(offset, limit) {
+                return Ok(bytes);
+            }
         }
         let skip = (offset - self.base) as usize;
         let take = limit.min(self.buf.len().saturating_sub(skip));
@@ -691,6 +902,16 @@ impl SessionHandle {
         self.busy.load(Ordering::Acquire)
     }
 
+    /// 保活：把「最后活动」推到此刻。
+    ///
+    /// ⚠️ **不碰内核、不入队**：它只影响 TTL 判据，不该被正在跑的作业
+    ///    卡住，也不该为了让 sweeper 别删就去排队执行一条假命令。
+    pub fn touch(&self) {
+        if let Ok(mut instant) = self.last_active.lock() {
+            *instant = Instant::now();
+        }
+    }
+
     /// 距上次活动多久。
     pub fn idle_for(&self) -> Duration {
         self.last_active
@@ -873,14 +1094,20 @@ impl SessionHandle {
 
     /// 读 console（R-06）。
     pub fn console(&self, offset: u64, limit: usize) -> Result<serde_json::Value, ApiError> {
-        self.submit(
+        let body = self.submit(
             |reply| Job::Console {
                 offset,
                 limit,
                 reply,
             },
             crate::error::console_failure,
-        )
+        )?;
+        // 窗口丢失是一条**正常回复**里的结构化信号（不是内核错误）：
+        // `base` 必须能被打包进 409 的 body，客户端据此重新对齐。
+        if let Some(base) = body.get("window_lost").and_then(|v| v.as_u64()) {
+            return Err(ApiError::console_window_lost(base, offset));
+        }
+        Ok(body)
     }
 
     /// trace 开关（P1）：`SetTraceEnabled`。
@@ -1365,6 +1592,17 @@ impl SessionRegistry {
         handle.console(offset, limit)
     }
 
+    /// 保活（`POST …/touch`）：只推 `last_active`，回剩余额度。
+    pub fn touch(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        let handle = self.handle_for(id)?;
+        handle.touch();
+        Ok(serde_json::json!({
+            "ok": true,
+            "idle_ms": handle.idle_for().as_millis() as u64,
+            "ttl_s": self.ttl.as_secs(),
+        }))
+    }
+
     /// trace 开关（P1）。
     pub fn set_trace(&self, id: &str, enabled: bool) -> Result<serde_json::Value, ApiError> {
         let handle = self.handle_for(id)?;
@@ -1506,7 +1744,10 @@ impl SessionRegistry {
             let mut expired: Vec<Arc<SessionHandle>> = Vec::new();
             let mut reap: Vec<String> = Vec::new();
             for (id, handle) in inner.sessions.iter() {
-                if !handle.is_alive() || handle.idle_for() >= self.ttl {
+                // ⚠️ **在跑的会话不回收**：长跑作业（background run / 大段 advance）
+                //    期间 `last_active` 不会刷新（它只在作业结束后更新）⇒ ⇒ 只按
+                //    idle 判会把正在干活的会话连同作业一起删掉。
+                if !handle.is_alive() || (!handle.is_busy() && handle.idle_for() >= self.ttl) {
                     reap.push(id.clone());
                 }
             }
@@ -1693,6 +1934,8 @@ fn execute_run(
     };
 
     let executed = host.total_executed().saturating_sub(before);
+    // 环/盘一起裁过 ⇒ ⇒ 本轮增量里最早的那段已经读不到，必须如实报 `lost`。
+    let console_lost = console.window_base().saturating_sub(run_base);
     let mut body = serde_json::json!({
         "stop_reason": stop,
         "executed": executed,
@@ -1703,6 +1946,7 @@ fn execute_run(
             "base": run_base,
             "bytes": console.total.saturating_sub(run_base),
             "total": console.total,
+            "lost": console_lost,
         },
         // ---- D-1：预算用尽要**明说** ----
         //
@@ -2033,6 +2277,7 @@ fn spawn_worker(
             // `KernelHost` 是 `!Send` ⇒ ⇒ 只能在这里 `new()`，不能从外面搬进来。
             let mut host = KernelHost::new();
             let mut console = ConsoleRing::new(max_console);
+            console.attach_log(ConsoleLog::open_from_env(&id, max_console));
             let mut events_ring = EventRing::new(EVENT_RING_CAP, &id);
             // 本会话**最后一次成功装载**的镜像（复位 R-14 的原料）。
             let mut last_image: Option<(String, ImageKind, Vec<u8>)> = None;
@@ -2100,17 +2345,17 @@ fn spawn_worker(
                             let _ = reply.send(match console.read(offset, limit) {
                                 Ok(bytes) => Ok(serde_json::json!({
                                     "offset": offset,
-                                    "base": console.base,
+                                    "base": console.window_base(),
                                     "total": console.total,
                                     "bytes": bytes,
                                 })),
-                                Err(base) => Err(KernelFailure {
-                                    code: "E_SESS-04".to_string(),
-                                    message: format!(
-                                        "console window lost: the ring starts at offset {base}; \
-                                         re-read from there (requested offset {offset})"
-                                    ),
-                                }),
+                                // ⚠️ 这里回**成功体**里的 `window_lost`：`base` 要走
+                                //    结构化字段，不能只塞进 detail 文本（客户端要拿它
+                                //    重新对齐，不该去正则抠数字）。
+                                Err(base) => Ok(serde_json::json!({
+                                    "window_lost": base,
+                                    "offset": offset,
+                                })),
                             });
                         }
                         Job::RunAsync { spec, slot } => {
@@ -2319,7 +2564,7 @@ fn spawn_worker(
                                     let _ = reply.send(result.map(|mut loaded| {
                                         loaded["restored"] = serde_json::json!(true);
                                         loaded["console"] = serde_json::json!({
-                                            "base": console.base,
+                                            "base": console.window_base(),
                                             "total": console.total,
                                         });
                                         loaded
@@ -2651,6 +2896,48 @@ mod tests {
         ring.push(b"0123456789");
         assert_eq!(ring.read(3, 2).expect("窗口内"), b"34");
         assert_eq!(ring.read(9, 99).expect("窗口内"), b"9");
+    }
+
+    /// 落盘 + 环：**并集**才是可读窗口 —— 环外老段从盘上读，offset 仍是绝对账。
+    #[test]
+    fn console_log_extends_the_window_beyond_the_ring() {
+        let dir = std::env::temp_dir().join(format!(
+            "sim-console-log-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let mut ring = ConsoleRing::new(4);
+        ring.attach_log(ConsoleLog::open(&dir, "t1", 8, 0).ok());
+        ring.push(b"0123456789");
+        assert_eq!(ring.total, 10);
+        assert_eq!(ring.base, 6, "环只留最近 4 个");
+        assert_eq!(ring.window_base(), 2, "盘上还留着 2..10 ⇒ 并集从 2 起");
+        assert_eq!(ring.read(2, 8).expect("盘上老段可读"), b"23456789");
+        assert_eq!(ring.read(0, 8).expect_err("更老的才丢"), 2);
+        assert_eq!(ring.read(9, 8).expect("窗口内"), b"9");
+        assert_eq!(ring.read(10, 8).expect("未产生不算丢"), b"");
+        // 清空也**不归零**：盘和环一起把窗口推到 total。
+        ring.clear();
+        assert_eq!(ring.window_base(), 10);
+        assert_eq!(ring.read(2, 8).expect_err("旧窗口全部作废"), 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 保活只推 `last_active`，不动会话状态、也不占命令队列。
+    #[test]
+    fn touch_resets_idle_without_queueing_a_job() {
+        let registry = SessionRegistry::new(4, Duration::from_secs(60), 1024);
+        let created = registry
+            .create_for(None, BoardSource::None, "ops")
+            .expect("create");
+        let handle = registry.handle_for(&created.id).expect("handle");
+        std::thread::sleep(Duration::from_millis(20));
+        let before = handle.idle_for();
+        assert!(before >= Duration::from_millis(20));
+        let touched = registry.touch(&created.id).expect("touch");
+        assert_eq!(touched["ok"], true);
+        assert!(handle.idle_for() < before, "touch 之后空闲时长必须回落");
+        registry.shutdown();
     }
 
     /// 停因词表：**宿主侧四种**停因必须与契约 `HaltReason` 分开拼写。

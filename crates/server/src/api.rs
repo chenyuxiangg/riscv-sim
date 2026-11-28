@@ -46,7 +46,7 @@ const TOKEN_HEADER: &str = "x-auth-token";
 /// 客户端会以为「服务端没给」。
 const CORS_ALLOW_HEADERS: &str = "content-type,x-auth-token,authorization";
 const CORS_ALLOW_METHODS: &str = "GET,POST,PUT,DELETE,OPTIONS";
-const CORS_EXPOSE_HEADERS: &str = "x-boot-stop,x-boot-executed,x-boot-console-total,x-boot-console-lost,x-boot-board-revision,x-boot-ram-window,x-console-offset,x-console-base,x-console-total,x-trace-next,x-trace-lost";
+const CORS_EXPOSE_HEADERS: &str = "x-boot-stop,x-boot-executed,x-boot-console-total,x-boot-console-lost,x-boot-board-revision,x-boot-ram-window,x-console-offset,x-console-base,x-console-total,x-console-next,x-console-lost,x-trace-next,x-trace-lost";
 const CORS_MAX_AGE_SECS: &str = "600";
 
 /// `run` 的 `prefix` 长度上限（字节）。
@@ -261,6 +261,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/snapshot", post(take_snapshot))
         .route("/api/sessions/{id}/restore", post(restore_snapshot))
         .route("/api/sessions/{id}/state", get(session_state))
+        .route("/api/sessions/{id}/touch", post(touch_session))
         .route("/api/sessions/{id}/memory", get(read_memory_range))
         .route("/api/sessions/{id}/symbols", get(list_symbols))
         .route("/api/sessions/{id}/disasm", get(disassemble))
@@ -1149,9 +1150,23 @@ async fn read_console(
         .header("x-console-offset", offset.to_string())
         .header("x-console-base", base.to_string())
         .header("x-console-total", total.to_string())
+        // 客户端续读用的三个数：`next` = 这次读到哪，`lost` = 落后窗口多少字节。
+        .header("x-console-next", (offset + bytes.len() as u64).to_string())
+        .header("x-console-lost", base.saturating_sub(offset).to_string())
         .body(Body::from(bytes))
         .map_err(|err| ApiError::bad_request(format!("cannot build console response: {err}")))?;
     Ok(response)
+}
+
+/// 保活（P1）：`POST …/touch` ⇒ `{ok, idle_ms, ttl_s}`。
+///
+/// ⚠️ 不是「假命令」：会话线程的 `last_active` 是**共享的可变时刻**，
+///    控制面直接推它即可，不需要往命令队列里塞一条空转作业。
+async fn touch_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(state.registry.touch(&id)?))
 }
 
 /// 读状态（R-07）：`{pc, registers[32], executed}`。

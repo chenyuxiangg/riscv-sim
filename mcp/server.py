@@ -43,6 +43,11 @@ ALLOW_REMOTE = os.environ.get("SIM_MCP_ALLOW_REMOTE", "0") == "1"
 HOST = os.environ.get("SIM_MCP_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SIM_MCP_PORT", "8877"))
 IDLE_SECS = int(os.environ.get("SIM_MCP_IDLE_SECS", "300"))
+# 保活的**硬上限**：连续只有 ping/keepalive、没有真实业务调用时，最多延长这么久。
+# 0 = 关闭。防「客户端忘了关、定时 ping 又把会话钉死」长期占配额。
+MAX_HOLD_SECS = int(os.environ.get("SIM_MCP_MAX_HOLD_SECS", "3600"))
+# 保活打到服务端 `/touch` 的最小间隔（太密没意义，只是给服务端添噪声）。
+KEEPALIVE_MIN_SECS = int(os.environ.get("SIM_MCP_KEEPALIVE_MIN_SECS", "60"))
 MAX_RUN_MS = int(os.environ.get("SIM_MCP_MAX_RUN_MS", "5000"))
 MAX_STEPS = int(os.environ.get("SIM_MCP_MAX_STEPS", "100000"))
 # 文件上传的字节上限（客户端推 ELF 走 HTTP，不是 MCP 参数 —— 一条 base64 参数
@@ -67,8 +72,13 @@ if HOST not in ("127.0.0.1", "localhost", "::1") and not ALLOW_REMOTE:
 
 
 class SimError(Exception):
-    def __init__(self, code: str, detail: str, status: int):
+    def __init__(self, code: str, detail: str, status: int,
+                 body: dict | None = None, headers: dict | None = None):
         self.code, self.detail, self.status = code, detail, status
+        # 409 `E_SESS-04` 要靠 body/header 里的 `base` 重新对齐 —— 只留 detail
+        # 的话客户端就得正则抠数字（那是错的）。
+        self.body = body or {}
+        self.headers = headers or {}
         super().__init__(f"{code}: {detail}")
 
 
@@ -104,7 +114,9 @@ def _http(method: str, path: str, *, body=None, raw=None, ctype=None, timeout=20
             return 504, payload, dict(err.headers)
         code = payload.get("code") if isinstance(payload, dict) else None
         detail = payload.get("detail") if isinstance(payload, dict) else None
-        raise SimError(code or f"E_HTTP-{err.code}", detail or str(payload), err.code)
+        raise SimError(code or f"E_HTTP-{err.code}", detail or str(payload), err.code,
+                       body=payload if isinstance(payload, dict) else None,
+                       headers=dict(err.headers))
     except urllib.error.URLError as err:
         raise SimError("E_MCP-01", f"仿真器不可达（{SIM_BASE}）：{err.reason}", 502)
 
@@ -205,7 +217,7 @@ class Ownership:
                         self._map.pop(client, None)
                     cur = None
                 else:
-                    cur["used"] = time.time()
+                    cur["used"] = cur["last_real"] = time.time()
                     return {"session_id": cur["sid"], "board": cur["board"], "reused": True}
             else:
                 with self._lock:
@@ -213,7 +225,8 @@ class Ownership:
         body = {"board": board} if board else {}
         status, created, _ = _http("POST", "/api/sessions", body=body)
         entry = {"sid": created["session_id"], "board": created.get("board"),
-                 "used": time.time(), "token": token}
+                 "used": time.time(), "last_real": time.time(),
+                 "last_touch": 0.0, "token": token}
         with self._lock:
             old = self._map.get(client)
             self._map[client] = entry
@@ -226,8 +239,49 @@ class Ownership:
             entry = self._map.get(client)
         if not entry:
             raise SimError("E_MCP-02", "这个客户端还没有会话：先调 boot", 409)
-        entry["used"] = time.time()
+        now = time.time()
+        entry["used"] = now
+        # 只有**真实业务调用**才推进硬上限的计时：ping/keepalive 只延空闲窗口，
+        # 不能把一个空转会话无限期钉住。
+        entry["last_real"] = now
         return entry["sid"]
+
+    def entry(self, client: str) -> dict:
+        with self._lock:
+            entry = self._map.get(client)
+        if not entry:
+            raise SimError("E_MCP-02", "这个客户端还没有会话：先调 boot", 409)
+        return entry
+
+    def keepalive(self, client: str, *, propagate: bool) -> dict | None:
+        """刷新空闲窗口；`propagate=True` 时按节流打到服务端 `/touch`。
+
+        ⚠️ 服务端还有一道 15 分钟 TTL：只刷本地时钟是**假保活**（MCP 不删，
+           服务端照删）。所以这里必须（节流地）触到服务端。
+        """
+        with self._lock:
+            entry = self._map.get(client)
+        if not entry:
+            return None
+        now = time.time()
+        entry["used"] = now  # 空闲窗口：本地永远刷
+        if not propagate:
+            return {"session_id": entry["sid"], "touched_server": False}
+        if now - entry.get("last_touch", 0.0) < KEEPALIVE_MIN_SECS:
+            return {"session_id": entry["sid"], "touched_server": False, "throttled": True}
+        entry["last_touch"] = now
+        try:
+            _, body, _ = _http("POST", f"/api/sessions/{entry['sid']}/touch",
+                               token=entry.get("token"), timeout=5)
+        except SimError as err:
+            if err.status == 404:
+                with self._lock:
+                    self._map.pop(client, None)
+                return {"session_id": None, "gone": True,
+                        "detail": "会话已被服务端回收（TTL 或容器重启），请重新 boot"}
+            raise
+        return {"session_id": entry["sid"], "touched_server": True,
+                "server": body}
 
     def _drop(self, entry: dict) -> None:
         try:
@@ -238,7 +292,12 @@ class Ownership:
     def sweep(self) -> None:
         now = time.time()
         with self._lock:
-            stale = [(k, v) for k, v in self._map.items() if now - v["used"] > IDLE_SECS]
+            stale = []
+            for key, entry in self._map.items():
+                idle = now - entry["used"] > IDLE_SECS
+                held = MAX_HOLD_SECS > 0 and now - entry.get("last_real", entry["used"]) > MAX_HOLD_SECS
+                if idle or held:
+                    stale.append((key, entry))
             for key, _ in stale:
                 self._map.pop(key, None)
         for _, entry in stale:
@@ -272,9 +331,34 @@ def t_boot(client: str, args: dict) -> dict:
     board = args.get("board") or None
     info = OWNER.boot(client, board, _current_token())
     verb = "复用" if info["reused"] else "新建"
+    info = dict(info)
+    info.update({"idle_ttl_s": IDLE_SECS, "max_hold_s": MAX_HOLD_SECS})
     return {
-        "text": f"{verb}会话 {info['session_id']}（板 {info['board']}）",
+        "text": (f"{verb}会话 {info['session_id']}（板 {info['board']}）；"
+                 f"空闲 {IDLE_SECS}s 回收，保活最多延长 {MAX_HOLD_SECS}s"),
         "data": info,
+    }
+
+
+def t_keepalive(client: str, args: dict) -> dict:
+    info = OWNER.keepalive(client, propagate=True)
+    if not info:
+        raise SimError("E_MCP-02", "这个客户端还没有会话：先调 boot", 409)
+    if info.get("gone"):
+        raise SimError("E_SESS-01", info.get("detail") or "会话已不在服务端，重新 boot", 404)
+    entry = OWNER.entry(client)
+    now = time.time()
+    data = dict(info)
+    data.update({
+        "idle_left_s": max(0, int(IDLE_SECS - (now - entry["used"]))),
+        "mcp_ttl_s": IDLE_SECS,
+        "max_hold_left_s": (max(0, int(MAX_HOLD_SECS - (now - entry.get("last_real", now))))
+                            if MAX_HOLD_SECS > 0 else None),
+    })
+    note = "（服务端 touch 被节流，本次只刷本地窗口）" if info.get("throttled") else ""
+    return {
+        "text": f"会话 {entry['sid']} 保活成功{note}；空闲额度 {data['idle_left_s']}s",
+        "data": data,
     }
 
 
@@ -350,9 +434,16 @@ def t_run(client: str, args: dict) -> dict:
     error = body.get("error_code")
     tail = (f"；内核报错 {error}（平台中止，不是 guest 停）"
             if error else "")
+    console = body.get("console") or {}
+    console_note = ""
+    if console:
+        console_note = (f"；本轮 console +{console.get('bytes', 0)}B"
+                        f"（{console.get('base', 0)}→{console.get('total', 0)}"
+                        + (f"，丢了 {console['lost']}B" if console.get("lost") else "")
+                        + "）")
     return {
         "text": (f"{note}执行 {body.get('executed')} 条 · pc={body.get('pc')} · "
-                 f"t_ps={body.get('t_ps')} · 停因 {body.get('stop_reason')}{tail}"),
+                 f"t_ps={body.get('t_ps')} · 停因 {body.get('stop_reason')}{tail}{console_note}"),
         "data": body,
     }
 
@@ -422,11 +513,53 @@ def t_inspect(client: str, args: dict) -> dict:
         }
     if kind == "console":
         offset = int(args.get("offset", 0))
-        limit = int(args.get("limit", 1024))
-        status, body, _ = _http("GET", f"/api/sessions/{sid}/console?offset={offset}&limit={limit}")
-        blob = body.get("bytes") or []
-        text = bytes(blob).decode("utf-8", "replace") if isinstance(blob, list) else str(blob)
-        return {"text": f"console[{body.get('base', offset)}+{len(blob)}] {text!r}", "data": body}
+        # 默认只回 4 KiB：64 KiB 原文进模型上下文等于把预算烧光。要更多就显式给。
+        limit = int(args.get("limit", 4096))
+        try:
+            _, body, headers = _http(
+                "GET", f"/api/sessions/{sid}/console?offset={offset}&limit={limit}")
+        except SimError as err:
+            if err.code != "E_SESS-04":
+                raise
+            # 窗口已丢：把 `base` 交给调用方重新对齐（它不是错误，是「你落后了」）。
+            base = err.body.get("base")
+            if base is None:
+                try:
+                    base = int(err.headers.get("x-console-base", 0))
+                except ValueError:
+                    base = 0
+            total = err.headers.get("x-console-total")
+            return {
+                "text": (f"console 窗口已丢：可读窗口从 offset {base} 起"
+                         f"（你请求 {offset}）；从 {base} 重读即可"),
+                "data": {"offset": offset, "base": base,
+                         "total": int(total) if total else None, "window_lost": True},
+            }
+        # ⚠️ 服务端回的是**裸字节**（`application/octet-stream`），方位信息在
+        #    `x-console-*` 头里 —— 不是 JSON 的 `bytes` 数组。按 JSON 读会把
+        #    长度读成 0、base/total 全丢（v0.1.18 之前的实际故障）。
+        text = body.get("raw") if isinstance(body, dict) else None
+        if text is None:
+            text = body.decode() if isinstance(body, bytes) else str(body)
+        raw_bytes = len(text.encode("utf-8")) if isinstance(text, str) else 0
+        base = int(headers.get("x-console-base", 0))
+        total = int(headers.get("x-console-total", 0))
+
+        def hdr_u64(name: str, fallback: int) -> int:
+            try:
+                return int(headers.get(name, fallback))
+            except (TypeError, ValueError):
+                return fallback
+
+        next_off = hdr_u64("x-console-next", offset + raw_bytes)
+        lost = hdr_u64("x-console-lost", max(0, base - offset))
+        truncated = next_off < total
+        return {
+            "text": f"console[{offset}..{next_off} / base={base} total={total}] {text!r}"
+                    + ("（还有更多，带 next 续读）" if truncated else ""),
+            "data": {"offset": offset, "base": base, "total": total, "next": next_off,
+                     "lost": lost, "bytes": raw_bytes, "truncated": truncated, "text": text},
+        }
     if kind == "memory":
         addr = args.get("addr")
         if addr is None:
@@ -582,8 +715,9 @@ TOOLS = [
     {
         "name": "boot",
         "description": ("建立/复用本客户端自己的仿真会话（幂等）。返回 session_id 与板名。"
-                        "每个客户端最多 1 个会话；空闲回收：MCP 侧 5 分钟 sweeper、"
-                        "服务端 15 分钟 TTL。跑完想立刻还配额就调 close_session。"),
+                        f"每个客户端最多 1 个会话；空闲回收：MCP 侧 {IDLE_SECS}s sweeper、"
+                        "服务端 15 分钟 TTL；长思考期用 keepalive（或客户端 ping）续窗口。"
+                        "跑完想立刻还配额就调 close_session。"),
         "inputSchema": {
             "type": "object",
             "properties": {"board": {"type": "string",
@@ -666,8 +800,10 @@ TOOLS = [
     },
     {
         "name": "inspect",
-        "description": ("读状态：kind=state（pc/t_ps/32 个寄存器）、console（offset/limit）、"
-                        "memory（addr/len/format=u32|asc）。读操作合并成一个工具，省上下文。"),
+        "description": ("读状态：kind=state（pc/t_ps/32 个寄存器）、console（绝对 offset + limit，"
+                        "默认 4096 字节；回 base/total/next/lost，按 next 续读）、"
+                        "memory（addr/len/format=u32|asc）。读 console 不会消费内容；"
+                        "窗口丢了会告诉你从哪个 offset 重新对齐。"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -720,6 +856,15 @@ TOOLS = [
         "fn": t_events,
     },
     {
+        "name": "keepalive",
+        "description": ("给本客户端的会话续上空闲窗口（无参）。MCP 侧 5 分钟 sweeper 与"
+                        "服务端 15 分钟 TTL 都会因为一次 keepalive 重置；服务端 touch 有"
+                        "60 秒节流。长思考/人机来回期间用；连续只保活不干活最多延长"
+                        f"{MAX_HOLD_SECS} 秒后被回收（防占配额）。收尾仍用 close_session。"),
+        "inputSchema": {"type": "object", "properties": {}},
+        "fn": t_keepalive,
+    },
+    {
         "name": "close_session",
         "description": ("主动释放本客户端自己的会话（幂等）。跑完/交付完就还配额，"
                         "不必等空闲回收（MCP 侧 5 分钟 sweeper、服务端 15 分钟 TTL）。"
@@ -769,14 +914,21 @@ def handle_rpc(msg: dict, client: str) -> dict | None:
         return _rpc_result(msg_id, {
             "protocolVersion": PROTOCOL if asked != PROTOCOL else asked,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "sim-mcp", "version": "0.1.6"},
+            "serverInfo": {"name": "sim-mcp", "version": "0.1.7"},
             "instructions": ("先 boot，再 load_image(hex=原始字节的十六进制)，然后 advance(n)。"
                              "读状态用 inspect(kind=state)。长任务用 run(background=true)+poll_job。"
-                             "任务收尾务必调 close_session 释放会话（单账号配额 2 条，别等空闲回收）。"),
+                             "任务收尾务必调 close_session 释放会话（单账号配额 2 条，别等空闲回收）；"
+                             "长思考期间可调 keepalive（或让客户端 ping）续上空闲窗口。"),
         })
     if method in ("notifications/initialized", "notifications/cancelled"):
         return None
     if method == "ping":
+        # 协议层最廉价的心跳：客户端会发 ping ⇒ 顺手把会话的空闲窗口续上。
+        # 副作用只在这一处，且**不改变返回形状**（仍是空结果，不碰规范）。
+        try:
+            OWNER.keepalive(client, propagate=True)
+        except Exception:  # noqa: BLE001 - 心跳失败不该让 ping 变成错误
+            pass
         return _rpc_result(msg_id, {})
     if method == "tools/list":
         return _rpc_result(msg_id, {"tools": [
@@ -856,7 +1008,7 @@ def _resolve_client(token: str) -> tuple[bool, str]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "sim-mcp/0.1.4"
+    server_version = "sim-mcp/0.1.7"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:  # 默认 access log 太吵，审计另有
@@ -897,6 +1049,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200 if upstream_ok else 503, {
                 "ok": upstream_ok, "tools": len(TOOLS), "base": SIM_BASE,
                 "destructive": ALLOW_DESTRUCTIVE,
+                "idle_ttl_s": IDLE_SECS, "max_hold_s": MAX_HOLD_SECS,
                 **({} if upstream_ok else {"upstream_error": detail}),
             })
             return
