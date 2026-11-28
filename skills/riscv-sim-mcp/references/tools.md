@@ -111,11 +111,19 @@ content-type: application/octet-stream
   console 帧只留字节数与 120 字文本。要全量寄存器就 `inspect`
 - `seq` 单调，所以增量拉取不需要长连 WS（隧道会断，正好用这个）
 
+## close_session（始终注册）
+
+- 无参；`DELETE /api/sessions/{id}` 删本客户端映射的那一条，随即清掉客户端映射
+- 返回：`{session_id, closed, status}`；服务端已经 404（TTL 回收过）仍按幂等成功回
+- 没有映射（还没 boot / MCP 进程重启丢了内存态）⇒ `{session_id:null, closed:false}`，不删任何东西
+- 用途：**跑完/交付完立刻还配额**，别等 MCP 侧 5 分钟 sweeper 或服务端 15 分钟 TTL
+- ⚠️ 只动自己的会话：浏览器页面、别的令牌开的会话（同账号共用配额池）都不碰
+
 ## reset / drop_session（默认不注册）
 
 - 只有服务端 `SIM_MCP_ALLOW_DESTRUCTIVE=1` 才出现在 `tools/list`
 - `reset`：复位到最近一次成功装载点（丢当前进度）
-- `drop_session`：删自己那条会话，不影响别人
+- `drop_session`：`close_session` 的破坏性别名（行为相同，保留兼容）
 
 ## 错误码对照
 
